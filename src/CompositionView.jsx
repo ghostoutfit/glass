@@ -193,7 +193,7 @@ function LegendDot({ cx, cy, r, fill, label }) {
   )
 }
 
-export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, attractK = 0, tempC = 20, simSpeed = 1, coolingMode = null, onTempUpdate = null }) {
+export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, attractK = 0, debug = false, tempC = 20, simSpeed = 1, coolingMode = null, onTempUpdate = null }) {
   const types = useMemo(
     () => buildGrid(sio2Pct, na2oPct, caoPct),
     [sio2Pct, na2oPct, caoPct]
@@ -227,9 +227,11 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
   const crystParamsRef      = useRef(getCrystParams(sio2Pct, na2oPct, caoPct))
   const onTempUpdateRef     = useRef(onTempUpdate)
   const attractKRef         = useRef(attractK)
+  const debugRef            = useRef(debug)
 
   useEffect(() => { onTempUpdateRef.current = onTempUpdate }, [onTempUpdate])
   useEffect(() => { attractKRef.current = attractK }, [attractK])
+  useEffect(() => { debugRef.current = debug }, [debug])
 
   // Keep the physics module's Si-O r0 in sync with the slider
   useEffect(() => { setSiOr0(sioR0) }, [sioR0])
@@ -320,7 +322,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
           }
         }
 
-        drawPhysics(canvasRef.current, phys, VW, VH, lerpT)
+        drawPhysics(canvasRef.current, phys, VW, VH, lerpT, debugRef.current)
       }
       rafRef.current = requestAnimationFrame(frame)
     }

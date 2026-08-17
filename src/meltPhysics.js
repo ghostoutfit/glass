@@ -568,7 +568,7 @@ function fillLens(ctx, ax, ay, bx, by, bondRound) {
 
 const ATOM_COLOR = { Si: '#d4a020', O: '#cc3a3a', Ca: '#4a96be', Na: '#4aaa60' }
 
-export function drawPhysics(canvas, phys, svgW, svgH, lerpT = 1) {
+export function drawPhysics(canvas, phys, svgW, svgH, lerpT = 1, debug = false) {
   if (!canvas || !phys) return
   const dpr = window.devicePixelRatio || 1
   const W   = canvas.clientWidth
@@ -641,5 +641,98 @@ export function drawPhysics(canvas, phys, svgW, svgH, lerpT = 1) {
     ctx.beginPath(); ctx.arc(rx, ry, p.r, 0, Math.PI * 2); ctx.fill()
   }
   ctx.globalAlpha = 1
+
+  // ── Debug overlay ─────────────────────────────────────────────────────────
+  if (debug) {
+    const n = particles.length
+    // Bond counts per atom (opposite-charge bonds only, same as COORD_TARGET logic)
+    const bondCnt = new Int32Array(n)
+    // Si bond-angle map for hex spoke drawing
+    const siBondAngs = new Map()
+    for (const { i, j } of bonds) {
+      bondCnt[i]++; bondCnt[j]++
+      const ti = particles[i].typeId, tj = particles[j].typeId
+      let si, oi
+      if      (ti === 0 && tj === 1) { si = i; oi = j }
+      else if (ti === 1 && tj === 0) { si = j; oi = i }
+      else continue
+      if (!siBondAngs.has(si)) siBondAngs.set(si, [])
+      const sp = particles[si], op = particles[oi]
+      const sx = lerpT < 1 ? sp.px + (sp.x - sp.px) * lerpT : sp.x
+      const sy = lerpT < 1 ? sp.py + (sp.y - sp.py) * lerpT : sp.y
+      const ox = lerpT < 1 ? op.px + (op.x - op.px) * lerpT : op.x
+      const oy = lerpT < 1 ? op.py + (op.y - op.py) * lerpT : op.y
+      siBondAngs.get(si).push(Math.atan2(oy - sy, ox - sx))
+    }
+
+    // Hex spokes on Si: green = occupied bond, red = open attract target
+    const PI2  = Math.PI * 2
+    const STEP = PI2 / 3
+    const TOL  = Math.PI / 3
+    const adiff = (a, b) => { let d = Math.abs(((a - b) % PI2 + PI2) % PI2); return d > Math.PI ? PI2 - d : d }
+    ctx.lineWidth = 0.8
+    for (const [si, angs] of siBondAngs) {
+      const sp = particles[si]
+      const rx = lerpT < 1 ? sp.px + (sp.x - sp.px) * lerpT : sp.x
+      const ry = lerpT < 1 ? sp.py + (sp.y - sp.py) * lerpT : sp.y
+      const base = angs[0]
+      for (let k = 0; k < 3; k++) {
+        const θ = base + k * STEP
+        const occupied = angs.some(ea => adiff(θ, ea) < TOL)
+        ctx.globalAlpha = occupied ? 0.85 : 0.45
+        ctx.strokeStyle  = occupied ? '#44ff88' : '#ff5533'
+        ctx.beginPath(); ctx.moveTo(rx, ry)
+        ctx.lineTo(rx + 11 * Math.cos(θ), ry + 11 * Math.sin(θ))
+        ctx.stroke()
+      }
+    }
+
+    // Bond-count label on every atom (outlined for readability on any background)
+    ctx.textAlign    = 'center'
+    ctx.textBaseline = 'middle'
+    ctx.font         = '6px monospace'
+    for (let i = 0; i < n; i++) {
+      const p  = particles[i]
+      const rx = lerpT < 1 ? p.px + (p.x - p.px) * lerpT : p.x
+      const ry = lerpT < 1 ? p.py + (p.y - p.py) * lerpT : p.y
+      const cnt = bondCnt[i]
+      const tgt = COORD_TARGET[p.typeId] ?? 2
+      const col = cnt >= tgt ? '#00ff66' : cnt > 0 ? '#ffcc00' : '#ff4444'
+      ctx.lineWidth   = 2.5
+      ctx.strokeStyle = '#000'
+      ctx.globalAlpha = 0.9
+      ctx.strokeText(String(cnt), rx, ry)
+      ctx.fillStyle   = col
+      ctx.globalAlpha = 1
+      ctx.fillText(String(cnt), rx, ry)
+    }
+
+    // Per-species saturation summary (top-left corner, in sim coords)
+    const sat = [0, 0, 0, 0], tot = [0, 0, 0, 0]
+    for (let i = 0; i < n; i++) {
+      const t = particles[i].typeId; tot[t]++
+      if (bondCnt[i] >= COORD_TARGET[t]) sat[t]++
+    }
+    const names = ['Si', 'O ', 'Na', 'Ca']
+    ctx.font         = '8px monospace'
+    ctx.textAlign    = 'left'
+    ctx.textBaseline = 'top'
+    let row = 0
+    for (let t = 0; t < 4; t++) {
+      if (tot[t] === 0) continue
+      const pct  = Math.round(100 * sat[t] / tot[t])
+      const bar  = Math.round(pct / 10)
+      const text = `${names[t]}: ${String(sat[t]).padStart(3)} / ${tot[t]} (${String(pct).padStart(3)}%) ${'█'.repeat(bar)}${'░'.repeat(10 - bar)}`
+      ctx.globalAlpha = 0.82
+      ctx.fillStyle   = '#000'
+      ctx.fillRect(2, 2 + row * 11, 196, 11)
+      ctx.globalAlpha = 1
+      ctx.fillStyle   = row === 0 ? '#d4a020' : row === 1 ? '#cc3a3a' : row === 2 ? '#4aaa60' : '#4a96be'
+      ctx.fillText(text, 3, 3 + row * 11)
+      row++
+    }
+    ctx.globalAlpha = 1
+  }
+
   ctx.setTransform(1, 0, 0, 1, 0, 0)
 }

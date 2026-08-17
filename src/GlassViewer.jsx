@@ -130,7 +130,7 @@ export default function GlassViewer() {
           ? <CompositionView
               key="melt"
               sio2Pct={p.sio2} na2oPct={p.na2o} caoPct={p.cao}
-              sioR0={sioR0} attractK={attractK}
+              sioR0={sioR0} attractK={attractK} debug={showDev}
               tempC={tempC} simSpeed={simSpeed} coolingMode={coolingMode}
               onTempUpdate={handleTempUpdate}
             />
