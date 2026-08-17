@@ -856,8 +856,9 @@ export function drawPhysics(canvas, phys, svgW, svgH, lerpT = 1, debug = false, 
         for (let k = 0; k < 3; k++) {
           const θ = base + k * STEP
           const occupied = angs.some(ea => adiff(θ, ea) < TOL)
-          ctx.globalAlpha = occupied ? 0.85 : 0.45
-          ctx.strokeStyle  = occupied ? '#44ff88' : '#ff5533'
+          if (!occupied) continue
+          ctx.globalAlpha = 0.85
+          ctx.strokeStyle = '#44ff88'
           ctx.beginPath(); ctx.moveTo(rx, ry)
           ctx.lineTo(rx + 11 * Math.cos(θ), ry + 11 * Math.sin(θ))
           ctx.stroke()
