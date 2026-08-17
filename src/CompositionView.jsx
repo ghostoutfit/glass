@@ -14,9 +14,7 @@ const CELL_H  = VH_GRID / ROWS  // 87.5
 const NA_A = 32   // Na-O bond: O at midpoints = 16px = r0_NaO
 const CA_A = 24   // Ca-O bond: O at midpoints = 12px = r0_CaO
 
-// Gap (px) inset from every chunk boundary before placing any atom.
-// Must exceed the largest attractive cutoff per side: Na-O = 16.32px → need > 8.16px.
-const GRAIN_MARGIN = 9
+const GRAIN_MARGIN = 2
 
 // Cooling durations in RAF frames (≈60 fps)
 const FAST_COOL_FRAMES = 270   // ~4.5 s wall-clock

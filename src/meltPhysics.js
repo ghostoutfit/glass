@@ -758,7 +758,17 @@ export function drawPhysics(canvas, phys, svgW, svgH, lerpT = 1, debug = false, 
   const offX  = (W * dpr - svgW * scale) / 2
   const offY  = (H * dpr - svgH * scale) / 2
 
+  // Clear full canvas first (covers letterbox areas)
+  ctx.save()
+  ctx.setTransform(1, 0, 0, 1, 0, 0)
+  ctx.fillStyle = '#1a1a1a'
+  ctx.fillRect(0, 0, cw, ch)
+  ctx.restore()
+
   ctx.setTransform(scale, 0, 0, scale, offX, offY)
+  ctx.beginPath()
+  ctx.rect(0, 0, SIM_W, SIM_H)
+  ctx.clip()
   ctx.fillStyle = '#1a1a1a'
   ctx.fillRect(0, 0, SIM_W, SIM_H)
 
