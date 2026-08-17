@@ -299,7 +299,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
           const steps = Math.floor(speed)
           for (let s = 0; s < steps; s++) {
             for (const p of phys.particles) { p.px = p.x; p.py = p.y }
-            stepPhysics(phys, T, 1.0, attractKRef.current)
+            stepPhysics(phys, T, 1.0, attractKRef.current, cm)
           }
           frameAccRef.current = 0
         } else {
@@ -307,7 +307,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
           if (frameAccRef.current >= 1) {
             frameAccRef.current -= 1
             for (const p of phys.particles) { p.px = p.x; p.py = p.y }
-            stepPhysics(phys, T, 1.0, attractKRef.current)
+            stepPhysics(phys, T, 1.0, attractKRef.current, cm)
           }
           lerpT = frameAccRef.current
         }

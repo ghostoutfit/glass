@@ -133,15 +133,23 @@ export function initPhysics(cellData) {
   }
 }
 
-// Gentle long-range attraction between opposite-charge pairs beyond the bond cutoff.
-// At d just outside r0*mult: F = attractK.  Falls off as 1/r so particles feel
-// a steady drift toward potential partners without overwhelming bond springs.
-const ATTRACT_RANGE = 40   // px — beyond bond cutoff up to this distance
+// Gentle long-range attraction between unsatisfied opposite-charge pairs, active
+// only during cooling.  Bond-count-aware: stops pulling once an atom reaches its
+// coordination target so the network forms naturally without over-bonding.
+//   Si  → 3 O  (triangular network former in 2-D)
+//   O   → 2 cations  (bridging O bonds 2 Si; non-bridging bonds 1 Si + 1 modifier)
+//   Na  → 1 O  (monovalent modifier — each Na⁺ breaks one bridge, takes 1 NBO)
+//   Ca  → 2 O  (divalent modifier — each Ca²⁺ claims 2 NBOs)
+// Slow/fast outcome difference comes from crystallize() nudge (slow only), not from
+// the attract itself — amorphous = random collision angles, crystalline = nudged 120°.
+const ATTRACT_RANGE  = 40
+const COORD_TARGET   = [3, 2, 1, 2]   // Si, O, Na, Ca (typeId order)
 
 // ── Step ──────────────────────────────────────────────────────────────────────
-// coolingFactor: 1.0 = thermostat mode; 0.98 = fast cool; 0.998 = slow cool
-// attractK: subtle long-range pull strength (0 = off; ~0.001–0.01 typical)
-export function stepPhysics(phys, tempC, coolingFactor = 1.0, attractK = 0) {
+// coolingFactor: 1.0 = thermostat mode
+// attractK:     subtle pull strength, active only when coolingMode !== null
+// coolingMode:  null | 'fast' | 'slow'
+export function stepPhysics(phys, tempC, coolingFactor = 1.0, attractK = 0, coolingMode = null) {
   const { particles, n, fx, fy } = phys
   const vTarget = THERMAL_SPEED * Math.sqrt(Math.max(0, tempC))
 
@@ -149,6 +157,15 @@ export function stepPhysics(phys, tempC, coolingFactor = 1.0, attractK = 0) {
   const anchorStr = phys.hasBeenMelted
     ? 0
     : ANCHOR_K * Math.max(0, 1 - tempC / ANCHOR_FADE_TEMP)
+
+  // Per-atom opposite-charge bond counts — built from last frame's snapshot so the
+  // attract pass knows which atoms are still unsatisfied.  Allocated once, reused
+  // across all substeps (bonds don't change within a frame).
+  const doAttract = attractK > 0 && coolingMode !== null
+  const bondCount = doAttract ? new Int32Array(n) : null
+  if (bondCount) {
+    for (const { i, j } of phys.bonds) { bondCount[i]++; bondCount[j]++ }
+  }
 
   for (let sub = 0; sub < SUBSTEPS; sub++) {
     fx.fill(0); fy.fill(0)
@@ -188,13 +205,18 @@ export function stepPhysics(phys, tempC, coolingFactor = 1.0, attractK = 0) {
       }
     }
 
-    // ── Subtle long-range attraction (beyond bond cutoff) ───────────────
-    // Helps opposite-charge pairs find each other during cooling so bonds can
-    // form through natural collisions rather than requiring close proximity.
-    if (attractK > 0) {
+    // ── Cooling attraction: bond-count-aware long-range pull ────────────
+    // Only active when coolingMode !== null (cooling button pressed).
+    // Skips any atom that has already reached its coordination target so
+    // the network self-limits: Si stops at 3 bonds, O at 2, Na at 1, Ca at 2.
+    // Amorphous vs crystalline distinction comes from crystallize() (slow only),
+    // not from this force — random collision angles → glass, nudged angles → crystal.
+    if (bondCount) {
       for (let i = 0; i < n; i++) {
+        if (bondCount[i] >= COORD_TARGET[particles[i].typeId]) continue
         const pi = particles[i]
         for (let j = i + 1; j < n; j++) {
+          if (bondCount[j] >= COORD_TARGET[particles[j].typeId]) continue
           const pj   = particles[j]
           const spec = PAIR_TABLE[pi.typeId][pj.typeId]
           if (!spec) continue
@@ -205,10 +227,10 @@ export function stepPhysics(phys, tempC, coolingFactor = 1.0, attractK = 0) {
           const d2 = dx * dx + dy * dy
           if (d2 >= ATTRACT_RANGE * ATTRACT_RANGE) continue
           const bondCutSq = (spec.r0 * spec.mult) ** 2
-          if (d2 <= bondCutSq) continue  // bond spring already handles this range
+          if (d2 <= bondCutSq) continue   // inside bond range: spring already handles it
           const d  = Math.sqrt(d2)
           const nx = dx / d, ny = dy / d
-          // 1/r falloff so the pull is strongest just outside the bond window
+          // 1/r falloff — pull strongest just outside bond cutoff, fades at range
           const f  = attractK * spec.r0 / d
           fx[i] += f * nx;  fy[i] += f * ny
           fx[j] -= f * nx;  fy[j] -= f * ny
