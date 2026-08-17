@@ -819,38 +819,10 @@ export function drawPhysics(canvas, phys, svgW, svgH, lerpT = 1, debug = false, 
   ctx.globalAlpha = 1
 
   // ── Debug overlay ─────────────────────────────────────────────────────────
-  if (debug || bondNums) {
+  if (bondNums) {
     const n = particles.length
     const bondCnt = new Int32Array(n)
     for (const { i, j } of bonds) { bondCnt[i]++; bondCnt[j]++ }
-
-    if (debug) {
-      // Per-species saturation summary (top-left corner, in sim coords)
-      const sat = [0, 0, 0, 0], tot = [0, 0, 0, 0]
-      for (let i = 0; i < n; i++) {
-        const t = particles[i].typeId; tot[t]++
-        if (bondCnt[i] >= COORD_TARGET[t]) sat[t]++
-      }
-      const names = ['Si', 'O ', 'Na', 'Ca']
-      ctx.font         = '8px monospace'
-      ctx.textAlign    = 'left'
-      ctx.textBaseline = 'top'
-      let row = 0
-      for (let t = 0; t < 4; t++) {
-        if (tot[t] === 0) continue
-        const pct  = Math.round(100 * sat[t] / tot[t])
-        const bar  = Math.round(pct / 10)
-        const text = `${names[t]}: ${String(sat[t]).padStart(3)} / ${tot[t]} (${String(pct).padStart(3)}%) ${'█'.repeat(bar)}${'░'.repeat(10 - bar)}`
-        ctx.globalAlpha = 0.82
-        ctx.fillStyle   = '#000'
-        ctx.fillRect(2, 2 + row * 11, 196, 11)
-        ctx.globalAlpha = 1
-        ctx.fillStyle   = row === 0 ? '#d4a020' : row === 1 ? '#cc3a3a' : row === 2 ? '#4aaa60' : '#4a96be'
-        ctx.fillText(text, 3, 3 + row * 11)
-        row++
-      }
-      ctx.globalAlpha = 1
-    }
 
     if (bondNums) {
       // Bond-count label on every atom (outlined for readability on any background)
