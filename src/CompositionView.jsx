@@ -18,8 +18,8 @@ const CA_A = 24   // Ca-O bond: O at midpoints = 12px = r0_CaO
 const GRAIN_MARGIN = 9
 
 // Cooling durations in RAF frames (≈60 fps)
-const FAST_COOL_FRAMES = 90    // ~1.5 s wall-clock
-const SLOW_COOL_FRAMES = 360   // ~6 s wall-clock
+const FAST_COOL_FRAMES = 270   // ~4.5 s wall-clock
+const SLOW_COOL_FRAMES = 1080  // ~18 s wall-clock
 const CRYST_INTERVAL   = 10    // frames between crystallization checks during slow cool
 
 // Composition-dependent crystallization parameters.

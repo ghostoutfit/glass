@@ -56,6 +56,31 @@ const ANCHOR_K         = 0.06
 const ANCHOR_FADE_TEMP = 800   // anchor → 0 at this °C
 const ANCHOR_MELT_TEMP = 600   // once T exceeds this, anchor disabled forever
 
+// ── Hex-directed attraction helper ───────────────────────────────────────────
+// Returns the ideal 120°-spaced bond slot for the next O on a Si atom.
+// existingAngles: angles of Si's current O bonds.
+// candidateAngle: current direction from Si to the O being considered.
+// Strategy: anchor three canonical positions to the first existing bond, drop any
+// slot within 60° of an existing bond (each bond claims exactly one slot), return
+// the remaining free slot closest to candidateAngle.
+function idealHexAngle(existingAngles, candidateAngle) {
+  if (existingAngles.length === 0) return candidateAngle   // first bond: no preference
+  const PI2  = Math.PI * 2
+  const STEP = PI2 / 3            // 120° between slots
+  const TOL  = Math.PI / 3        // 60° — half the inter-slot gap; each bond claims one slot
+  const wrap = a => ((a % PI2) + PI2) % PI2
+  const diff = (a, b) => { let d = Math.abs(wrap(a) - wrap(b)); return d > Math.PI ? PI2 - d : d }
+
+  const base  = wrap(existingAngles[0])
+  const slots = [base, wrap(base + STEP), wrap(base - STEP)]
+
+  const free = slots.filter(s => existingAngles.every(ea => diff(s, ea) > TOL))
+  if (free.length === 0) return candidateAngle   // Si already satisfied
+  return free.reduce((best, s) =>
+    diff(s, candidateAngle) < diff(best, candidateAngle) ? s : best
+  )
+}
+
 // ── Init ─────────────────────────────────────────────────────────────────────
 export function initPhysics(cellData) {
   const particles = []
@@ -158,13 +183,29 @@ export function stepPhysics(phys, tempC, coolingFactor = 1.0, attractK = 0, cool
     ? 0
     : ANCHOR_K * Math.max(0, 1 - tempC / ANCHOR_FADE_TEMP)
 
-  // Per-atom opposite-charge bond counts — built from last frame's snapshot so the
-  // attract pass knows which atoms are still unsatisfied.  Allocated once, reused
-  // across all substeps (bonds don't change within a frame).
+  // Per-atom opposite-charge bond counts and (for slow cool) Si bond-angle maps.
+  // Both built from last frame's bond snapshot — one frame stale, acceptable.
   const doAttract = attractK > 0 && coolingMode !== null
   const bondCount = doAttract ? new Int32Array(n) : null
   if (bondCount) {
     for (const { i, j } of phys.bonds) { bondCount[i]++; bondCount[j]++ }
+  }
+
+  // For slow cool: map each Si → array of current O-bond angles so idealHexAngle()
+  // can direct incoming O toward the correct 120° slot rather than Si's center.
+  const siBondAngles = (doAttract && coolingMode === 'slow') ? new Map() : null
+  if (siBondAngles) {
+    for (const { i, j } of phys.bonds) {
+      const ti = particles[i].typeId, tj = particles[j].typeId
+      let si, oi
+      if      (ti === 0 && tj === 1) { si = i; oi = j }
+      else if (ti === 1 && tj === 0) { si = j; oi = i }
+      else continue
+      if (!siBondAngles.has(si)) siBondAngles.set(si, [])
+      siBondAngles.get(si).push(
+        Math.atan2(particles[oi].y - particles[si].y, particles[oi].x - particles[si].x)
+      )
+    }
   }
 
   for (let sub = 0; sub < SUBSTEPS; sub++) {
@@ -205,12 +246,15 @@ export function stepPhysics(phys, tempC, coolingFactor = 1.0, attractK = 0, cool
       }
     }
 
-    // ── Cooling attraction: bond-count-aware long-range pull ────────────
-    // Only active when coolingMode !== null (cooling button pressed).
-    // Skips any atom that has already reached its coordination target so
-    // the network self-limits: Si stops at 3 bonds, O at 2, Na at 1, Ca at 2.
-    // Amorphous vs crystalline distinction comes from crystallize() (slow only),
-    // not from this force — random collision angles → glass, nudged angles → crystal.
+    // ── Cooling attraction — mode-specific structure assembly ───────────
+    // Slow cool Si-O: directs O toward the ideal 120° hex slot on Si rather than
+    // Si's center, so the hexagonal network assembles by attraction rather than
+    // waiting for random collisions.  Modifier (Na, Ca) attraction is suppressed
+    // above 250°C so the Si-O network forms first; Na/Ca then claim the non-bridging
+    // O atoms (NBOs) that are left with one free bond after the Si network closes.
+    //
+    // Fast cool Si-O: isotropic — whatever angle O approaches from is where it bonds,
+    // producing random bond angles → mixed ring sizes → amorphous glass.
     if (bondCount) {
       for (let i = 0; i < n; i++) {
         if (bondCount[i] >= COORD_TARGET[particles[i].typeId]) continue
@@ -220,6 +264,11 @@ export function stepPhysics(phys, tempC, coolingFactor = 1.0, attractK = 0, cool
           const pj   = particles[j]
           const spec = PAIR_TABLE[pi.typeId][pj.typeId]
           if (!spec) continue
+
+          // Slow cool modifier gate: Na-O and Ca-O attraction only below 250°C
+          const isSiO = spec === PAIR_TABLE[0][1]
+          if (coolingMode === 'slow' && !isSiO && tempC > 250) continue
+
           const dx = pj.x - pi.x
           if (dx > ATTRACT_RANGE || dx < -ATTRACT_RANGE) continue
           const dy = pj.y - pi.y
@@ -228,12 +277,32 @@ export function stepPhysics(phys, tempC, coolingFactor = 1.0, attractK = 0, cool
           if (d2 >= ATTRACT_RANGE * ATTRACT_RANGE) continue
           const bondCutSq = (spec.r0 * spec.mult) ** 2
           if (d2 <= bondCutSq) continue   // inside bond range: spring already handles it
-          const d  = Math.sqrt(d2)
-          const nx = dx / d, ny = dy / d
-          // 1/r falloff — pull strongest just outside bond cutoff, fades at range
-          const f  = attractK * spec.r0 / d
-          fx[i] += f * nx;  fy[i] += f * ny
-          fx[j] -= f * nx;  fy[j] -= f * ny
+          const d = Math.sqrt(d2)
+          const f = attractK * spec.r0 / d
+
+          if (coolingMode === 'slow' && isSiO) {
+            // Hex-directed: aim O at the ideal 120° slot on Si, not at Si's center
+            const isSi_i = pi.typeId === 0
+            const siIdx  = isSi_i ? i : j
+            const oIdx   = isSi_i ? j : i
+            const si = particles[siIdx], o = particles[oIdx]
+            const θ  = idealHexAngle(
+              siBondAngles.get(siIdx) ?? [],
+              Math.atan2(o.y - si.y, o.x - si.x)
+            )
+            const tx = si.x + spec.r0 * Math.cos(θ) - o.x
+            const ty = si.y + spec.r0 * Math.sin(θ) - o.y
+            const tlen = Math.hypot(tx, ty)
+            if (tlen < 0.5) continue
+            const tnx = tx / tlen, tny = ty / tlen
+            fx[oIdx]  += f * tnx;  fy[oIdx]  += f * tny   // O toward ideal slot
+            fx[siIdx] -= f * tnx;  fy[siIdx] -= f * tny   // Si reacts
+          } else {
+            // Fast cool (all pairs) or slow cool modifier (below 250°C): isotropic
+            const nx = dx / d, ny = dy / d
+            fx[i] += f * nx;  fy[i] += f * ny
+            fx[j] -= f * nx;  fy[j] -= f * ny
+          }
         }
       }
     }
