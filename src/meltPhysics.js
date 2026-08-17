@@ -825,46 +825,6 @@ export function drawPhysics(canvas, phys, svgW, svgH, lerpT = 1, debug = false, 
     for (const { i, j } of bonds) { bondCnt[i]++; bondCnt[j]++ }
 
     if (debug) {
-      // Si bond-angle map for hex spoke drawing
-      const siBondAngs = new Map()
-      for (const { i, j } of bonds) {
-        const ti = particles[i].typeId, tj = particles[j].typeId
-        let si, oi
-        if      (ti === 0 && tj === 1) { si = i; oi = j }
-        else if (ti === 1 && tj === 0) { si = j; oi = i }
-        else continue
-        if (!siBondAngs.has(si)) siBondAngs.set(si, [])
-        const sp = particles[si], op = particles[oi]
-        const sx = lerpT < 1 ? sp.px + (sp.x - sp.px) * lerpT : sp.x
-        const sy = lerpT < 1 ? sp.py + (sp.y - sp.py) * lerpT : sp.y
-        const ox = lerpT < 1 ? op.px + (op.x - op.px) * lerpT : op.x
-        const oy = lerpT < 1 ? op.py + (op.y - op.py) * lerpT : op.y
-        siBondAngs.get(si).push(Math.atan2(oy - sy, ox - sx))
-      }
-
-      // Hex spokes on Si: green = occupied bond, red = open attract target
-      const PI2  = Math.PI * 2
-      const STEP = PI2 / 3
-      const TOL  = Math.PI / 3
-      const adiff = (a, b) => { let d = Math.abs(((a - b) % PI2 + PI2) % PI2); return d > Math.PI ? PI2 - d : d }
-      ctx.lineWidth = 0.8
-      for (const [si, angs] of siBondAngs) {
-        const sp = particles[si]
-        const rx = lerpT < 1 ? sp.px + (sp.x - sp.px) * lerpT : sp.x
-        const ry = lerpT < 1 ? sp.py + (sp.y - sp.py) * lerpT : sp.y
-        const base = angs[0]
-        for (let k = 0; k < 3; k++) {
-          const θ = base + k * STEP
-          const occupied = angs.some(ea => adiff(θ, ea) < TOL)
-          if (!occupied) continue
-          ctx.globalAlpha = 0.85
-          ctx.strokeStyle = '#44ff88'
-          ctx.beginPath(); ctx.moveTo(rx, ry)
-          ctx.lineTo(rx + 11 * Math.cos(θ), ry + 11 * Math.sin(θ))
-          ctx.stroke()
-        }
-      }
-
       // Per-species saturation summary (top-left corner, in sim coords)
       const sat = [0, 0, 0, 0], tot = [0, 0, 0, 0]
       for (let i = 0; i < n; i++) {
