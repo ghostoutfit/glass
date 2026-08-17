@@ -21,6 +21,8 @@ export default function GlassViewer() {
   const [narrowTemp, setNarrowTemp] = useState(false)
   const [coolingMode, setCoolingMode] = useState(null) // null | 'slow' | 'fast'
   const [displayTemp, setDisplayTemp] = useState(tempC)
+  const [precompute, setPrecompute] = useState(false)
+  const [bondNums, setBondNums]     = useState(false)
   const tempMax = narrowTemp ? 700 : 2000
   const p = PRESETS.find(x => x.id === presetId)
 
@@ -122,6 +124,16 @@ export default function GlassViewer() {
             onChange={e => setAttractK(Number(e.target.value))}
           />
           <span className="r0-val">{attractK === 0 ? 'off' : attractK.toFixed(4)}</span>
+          <div className="toolbar-divider" />
+          <label className="dev-toggle">
+            <input type="checkbox" checked={precompute} onChange={e => setPrecompute(e.target.checked)} />
+            Pre-Compute
+          </label>
+          <div className="toolbar-divider" />
+          <label className="dev-toggle">
+            <input type="checkbox" checked={bondNums} onChange={e => setBondNums(e.target.checked)} />
+            Bond #s
+          </label>
         </div>
       )}
 
@@ -131,6 +143,7 @@ export default function GlassViewer() {
               key="melt"
               sio2Pct={p.sio2} na2oPct={p.na2o} caoPct={p.cao}
               sioR0={sioR0} attractK={attractK} debug={showDev}
+              bondNums={bondNums} precompute={precompute}
               tempC={tempC} simSpeed={simSpeed} coolingMode={coolingMode}
               onTempUpdate={handleTempUpdate}
             />

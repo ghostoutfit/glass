@@ -1,5 +1,6 @@
 import { useMemo, useRef, useEffect } from 'react'
-import { initPhysics, stepPhysics, drawPhysics, crystallize, setSiOr0 } from './meltPhysics.js'
+import { initPhysics, stepPhysics, drawPhysics, crystallize, setSiOr0,
+         computeAmorphousTargets, computeSlowCoolTargets, initPrecompute, stepPrecompute } from './meltPhysics.js'
 
 const VW      = 600
 const VH_GRID = 350
@@ -193,7 +194,7 @@ function LegendDot({ cx, cy, r, fill, label }) {
   )
 }
 
-export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, attractK = 0, debug = false, tempC = 20, simSpeed = 1, coolingMode = null, onTempUpdate = null }) {
+export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, attractK = 0, debug = false, bondNums = false, precompute = false, tempC = 20, simSpeed = 1, coolingMode = null, onTempUpdate = null }) {
   const types = useMemo(
     () => buildGrid(sio2Pct, na2oPct, caoPct),
     [sio2Pct, na2oPct, caoPct]
@@ -228,10 +229,14 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
   const onTempUpdateRef     = useRef(onTempUpdate)
   const attractKRef         = useRef(attractK)
   const debugRef            = useRef(debug)
+  const bondNumsRef         = useRef(bondNums)
+  const precomputeRef       = useRef(precompute)
 
   useEffect(() => { onTempUpdateRef.current = onTempUpdate }, [onTempUpdate])
   useEffect(() => { attractKRef.current = attractK }, [attractK])
   useEffect(() => { debugRef.current = debug }, [debug])
+  useEffect(() => { bondNumsRef.current = bondNums }, [bondNums])
+  useEffect(() => { precomputeRef.current = precompute }, [precompute])
 
   // Keep the physics module's Si-O r0 in sync with the slider
   useEffect(() => { setSiOr0(sioR0) }, [sioR0])
@@ -268,6 +273,16 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
         if (cm === 'fast' || cm === 'slow') {
           coolingStartTempRef.current = effectiveTempRef.current
           coolingFrameRef.current     = 0
+          // Initialize precompute targets when cooling starts (if enabled)
+          if (precomputeRef.current && physRef.current) {
+            const targets = cm === 'slow'
+              ? computeSlowCoolTargets(physRef.current, sio2Pct)
+              : computeAmorphousTargets(physRef.current)
+            initPrecompute(physRef.current, targets)
+          }
+        } else {
+          // Cooling cancelled — discard precompute state
+          if (physRef.current) delete physRef.current.precompute
         }
         prevCoolingRef.current = cm
       }
@@ -293,36 +308,45 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
 
       const phys = physRef.current
       if (phys) {
-        const speed = speedRef.current
-        let lerpT   = 1
+        const usePrecompute = precomputeRef.current && !!phys.precompute && (cm === 'fast' || cm === 'slow')
 
-        // Physics step(s) — always use Berendsen thermostat (coolingFactor = 1.0)
-        if (speed >= 1) {
-          const steps = Math.floor(speed)
-          for (let s = 0; s < steps; s++) {
-            for (const p of phys.particles) { p.px = p.x; p.py = p.y }
-            stepPhysics(phys, T, 1.0, attractKRef.current, cm)
-          }
-          frameAccRef.current = 0
+        if (usePrecompute) {
+          const lerpRate    = cm === 'fast' ? 0.04 : 0.02
+          const wobbleScale = cm === 'fast' ? 0.3  : 0.6
+          stepPrecompute(phys, coolingFrameRef.current, lerpRate, wobbleScale)
+          drawPhysics(canvasRef.current, phys, VW, VH, 1, debugRef.current, bondNumsRef.current)
         } else {
-          frameAccRef.current += speed
-          if (frameAccRef.current >= 1) {
-            frameAccRef.current -= 1
-            for (const p of phys.particles) { p.px = p.x; p.py = p.y }
-            stepPhysics(phys, T, 1.0, attractKRef.current, cm)
-          }
-          lerpT = frameAccRef.current
-        }
+          const speed = speedRef.current
+          let lerpT   = 1
 
-        // ── Crystallization nudge (slow cool only) ────────────────
-        if (cm === 'slow') {
-          const cp = crystParamsRef.current
-          if (T < cp.threshold && coolingFrameRef.current % CRYST_INTERVAL === 0) {
-            crystallize(phys, cp.strength, cp.minCluster, cp.angleTol)
+          // Physics step(s) — always use Berendsen thermostat (coolingFactor = 1.0)
+          if (speed >= 1) {
+            const steps = Math.floor(speed)
+            for (let s = 0; s < steps; s++) {
+              for (const p of phys.particles) { p.px = p.x; p.py = p.y }
+              stepPhysics(phys, T, 1.0, attractKRef.current, cm)
+            }
+            frameAccRef.current = 0
+          } else {
+            frameAccRef.current += speed
+            if (frameAccRef.current >= 1) {
+              frameAccRef.current -= 1
+              for (const p of phys.particles) { p.px = p.x; p.py = p.y }
+              stepPhysics(phys, T, 1.0, attractKRef.current, cm)
+            }
+            lerpT = frameAccRef.current
           }
-        }
 
-        drawPhysics(canvasRef.current, phys, VW, VH, lerpT, debugRef.current)
+          // ── Crystallization nudge (slow cool only) ────────────────
+          if (cm === 'slow') {
+            const cp = crystParamsRef.current
+            if (T < cp.threshold && coolingFrameRef.current % CRYST_INTERVAL === 0) {
+              crystallize(phys, cp.strength, cp.minCluster, cp.angleTol)
+            }
+          }
+
+          drawPhysics(canvasRef.current, phys, VW, VH, lerpT, debugRef.current, bondNumsRef.current)
+        }
       }
       rafRef.current = requestAnimationFrame(frame)
     }

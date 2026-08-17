@@ -519,6 +519,182 @@ export function crystallize(phys, strength, minCluster, angleTol = 25) {
   }
 }
 
+// ── Pre-computed cooling targets ─────────────────────────────────────────────
+//
+// computeAmorphousTargets: damped physics relaxation (T=0, long-range attract ON)
+// on cloned positions.  Returns settled amorphous layout as target array.
+export function computeAmorphousTargets(phys) {
+  const { particles, n } = phys
+  const px = new Float32Array(n), py = new Float32Array(n)
+  const vx = new Float32Array(n), vy = new Float32Array(n)
+  const fx = new Float32Array(n), fy = new Float32Array(n)
+  for (let i = 0; i < n; i++) { px[i] = particles[i].x; py[i] = particles[i].y }
+
+  for (let step = 0; step < 80; step++) {
+    fx.fill(0); fy.fill(0)
+    for (let i = 0; i < n; i++) {
+      const ti = particles[i].typeId
+      for (let j = i + 1; j < n; j++) {
+        const dx = px[j] - px[i]; if (dx > ATTRACT_RANGE || dx < -ATTRACT_RANGE) continue
+        const dy = py[j] - py[i]; if (dy > ATTRACT_RANGE || dy < -ATTRACT_RANGE) continue
+        const d2 = dx*dx + dy*dy; if (d2 < 0.01 || d2 >= ATTRACT_RANGE*ATTRACT_RANGE) continue
+        const d = Math.sqrt(d2), nx = dx/d, ny = dy/d
+        const spec = PAIR_TABLE[ti][particles[j].typeId]
+        if (spec) {
+          const cut = spec.r0 * spec.mult
+          if (d < cut) {
+            if (!spec.oneSided || d > spec.r0) {
+              const f = spec.k * (d - spec.r0)
+              fx[i]+=f*nx; fy[i]+=f*ny; fx[j]-=f*nx; fy[j]-=f*ny
+            }
+          } else {
+            const f = 0.06 * spec.r0 / d   // long-range pull to bring pairs within bond range
+            fx[i]+=f*nx; fy[i]+=f*ny; fx[j]-=f*nx; fy[j]-=f*ny
+          }
+        } else {
+          const cut = (particles[i].r + particles[j].r) * REP_MULT
+          if (d < cut) { const f = -REP_K*(cut-d); fx[i]+=f*nx; fy[i]+=f*ny; fx[j]-=f*nx; fy[j]-=f*ny }
+        }
+      }
+    }
+    for (let i = 0; i < n; i++) {
+      vx[i] = vx[i]*0.4 + fx[i];  vy[i] = vy[i]*0.4 + fy[i]
+      px[i] = Math.max(particles[i].r+2, Math.min(SIM_W-particles[i].r-2, px[i]+vx[i]))
+      py[i] = Math.max(particles[i].r+2, Math.min(SIM_H-particles[i].r-2, py[i]+vy[i]))
+    }
+  }
+  return Array.from({length: n}, (_, i) => ({ x: px[i], y: py[i] }))
+}
+
+// computeSlowCoolTargets: hex crystal lattice stamped from center, particles
+// matched to nearest site by type.  crystalFrac (derived from SiO₂ content)
+// controls what fraction of each species goes to crystal vs amorphous positions.
+export function computeSlowCoolTargets(phys, sio2Pct, _na2oPct, _caoPct) {
+  const { particles, n } = phys
+  const targets = computeAmorphousTargets(phys)   // amorphous baseline for every particle
+
+  const crystalFrac = Math.max(0, Math.pow(Math.max(0, sio2Pct - 50) / 50, 1.5))
+  if (crystalFrac < 0.02) return targets
+
+  const R0  = PREFERRED['O-Si'].r0          // 9 px
+  const a   = R0 * 2                         // lattice constant = 18 px
+  const a1x = a * Math.sqrt(3)              // ≈ 31.2
+  const a2x = a * Math.sqrt(3) / 2          // ≈ 15.6
+  const a2y = a * 1.5                        // 27
+  const bDx = a * Math.sqrt(3) / 2, bDy = a * 0.5
+  const cx  = SIM_W / 2, cy = SIM_H / 2
+  const ni  = Math.ceil(SIM_W / a1x) + 1
+  const nj  = Math.ceil(SIM_H / a2y) + 1
+
+  // Generate all lattice sites
+  const siSites = [], naSites = []
+  for (let ii = -ni; ii <= ni; ii++) {
+    for (let jj = -nj; jj <= nj; jj++) {
+      for (const [ddx, ddy] of [[0,0],[bDx,bDy]]) {
+        const x = cx + ii*a1x + jj*a2x + ddx, y = cy + jj*a2y + ddy
+        if (x > 4 && x < SIM_W-4 && y > 4 && y < SIM_H-4) siSites.push({x,y})
+      }
+      // Ring centers for Na/Ca
+      const rx = cx + ii*a1x + jj*a2x + bDx, ry = cy + jj*a2y - bDy
+      if (rx > 4 && rx < SIM_W-4 && ry > 4 && ry < SIM_H-4) naSites.push({x:rx,y:ry})
+    }
+  }
+
+  const nnSq = (a * 1.05) ** 2
+  const oSites = []
+  for (let i = 0; i < siSites.length; i++) {
+    for (let j = i+1; j < siSites.length; j++) {
+      const dx = siSites[j].x-siSites[i].x, dy = siSites[j].y-siSites[i].y
+      if (dx*dx+dy*dy < nnSq) oSites.push({x:(siSites[i].x+siSites[j].x)/2, y:(siSites[i].y+siSites[j].y)/2})
+    }
+  }
+  // Ca sites: vertical inter-ring bond midpoints (nearly pure-y displacement)
+  const caSites = oSites.filter(o => {
+    for (const s of siSites) if (Math.abs(s.x-o.x)<2 && Math.abs(s.y-o.y-R0)<2) return true
+    return false
+  })
+
+  // Greedy nearest-site assignment per type, limited to crystalFrac of each species
+  const byType = [[],[],[],[]]
+  for (let i = 0; i < n; i++) byType[particles[i].typeId].push(i)
+
+  function assignNearest(pIdxs, sites, count) {
+    const sorted = [...pIdxs].sort((a,b) =>
+      Math.hypot(particles[a].x-cx, particles[a].y-cy) - Math.hypot(particles[b].x-cx, particles[b].y-cy)
+    )
+    const used = new Set(), result = new Map()
+    for (const pi of sorted.slice(0, count)) {
+      let best = -1, bestD = Infinity
+      for (let s = 0; s < sites.length; s++) {
+        if (used.has(s)) continue
+        const d = Math.hypot(sites[s].x-particles[pi].x, sites[s].y-particles[pi].y)
+        if (d < bestD) { bestD = d; best = s }
+      }
+      if (best >= 0) { used.add(best); result.set(pi, sites[best]) }
+    }
+    return result
+  }
+
+  const siMap = assignNearest(byType[0], siSites, Math.round(byType[0].length * crystalFrac))
+  const oMap  = assignNearest(byType[1], oSites,  Math.round(byType[1].length * crystalFrac))
+  const naMap = assignNearest(byType[2], naSites, Math.round(byType[2].length * crystalFrac))
+  const caMap = assignNearest(byType[3], caSites.length ? caSites : naSites, Math.round(byType[3].length * crystalFrac))
+
+  for (const [pi, site] of [...siMap, ...oMap, ...naMap, ...caMap]) {
+    targets[pi] = { x: site.x, y: site.y }
+  }
+  return targets
+}
+
+// Attach per-particle wobble state to phys and store targets.
+export function initPrecompute(phys, targets) {
+  const n = phys.n
+  phys.precompute = {
+    targets,
+    amp:   Float32Array.from({length: n}, () => 1.5 + Math.random() * 3.5),
+    phase: Float32Array.from({length: n}, () => Math.random() * Math.PI * 2),
+    freq:  Float32Array.from({length: n}, () => 0.12 + Math.random() * 0.22),
+  }
+}
+
+// Animate each particle toward its target.  lerpRate: fraction closed per frame.
+// wobbleScale: amplitude multiplier for lateral oscillation (decays per frame).
+export function stepPrecompute(phys, frame, lerpRate, wobbleScale) {
+  const { particles, n } = phys
+  const { targets, amp, phase, freq } = phys.precompute
+
+  for (let i = 0; i < n; i++) {
+    const p = particles[i], t = targets[i]
+    if (!t) continue
+    const dx = t.x - p.x, dy = t.y - p.y
+    const d = Math.hypot(dx, dy)
+    if (d < 0.08) { p.x = t.x; p.y = t.y; p.px = p.x; p.py = p.y; continue }
+    const nx = dx/d, ny = dy/d
+    const osc = amp[i] * wobbleScale * Math.sin(frame * freq[i] + phase[i])
+    amp[i] *= 0.987
+    p.x += lerpRate * dx + osc * (-ny)
+    p.y += lerpRate * dy + osc * nx
+    p.px = p.x; p.py = p.y
+  }
+
+  // Rebuild bonds for rendering
+  const bonds = []
+  for (let i = 0; i < n; i++) {
+    const pi = particles[i]
+    for (let j = i+1; j < n; j++) {
+      const pj = particles[j]
+      const spec = PAIR_TABLE[pi.typeId][pj.typeId]
+      if (!spec) continue
+      const dx = pj.x - pi.x
+      if (Math.abs(dx) > spec.r0 * spec.mult) continue
+      const d = Math.hypot(dx, pj.y - pi.y)
+      if (d > spec.r0 * spec.mult) continue
+      bonds.push({ i, j, strain: (d - spec.r0) / spec.r0, currentBreakStrain: 0.25 })
+    }
+  }
+  phys.bonds = bonds
+}
+
 // ── Canvas rendering ──────────────────────────────────────────────────────────
 
 const COLOR_STOPS = [
@@ -568,7 +744,7 @@ function fillLens(ctx, ax, ay, bx, by, bondRound) {
 
 const ATOM_COLOR = { Si: '#d4a020', O: '#cc3a3a', Ca: '#4a96be', Na: '#4aaa60' }
 
-export function drawPhysics(canvas, phys, svgW, svgH, lerpT = 1, debug = false) {
+export function drawPhysics(canvas, phys, svgW, svgH, lerpT = 1, debug = false, bondNums = false) {
   if (!canvas || !phys) return
   const dpr = window.devicePixelRatio || 1
   const W   = canvas.clientWidth
@@ -643,95 +819,99 @@ export function drawPhysics(canvas, phys, svgW, svgH, lerpT = 1, debug = false) 
   ctx.globalAlpha = 1
 
   // ── Debug overlay ─────────────────────────────────────────────────────────
-  if (debug) {
+  if (debug || bondNums) {
     const n = particles.length
-    // Bond counts per atom (opposite-charge bonds only, same as COORD_TARGET logic)
     const bondCnt = new Int32Array(n)
-    // Si bond-angle map for hex spoke drawing
-    const siBondAngs = new Map()
-    for (const { i, j } of bonds) {
-      bondCnt[i]++; bondCnt[j]++
-      const ti = particles[i].typeId, tj = particles[j].typeId
-      let si, oi
-      if      (ti === 0 && tj === 1) { si = i; oi = j }
-      else if (ti === 1 && tj === 0) { si = j; oi = i }
-      else continue
-      if (!siBondAngs.has(si)) siBondAngs.set(si, [])
-      const sp = particles[si], op = particles[oi]
-      const sx = lerpT < 1 ? sp.px + (sp.x - sp.px) * lerpT : sp.x
-      const sy = lerpT < 1 ? sp.py + (sp.y - sp.py) * lerpT : sp.y
-      const ox = lerpT < 1 ? op.px + (op.x - op.px) * lerpT : op.x
-      const oy = lerpT < 1 ? op.py + (op.y - op.py) * lerpT : op.y
-      siBondAngs.get(si).push(Math.atan2(oy - sy, ox - sx))
+    for (const { i, j } of bonds) { bondCnt[i]++; bondCnt[j]++ }
+
+    if (debug) {
+      // Si bond-angle map for hex spoke drawing
+      const siBondAngs = new Map()
+      for (const { i, j } of bonds) {
+        const ti = particles[i].typeId, tj = particles[j].typeId
+        let si, oi
+        if      (ti === 0 && tj === 1) { si = i; oi = j }
+        else if (ti === 1 && tj === 0) { si = j; oi = i }
+        else continue
+        if (!siBondAngs.has(si)) siBondAngs.set(si, [])
+        const sp = particles[si], op = particles[oi]
+        const sx = lerpT < 1 ? sp.px + (sp.x - sp.px) * lerpT : sp.x
+        const sy = lerpT < 1 ? sp.py + (sp.y - sp.py) * lerpT : sp.y
+        const ox = lerpT < 1 ? op.px + (op.x - op.px) * lerpT : op.x
+        const oy = lerpT < 1 ? op.py + (op.y - op.py) * lerpT : op.y
+        siBondAngs.get(si).push(Math.atan2(oy - sy, ox - sx))
+      }
+
+      // Hex spokes on Si: green = occupied bond, red = open attract target
+      const PI2  = Math.PI * 2
+      const STEP = PI2 / 3
+      const TOL  = Math.PI / 3
+      const adiff = (a, b) => { let d = Math.abs(((a - b) % PI2 + PI2) % PI2); return d > Math.PI ? PI2 - d : d }
+      ctx.lineWidth = 0.8
+      for (const [si, angs] of siBondAngs) {
+        const sp = particles[si]
+        const rx = lerpT < 1 ? sp.px + (sp.x - sp.px) * lerpT : sp.x
+        const ry = lerpT < 1 ? sp.py + (sp.y - sp.py) * lerpT : sp.y
+        const base = angs[0]
+        for (let k = 0; k < 3; k++) {
+          const θ = base + k * STEP
+          const occupied = angs.some(ea => adiff(θ, ea) < TOL)
+          ctx.globalAlpha = occupied ? 0.85 : 0.45
+          ctx.strokeStyle  = occupied ? '#44ff88' : '#ff5533'
+          ctx.beginPath(); ctx.moveTo(rx, ry)
+          ctx.lineTo(rx + 11 * Math.cos(θ), ry + 11 * Math.sin(θ))
+          ctx.stroke()
+        }
+      }
+
+      // Per-species saturation summary (top-left corner, in sim coords)
+      const sat = [0, 0, 0, 0], tot = [0, 0, 0, 0]
+      for (let i = 0; i < n; i++) {
+        const t = particles[i].typeId; tot[t]++
+        if (bondCnt[i] >= COORD_TARGET[t]) sat[t]++
+      }
+      const names = ['Si', 'O ', 'Na', 'Ca']
+      ctx.font         = '8px monospace'
+      ctx.textAlign    = 'left'
+      ctx.textBaseline = 'top'
+      let row = 0
+      for (let t = 0; t < 4; t++) {
+        if (tot[t] === 0) continue
+        const pct  = Math.round(100 * sat[t] / tot[t])
+        const bar  = Math.round(pct / 10)
+        const text = `${names[t]}: ${String(sat[t]).padStart(3)} / ${tot[t]} (${String(pct).padStart(3)}%) ${'█'.repeat(bar)}${'░'.repeat(10 - bar)}`
+        ctx.globalAlpha = 0.82
+        ctx.fillStyle   = '#000'
+        ctx.fillRect(2, 2 + row * 11, 196, 11)
+        ctx.globalAlpha = 1
+        ctx.fillStyle   = row === 0 ? '#d4a020' : row === 1 ? '#cc3a3a' : row === 2 ? '#4aaa60' : '#4a96be'
+        ctx.fillText(text, 3, 3 + row * 11)
+        row++
+      }
+      ctx.globalAlpha = 1
     }
 
-    // Hex spokes on Si: green = occupied bond, red = open attract target
-    const PI2  = Math.PI * 2
-    const STEP = PI2 / 3
-    const TOL  = Math.PI / 3
-    const adiff = (a, b) => { let d = Math.abs(((a - b) % PI2 + PI2) % PI2); return d > Math.PI ? PI2 - d : d }
-    ctx.lineWidth = 0.8
-    for (const [si, angs] of siBondAngs) {
-      const sp = particles[si]
-      const rx = lerpT < 1 ? sp.px + (sp.x - sp.px) * lerpT : sp.x
-      const ry = lerpT < 1 ? sp.py + (sp.y - sp.py) * lerpT : sp.y
-      const base = angs[0]
-      for (let k = 0; k < 3; k++) {
-        const θ = base + k * STEP
-        const occupied = angs.some(ea => adiff(θ, ea) < TOL)
-        ctx.globalAlpha = occupied ? 0.85 : 0.45
-        ctx.strokeStyle  = occupied ? '#44ff88' : '#ff5533'
-        ctx.beginPath(); ctx.moveTo(rx, ry)
-        ctx.lineTo(rx + 11 * Math.cos(θ), ry + 11 * Math.sin(θ))
-        ctx.stroke()
+    if (bondNums) {
+      // Bond-count label on every atom (outlined for readability on any background)
+      ctx.textAlign    = 'center'
+      ctx.textBaseline = 'middle'
+      ctx.font         = '6px monospace'
+      for (let i = 0; i < n; i++) {
+        const p  = particles[i]
+        const rx = lerpT < 1 ? p.px + (p.x - p.px) * lerpT : p.x
+        const ry = lerpT < 1 ? p.py + (p.y - p.py) * lerpT : p.y
+        const cnt = bondCnt[i]
+        const tgt = COORD_TARGET[p.typeId] ?? 2
+        const col = cnt >= tgt ? '#00ff66' : cnt > 0 ? '#ffcc00' : '#ff4444'
+        ctx.lineWidth   = 2.5
+        ctx.strokeStyle = '#000'
+        ctx.globalAlpha = 0.9
+        ctx.strokeText(String(cnt), rx, ry)
+        ctx.fillStyle   = col
+        ctx.globalAlpha = 1
+        ctx.fillText(String(cnt), rx, ry)
       }
     }
-
-    // Bond-count label on every atom (outlined for readability on any background)
-    ctx.textAlign    = 'center'
-    ctx.textBaseline = 'middle'
-    ctx.font         = '6px monospace'
-    for (let i = 0; i < n; i++) {
-      const p  = particles[i]
-      const rx = lerpT < 1 ? p.px + (p.x - p.px) * lerpT : p.x
-      const ry = lerpT < 1 ? p.py + (p.y - p.py) * lerpT : p.y
-      const cnt = bondCnt[i]
-      const tgt = COORD_TARGET[p.typeId] ?? 2
-      const col = cnt >= tgt ? '#00ff66' : cnt > 0 ? '#ffcc00' : '#ff4444'
-      ctx.lineWidth   = 2.5
-      ctx.strokeStyle = '#000'
-      ctx.globalAlpha = 0.9
-      ctx.strokeText(String(cnt), rx, ry)
-      ctx.fillStyle   = col
-      ctx.globalAlpha = 1
-      ctx.fillText(String(cnt), rx, ry)
-    }
-
-    // Per-species saturation summary (top-left corner, in sim coords)
-    const sat = [0, 0, 0, 0], tot = [0, 0, 0, 0]
-    for (let i = 0; i < n; i++) {
-      const t = particles[i].typeId; tot[t]++
-      if (bondCnt[i] >= COORD_TARGET[t]) sat[t]++
-    }
-    const names = ['Si', 'O ', 'Na', 'Ca']
-    ctx.font         = '8px monospace'
-    ctx.textAlign    = 'left'
-    ctx.textBaseline = 'top'
-    let row = 0
-    for (let t = 0; t < 4; t++) {
-      if (tot[t] === 0) continue
-      const pct  = Math.round(100 * sat[t] / tot[t])
-      const bar  = Math.round(pct / 10)
-      const text = `${names[t]}: ${String(sat[t]).padStart(3)} / ${tot[t]} (${String(pct).padStart(3)}%) ${'█'.repeat(bar)}${'░'.repeat(10 - bar)}`
-      ctx.globalAlpha = 0.82
-      ctx.fillStyle   = '#000'
-      ctx.fillRect(2, 2 + row * 11, 196, 11)
-      ctx.globalAlpha = 1
-      ctx.fillStyle   = row === 0 ? '#d4a020' : row === 1 ? '#cc3a3a' : row === 2 ? '#4aaa60' : '#4a96be'
-      ctx.fillText(text, 3, 3 + row * 11)
-      row++
-    }
-    ctx.globalAlpha = 1
   }
 
   ctx.setTransform(1, 0, 0, 1, 0, 0)
