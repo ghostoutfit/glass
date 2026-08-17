@@ -16,7 +16,7 @@ export default function GlassViewer() {
   const [tempC, setTempC]           = useState(20)
   const [simSpeed, setSimSpeed]     = useState(0.2)
   const [sioR0, setSioR0]           = useState(9)
-  const [attractK, setAttractK]     = useState(0)
+  const [attractK, setAttractK]     = useState(0.02)
   const [showDev, setShowDev]       = useState(true)
   const [narrowTemp, setNarrowTemp] = useState(false)
   const [coolingMode, setCoolingMode] = useState(null) // null | 'slow' | 'fast'
