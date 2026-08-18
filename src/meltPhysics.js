@@ -519,16 +519,43 @@ export function crystallize(phys, strength, minCluster, angleTol = 25) {
 }
 
 // ── Pre-computed cooling targets ─────────────────────────────────────────────
-//
-// computeAmorphousTargets: generates a random network layout matching the
-// NetworksView amorphous sketch — Si by random sequential addition, O at
-// Si-Si bond midpoints, ions hanging off O perpendicularly.
+
+// Greedy nearest-neighbor assignment: each particle gets the closest available
+// site, minimising total travel. All (particle, site) pairs sorted by distance;
+// closest pairs claimed first so no atom crosses the screen unnecessarily.
+function nearestAssign(particles, pIdxs, sites, count) {
+  const take = Math.min(count, pIdxs.length, sites.length)
+  if (take === 0) return new Map()
+  const pairs = []
+  for (let pi = 0; pi < pIdxs.length; pi++) {
+    const p = particles[pIdxs[pi]]
+    for (let si = 0; si < sites.length; si++) {
+      const dx = p.x - sites[si].x, dy = p.y - sites[si].y
+      pairs.push({ pi, si, d2: dx * dx + dy * dy })
+    }
+  }
+  pairs.sort((a, b) => a.d2 - b.d2)
+  const usedP = new Uint8Array(pIdxs.length)
+  const usedS = new Uint8Array(sites.length)
+  const result = new Map()
+  for (const { pi, si } of pairs) {
+    if (result.size >= take) break
+    if (usedP[pi] || usedS[si]) continue
+    usedP[pi] = 1; usedS[si] = 1
+    result.set(pIdxs[pi], sites[si])
+  }
+  return result
+}
+
+// computeAmorphousTargets: generates a random Si-O network matching the
+// NetworksView amorphous sketch, then assigns each particle to its nearest
+// site of the same type so no atom has to travel further than necessary.
 export function computeAmorphousTargets(phys) {
   const { particles, n } = phys
 
   const counts = [0, 0, 0, 0]
   for (const p of particles) counts[p.typeId]++
-  const [nSi, nO, nNa, nCa] = counts
+  const [nSi, , nNa, nCa] = counts
 
   const a     = PREFERRED['O-Si'].r0 * 2   // 18px
   const minD  = a * 0.68
@@ -570,53 +597,54 @@ export function computeAmorphousTargets(phys) {
     }
   }
 
-  // Ion targets: perpendicular off shuffled O bond midpoints
-  const shuffled = [...oBonds].sort(() => Math.random() - 0.5)
-  const ionTargets = []
-  for (const ob of shuffled) {
-    if (ionTargets.length >= nNa + nCa) break
+  // Ion sites: perpendicular off bond midpoints
+  const ionSites = []
+  for (const ob of oBonds) {
+    if (ionSites.length >= nNa + nCa) break
     const s1 = siPos[ob.si1], s2 = siPos[ob.si2]
     const len = Math.hypot(s2.x - s1.x, s2.y - s1.y)
     const px = -(s2.y - s1.y) / len, py = (s2.x - s1.x) / len
     const flip = Math.random() < 0.5 ? 1 : -1
     const ix = ob.x + flip * px * 13, iy = ob.y + flip * py * 13
-    if (ix > 4 && ix < SIM_W - 4 && iy > 4 && iy < SIM_H - 4) ionTargets.push({ x: ix, y: iy })
+    if (ix > 4 && ix < SIM_W - 4 && iy > 4 && iy < SIM_H - 4) ionSites.push({ x: ix, y: iy })
   }
 
-  // Map targets back to particle order by type
+  // Group particle indices by type
+  const byType = [[], [], [], []]
+  for (let i = 0; i < n; i++) byType[particles[i].typeId].push(i)
+
+  const oSites = oBonds.map(b => ({ x: b.x, y: b.y }))
+  const siMap  = nearestAssign(particles, byType[0], siPos,                     byType[0].length)
+  const oMap   = nearestAssign(particles, byType[1], oSites,                    byType[1].length)
+  const naMap  = nearestAssign(particles, byType[2], ionSites,                  byType[2].length)
+  const caMap  = nearestAssign(particles, byType[3], ionSites.slice(nNa),       byType[3].length)
+
   const targets = new Array(n)
-  let si = 0, o = 0, na = 0, ca = 0
   for (let i = 0; i < n; i++) {
     const p = particles[i]
-    if (p.typeId === 0)      targets[i] = siPos[si++]    ?? { x: p.x, y: p.y }
-    else if (p.typeId === 1) targets[i] = oBonds[o++]    ? { x: oBonds[o - 1].x, y: oBonds[o - 1].y } : { x: p.x, y: p.y }
-    else if (p.typeId === 2) targets[i] = ionTargets[na++] ?? { x: p.x, y: p.y }
-    else                     targets[i] = ionTargets[nNa + ca++] ?? { x: p.x, y: p.y }
+    targets[i] = siMap.get(i) ?? oMap.get(i) ?? naMap.get(i) ?? caMap.get(i) ?? { x: p.x, y: p.y }
   }
   return targets
 }
 
-// computeSlowCoolTargets: hex crystal lattice stamped from center, particles
-// matched to nearest site by type.  crystalFrac (derived from SiO₂ content)
-// controls what fraction of each species goes to crystal vs amorphous positions.
+// computeSlowCoolTargets: hex crystal lattice stamped from center with nearest-
+// neighbor assignment per type so particles travel minimal distances.
 export function computeSlowCoolTargets(phys, sio2Pct, _na2oPct, _caoPct) {
   const { particles, n } = phys
-  const targets = computeAmorphousTargets(phys)   // amorphous baseline for every particle
+  const targets = computeAmorphousTargets(phys)   // amorphous baseline
 
   const crystalFrac = Math.max(0, Math.pow(Math.max(0, sio2Pct - 50) / 50, 1.5))
   if (crystalFrac < 0.02) return targets
 
-  const R0  = PREFERRED['O-Si'].r0          // 9 px
-  const a   = R0 * 2                         // lattice constant = 18 px
-  const a1x = a * Math.sqrt(3)              // ≈ 31.2
-  const a2x = a * Math.sqrt(3) / 2          // ≈ 15.6
-  const a2y = a * 1.5                        // 27
+  const R0  = PREFERRED['O-Si'].r0
+  const a   = R0 * 2
+  const a1x = a * Math.sqrt(3)
+  const a2x = a * Math.sqrt(3) / 2, a2y = a * 1.5
   const bDx = a * Math.sqrt(3) / 2, bDy = a * 0.5
   const cx  = SIM_W / 2, cy = SIM_H / 2
   const ni  = Math.ceil(SIM_W / a1x) + 1
   const nj  = Math.ceil(SIM_H / a2y) + 1
 
-  // Generate all lattice sites
   const siSites = [], naSites = []
   for (let ii = -ni; ii <= ni; ii++) {
     for (let jj = -nj; jj <= nj; jj++) {
@@ -624,7 +652,6 @@ export function computeSlowCoolTargets(phys, sio2Pct, _na2oPct, _caoPct) {
         const x = cx + ii*a1x + jj*a2x + ddx, y = cy + jj*a2y + ddy
         if (x > 4 && x < SIM_W-4 && y > 4 && y < SIM_H-4) siSites.push({x,y})
       }
-      // Ring centers for Na/Ca
       const rx = cx + ii*a1x + jj*a2x + bDx, ry = cy + jj*a2y - bDy
       if (rx > 4 && rx < SIM_W-4 && ry > 4 && ry < SIM_H-4) naSites.push({x:rx,y:ry})
     }
@@ -638,37 +665,18 @@ export function computeSlowCoolTargets(phys, sio2Pct, _na2oPct, _caoPct) {
       if (dx*dx+dy*dy < nnSq) oSites.push({x:(siSites[i].x+siSites[j].x)/2, y:(siSites[i].y+siSites[j].y)/2})
     }
   }
-  // Ca sites: vertical inter-ring bond midpoints (nearly pure-y displacement)
   const caSites = oSites.filter(o => {
     for (const s of siSites) if (Math.abs(s.x-o.x)<2 && Math.abs(s.y-o.y-R0)<2) return true
     return false
   })
 
-  // Greedy nearest-site assignment per type, limited to crystalFrac of each species
   const byType = [[],[],[],[]]
   for (let i = 0; i < n; i++) byType[particles[i].typeId].push(i)
 
-  function assignNearest(pIdxs, sites, count) {
-    const sorted = [...pIdxs].sort((a,b) =>
-      Math.hypot(particles[a].x-cx, particles[a].y-cy) - Math.hypot(particles[b].x-cx, particles[b].y-cy)
-    )
-    const used = new Set(), result = new Map()
-    for (const pi of sorted.slice(0, count)) {
-      let best = -1, bestD = Infinity
-      for (let s = 0; s < sites.length; s++) {
-        if (used.has(s)) continue
-        const d = Math.hypot(sites[s].x-particles[pi].x, sites[s].y-particles[pi].y)
-        if (d < bestD) { bestD = d; best = s }
-      }
-      if (best >= 0) { used.add(best); result.set(pi, sites[best]) }
-    }
-    return result
-  }
-
-  const siMap = assignNearest(byType[0], siSites, Math.round(byType[0].length * crystalFrac))
-  const oMap  = assignNearest(byType[1], oSites,  Math.round(byType[1].length * crystalFrac))
-  const naMap = assignNearest(byType[2], naSites, Math.round(byType[2].length * crystalFrac))
-  const caMap = assignNearest(byType[3], caSites.length ? caSites : naSites, Math.round(byType[3].length * crystalFrac))
+  const siMap = nearestAssign(particles, byType[0], siSites, Math.round(byType[0].length * crystalFrac))
+  const oMap  = nearestAssign(particles, byType[1], oSites,  Math.round(byType[1].length * crystalFrac))
+  const naMap = nearestAssign(particles, byType[2], naSites, Math.round(byType[2].length * crystalFrac))
+  const caMap = nearestAssign(particles, byType[3], caSites.length ? caSites : naSites, Math.round(byType[3].length * crystalFrac))
 
   for (const [pi, site] of [...siMap, ...oMap, ...naMap, ...caMap]) {
     targets[pi] = { x: site.x, y: site.y }
