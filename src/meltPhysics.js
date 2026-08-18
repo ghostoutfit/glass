@@ -609,8 +609,8 @@ export function computeAmorphousTargets(phys) {
   return targets
 }
 
-// computeSlowCoolTargets: hex crystal lattice stamped from center with nearest-
-// neighbor assignment per type so particles travel minimal distances.
+// computeSlowCoolTargets: hex crystal lattice with multiple random nucleation
+// seeds so crystal domains form at different locations each time.
 export function computeSlowCoolTargets(phys, sio2Pct, _na2oPct, _caoPct) {
   const { particles, n } = phys
   const targets = computeAmorphousTargets(phys)   // amorphous baseline
@@ -623,30 +623,53 @@ export function computeSlowCoolTargets(phys, sio2Pct, _na2oPct, _caoPct) {
   const a1x = a * Math.sqrt(3)
   const a2x = a * Math.sqrt(3) / 2, a2y = a * 1.5
   const bDx = a * Math.sqrt(3) / 2, bDy = a * 0.5
-  const cx  = SIM_W / 2, cy = SIM_H / 2
+  // Anchor the lattice at origin so all domains share the same grid
   const ni  = Math.ceil(SIM_W / a1x) + 1
   const nj  = Math.ceil(SIM_H / a2y) + 1
 
+  // Random nucleation seeds — domains grow from here
+  const numSeeds = 2 + Math.floor(Math.random() * 3)   // 2–4 seeds
+  const seeds = Array.from({ length: numSeeds }, () => ({
+    x: SIM_W * (0.12 + Math.random() * 0.76),
+    y: SIM_H * (0.12 + Math.random() * 0.76),
+  }))
+  const nearestSeedDist = (x, y) =>
+    seeds.reduce((best, s) => Math.min(best, Math.hypot(x - s.x, y - s.y)), Infinity)
+
+  // Generate full lattice, tag each site with its distance to the nearest seed
   const siSites = [], naSites = []
   for (let ii = -ni; ii <= ni; ii++) {
     for (let jj = -nj; jj <= nj; jj++) {
       for (const [ddx, ddy] of [[0,0],[bDx,bDy]]) {
-        const x = cx + ii*a1x + jj*a2x + ddx, y = cy + jj*a2y + ddy
-        if (x > 4 && x < SIM_W-4 && y > 4 && y < SIM_H-4) siSites.push({x,y})
+        const x = ii*a1x + jj*a2x + ddx, y = jj*a2y + ddy
+        if (x > 4 && x < SIM_W-4 && y > 4 && y < SIM_H-4)
+          siSites.push({ x, y, d: nearestSeedDist(x, y) })
       }
-      const rx = cx + ii*a1x + jj*a2x + bDx, ry = cy + jj*a2y - bDy
-      if (rx > 4 && rx < SIM_W-4 && ry > 4 && ry < SIM_H-4) naSites.push({x:rx,y:ry})
+      const rx = ii*a1x + jj*a2x + bDx, ry = jj*a2y - bDy
+      if (rx > 4 && rx < SIM_W-4 && ry > 4 && ry < SIM_H-4)
+        naSites.push({ x: rx, y: ry, d: nearestSeedDist(rx, ry) })
     }
   }
 
+  // Keep only the sites closest to seeds (this is what creates distinct domains)
+  siSites.sort((a, b) => a.d - b.d)
+  naSites.sort((a, b) => a.d - b.d)
+
   const nnSq = (a * 1.05) ** 2
   const oSites = []
-  for (let i = 0; i < siSites.length; i++) {
-    for (let j = i+1; j < siSites.length; j++) {
-      const dx = siSites[j].x-siSites[i].x, dy = siSites[j].y-siSites[i].y
-      if (dx*dx+dy*dy < nnSq) oSites.push({x:(siSites[i].x+siSites[j].x)/2, y:(siSites[i].y+siSites[j].y)/2})
+  // Build O sites from ALL si sites then filter by seed proximity
+  const allSiForO = siSites   // already sorted; O midpoints inherit domain membership
+  for (let i = 0; i < allSiForO.length; i++) {
+    for (let j = i+1; j < allSiForO.length; j++) {
+      const dx = allSiForO[j].x - allSiForO[i].x, dy = allSiForO[j].y - allSiForO[i].y
+      if (dx*dx+dy*dy < nnSq) {
+        const ox = (allSiForO[i].x + allSiForO[j].x)/2, oy = (allSiForO[i].y + allSiForO[j].y)/2
+        oSites.push({ x: ox, y: oy, d: nearestSeedDist(ox, oy) })
+      }
     }
   }
+  oSites.sort((a, b) => a.d - b.d)
+
   const caSites = oSites.filter(o => {
     for (const s of siSites) if (Math.abs(s.x-o.x)<2 && Math.abs(s.y-o.y-R0)<2) return true
     return false
@@ -655,10 +678,11 @@ export function computeSlowCoolTargets(phys, sio2Pct, _na2oPct, _caoPct) {
   const byType = [[],[],[],[]]
   for (let i = 0; i < n; i++) byType[particles[i].typeId].push(i)
 
-  const siMap = nearestAssign(particles, byType[0], siSites, Math.round(byType[0].length * crystalFrac))
-  const oMap  = nearestAssign(particles, byType[1], oSites,  Math.round(byType[1].length * crystalFrac))
-  const naMap = nearestAssign(particles, byType[2], naSites, Math.round(byType[2].length * crystalFrac))
-  const caMap = nearestAssign(particles, byType[3], caSites.length ? caSites : naSites, Math.round(byType[3].length * crystalFrac))
+  const take = f => Math.round(f * crystalFrac)
+  const siMap = nearestAssign(particles, byType[0], siSites, take(byType[0].length))
+  const oMap  = nearestAssign(particles, byType[1], oSites,  take(byType[1].length))
+  const naMap = nearestAssign(particles, byType[2], naSites, take(byType[2].length))
+  const caMap = nearestAssign(particles, byType[3], caSites.length ? caSites : naSites, take(byType[3].length))
 
   for (const [pi, site] of [...siMap, ...oMap, ...naMap, ...caMap]) {
     targets[pi] = { x: site.x, y: site.y }
