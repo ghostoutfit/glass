@@ -667,34 +667,36 @@ export function computeSlowCoolTargets(phys, sio2Pct, _na2oPct, _caoPct) {
 }
 
 // Attach per-particle wobble state to phys and store targets.
+// Each particle gets a random wobble direction stored at init so particles
+// whose target equals their start position still oscillate naturally.
 export function initPrecompute(phys, targets) {
   const n = phys.n
+  const angles = Array.from({ length: n }, () => Math.random() * Math.PI * 2)
   phys.precompute = {
     targets,
-    amp:   Float32Array.from({length: n}, () => 1.5 + Math.random() * 3.5),
-    phase: Float32Array.from({length: n}, () => Math.random() * Math.PI * 2),
-    freq:  Float32Array.from({length: n}, () => 0.12 + Math.random() * 0.22),
+    amp:   Float32Array.from({ length: n }, () => 8 + Math.random() * 8),
+    phase: Float32Array.from({ length: n }, () => Math.random() * Math.PI * 2),
+    freq:  Float32Array.from({ length: n }, () => 0.14 + Math.random() * 0.18),
+    wdx:   Float32Array.from(angles, a => Math.cos(a)),
+    wdy:   Float32Array.from(angles, a => Math.sin(a)),
   }
 }
 
-// Animate each particle toward its target.  lerpRate: fraction closed per frame.
-// wobbleScale: amplitude multiplier for lateral oscillation (decays per frame).
+// Animate each particle toward its target with decaying thermal wobble.
+// Wobble direction is stored per-particle so Si (target = start pos) still moves.
 export function stepPrecompute(phys, frame, lerpRate, wobbleScale) {
   const { particles, n } = phys
-  const { targets, amp, phase, freq } = phys.precompute
+  const { targets, amp, phase, freq, wdx, wdy } = phys.precompute
 
   for (let i = 0; i < n; i++) {
     const p = particles[i], t = targets[i]
     if (!t) continue
     const dx = t.x - p.x, dy = t.y - p.y
-    const d = Math.hypot(dx, dy)
-    if (d < 0.08) { p.x = t.x; p.y = t.y; p.px = p.x; p.py = p.y; continue }
-    const nx = dx/d, ny = dy/d
     const osc = amp[i] * wobbleScale * Math.sin(frame * freq[i] + phase[i])
     amp[i] *= 0.987
-    p.x += lerpRate * dx + osc * (-ny)
-    p.y += lerpRate * dy + osc * nx
     p.px = p.x; p.py = p.y
+    p.x += lerpRate * dx + osc * wdx[i]
+    p.y += lerpRate * dy + osc * wdy[i]
   }
 
   // Rebuild bonds for rendering
