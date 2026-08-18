@@ -309,9 +309,8 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
         const usePrecompute = precomputeRef.current && !!phys.precompute && (cm === 'fast' || cm === 'slow')
 
         if (usePrecompute) {
-          const lerpRate    = cm === 'fast' ? 0.04 : 0.02
-          const wobbleScale = cm === 'fast' ? 0.3  : 0.6
-          stepPrecompute(phys, coolingFrameRef.current, lerpRate, wobbleScale)
+          const lerpRate = cm === 'fast' ? 0.04 : 0.02
+          stepPrecompute(phys, coolingFrameRef.current, lerpRate)
           drawPhysics(canvasRef.current, phys, VW, VH, 1, debugRef.current, bondNumsRef.current)
         } else {
           const speed = speedRef.current

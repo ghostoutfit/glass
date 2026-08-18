@@ -666,37 +666,33 @@ export function computeSlowCoolTargets(phys, sio2Pct, _na2oPct, _caoPct) {
   return targets
 }
 
-// Attach per-particle wobble state to phys and store targets.
-// Each particle gets a random wobble direction stored at init so particles
-// whose target equals their start position still oscillate naturally.
+// Capture current particle velocities so stepPrecompute can continue each
+// atom's natural trajectory rather than snapping to a random oscillation.
 export function initPrecompute(phys, targets) {
   const n = phys.n
-  const angles = Array.from({ length: n }, () => Math.random() * Math.PI * 2)
-  phys.precompute = {
-    targets,
-    amp:   Float32Array.from({ length: n }, () => 8 + Math.random() * 8),
-    phase: Float32Array.from({ length: n }, () => Math.random() * Math.PI * 2),
-    freq:  Float32Array.from({ length: n }, () => 0.14 + Math.random() * 0.18),
-    wdx:   Float32Array.from(angles, a => Math.cos(a)),
-    wdy:   Float32Array.from(angles, a => Math.sin(a)),
-  }
+  const cvx = new Float32Array(n), cvy = new Float32Array(n)
+  for (let i = 0; i < n; i++) { cvx[i] = phys.particles[i].vx; cvy[i] = phys.particles[i].vy }
+  phys.precompute = { targets, cvx, cvy }
 }
 
-// Animate each particle toward its target with decaying thermal wobble.
-// Wobble direction is stored per-particle so Si (target = start pos) still moves.
-export function stepPrecompute(phys, frame, lerpRate, wobbleScale) {
+// Each frame: continue the particle's natural velocity (with damping) and add
+// a gentle lerp toward its target.  Si (target = current pos) coasts to a stop
+// naturally while O/ions also drift into the network structure.
+export function stepPrecompute(phys, frame, lerpRate) {
   const { particles, n } = phys
-  const { targets, amp, phase, freq, wdx, wdy } = phys.precompute
+  const { targets, cvx, cvy } = phys.precompute
+  const DAMP = 0.97
 
   for (let i = 0; i < n; i++) {
     const p = particles[i], t = targets[i]
     if (!t) continue
-    const dx = t.x - p.x, dy = t.y - p.y
-    const osc = amp[i] * wobbleScale * Math.sin(frame * freq[i] + phase[i])
-    amp[i] *= 0.987
+    cvx[i] *= DAMP; cvy[i] *= DAMP
     p.px = p.x; p.py = p.y
-    p.x += lerpRate * dx + osc * wdx[i]
-    p.y += lerpRate * dy + osc * wdy[i]
+    p.x += cvx[i] + lerpRate * (t.x - p.x)
+    p.y += cvy[i] + lerpRate * (t.y - p.y)
+    // Keep inside sim bounds
+    p.x = Math.max(p.r, Math.min(SIM_W - p.r, p.x))
+    p.y = Math.max(p.r, Math.min(SIM_H - p.r, p.y))
   }
 
   // Rebuild bonds for rendering
