@@ -547,82 +547,64 @@ function nearestAssign(particles, pIdxs, sites, count) {
   return result
 }
 
-// computeAmorphousTargets: generates a random Si-O network matching the
-// NetworksView amorphous sketch, then assigns each particle to its nearest
-// site of the same type so no atom has to travel further than necessary.
+// computeAmorphousTargets: builds the amorphous network FROM the current Si
+// positions so Si atoms don't move at all — O migrates to the nearest Si-Si
+// midpoint, ions go perpendicular off nearby bonds.  All motion is local.
 export function computeAmorphousTargets(phys) {
   const { particles, n } = phys
 
-  const counts = [0, 0, 0, 0]
-  for (const p of particles) counts[p.typeId]++
-  const [nSi, , nNa, nCa] = counts
-
   const a     = PREFERRED['O-Si'].r0 * 2   // 18px
-  const minD  = a * 0.68
-  const minSq = (minD * 0.99) ** 2
+  const minSq = (a * 0.68 * 0.99) ** 2
   const maxSq = (a * 1.90) ** 2
-  const pad   = a
 
-  // Place Si by random sequential addition
-  const siPos = []
-  let tries = 0
-  while (siPos.length < nSi && tries < 100000) {
-    tries++
-    const x = pad + Math.random() * (SIM_W - 2 * pad)
-    const y = pad + Math.random() * (SIM_H - 2 * pad)
-    let ok = true
-    for (const s of siPos) {
-      if ((s.x - x) ** 2 + (s.y - y) ** 2 < minSq) { ok = false; break }
-    }
-    if (ok) siPos.push({ x, y })
-  }
+  const byType = [[], [], [], []]
+  for (let i = 0; i < n; i++) byType[particles[i].typeId].push(i)
+  const nNa = byType[2].length
 
-  // Bond Si pairs (closest first, max 3 bonds per Si)
+  // Si stays exactly where it is
+  const targets = new Array(n)
+  for (const i of byType[0]) targets[i] = { x: particles[i].x, y: particles[i].y }
+
+  // Bond nearby Si pairs (greedy closest-first, max 3 per Si) to get O sites
+  const siIdxs = byType[0]
   const cands = []
-  for (let i = 0; i < siPos.length; i++) {
-    for (let j = i + 1; j < siPos.length; j++) {
-      const dx = siPos[j].x - siPos[i].x, dy = siPos[j].y - siPos[i].y
+  for (let ii = 0; ii < siIdxs.length; ii++) {
+    for (let jj = ii + 1; jj < siIdxs.length; jj++) {
+      const pi = siIdxs[ii], pj = siIdxs[jj]
+      const dx = particles[pj].x - particles[pi].x, dy = particles[pj].y - particles[pi].y
       const dSq = dx * dx + dy * dy
-      if (dSq > minSq && dSq < maxSq) cands.push({ i, j, dSq })
+      if (dSq > minSq && dSq < maxSq) cands.push({ ii, jj, pi, pj, dSq })
     }
   }
   cands.sort((a, b) => a.dSq - b.dSq)
 
-  const conn = new Array(siPos.length).fill(0)
-  const oBonds = []
-  for (const { i, j } of cands) {
-    if (conn[i] < 3 && conn[j] < 3) {
-      conn[i]++; conn[j]++
-      oBonds.push({ x: (siPos[i].x + siPos[j].x) / 2, y: (siPos[i].y + siPos[j].y) / 2, si1: i, si2: j })
+  const conn = new Array(siIdxs.length).fill(0)
+  const oBondSites = [], ionSites = []
+  for (const { ii, jj, pi, pj } of cands) {
+    if (conn[ii] < 3 && conn[jj] < 3) {
+      conn[ii]++; conn[jj]++
+      const mx = (particles[pi].x + particles[pj].x) / 2
+      const my = (particles[pi].y + particles[pj].y) / 2
+      oBondSites.push({ x: mx, y: my })
+      // Perpendicular ion site off this bond
+      const len = Math.hypot(particles[pj].x - particles[pi].x, particles[pj].y - particles[pi].y)
+      const px = -(particles[pj].y - particles[pi].y) / len
+      const py =  (particles[pj].x - particles[pi].x) / len
+      const flip = Math.random() < 0.5 ? 1 : -1
+      const ix = mx + flip * px * 13, iy = my + flip * py * 13
+      if (ix > 4 && ix < SIM_W - 4 && iy > 4 && iy < SIM_H - 4) ionSites.push({ x: ix, y: iy })
     }
   }
 
-  // Ion sites: perpendicular off bond midpoints
-  const ionSites = []
-  for (const ob of oBonds) {
-    if (ionSites.length >= nNa + nCa) break
-    const s1 = siPos[ob.si1], s2 = siPos[ob.si2]
-    const len = Math.hypot(s2.x - s1.x, s2.y - s1.y)
-    const px = -(s2.y - s1.y) / len, py = (s2.x - s1.x) / len
-    const flip = Math.random() < 0.5 ? 1 : -1
-    const ix = ob.x + flip * px * 13, iy = ob.y + flip * py * 13
-    if (ix > 4 && ix < SIM_W - 4 && iy > 4 && iy < SIM_H - 4) ionSites.push({ x: ix, y: iy })
-  }
+  // Assign O, Na, Ca to nearest available site of their type
+  const oMap  = nearestAssign(particles, byType[1], oBondSites,          byType[1].length)
+  const naMap = nearestAssign(particles, byType[2], ionSites,             byType[2].length)
+  const caMap = nearestAssign(particles, byType[3], ionSites.slice(nNa), byType[3].length)
 
-  // Group particle indices by type
-  const byType = [[], [], [], []]
-  for (let i = 0; i < n; i++) byType[particles[i].typeId].push(i)
-
-  const oSites = oBonds.map(b => ({ x: b.x, y: b.y }))
-  const siMap  = nearestAssign(particles, byType[0], siPos,                     byType[0].length)
-  const oMap   = nearestAssign(particles, byType[1], oSites,                    byType[1].length)
-  const naMap  = nearestAssign(particles, byType[2], ionSites,                  byType[2].length)
-  const caMap  = nearestAssign(particles, byType[3], ionSites.slice(nNa),       byType[3].length)
-
-  const targets = new Array(n)
   for (let i = 0; i < n; i++) {
+    if (targets[i]) continue
     const p = particles[i]
-    targets[i] = siMap.get(i) ?? oMap.get(i) ?? naMap.get(i) ?? caMap.get(i) ?? { x: p.x, y: p.y }
+    targets[i] = oMap.get(i) ?? naMap.get(i) ?? caMap.get(i) ?? { x: p.x, y: p.y }
   }
   return targets
 }
