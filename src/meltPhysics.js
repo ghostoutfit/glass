@@ -745,6 +745,26 @@ export function stepPrecompute(phys, frame, lerpRate) {
   phys.bonds = bonds
 }
 
+// Rebuild phys.bonds from current particle positions — used by replay to
+// reconstruct bond display from a stored position snapshot.
+export function rebuildBonds(phys) {
+  const { particles } = phys
+  const n = particles.length
+  const bonds = []
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      const spec = PAIR_TABLE[particles[i].typeId][particles[j].typeId]
+      if (!spec) continue
+      const dx = particles[j].x - particles[i].x
+      if (Math.abs(dx) > spec.r0 * spec.mult) continue
+      const d = Math.hypot(dx, particles[j].y - particles[i].y)
+      if (d > spec.r0 * spec.mult) continue
+      bonds.push({ i, j, spec, strain: (d - spec.r0) / spec.r0, currentBreakStrain: spec.mult - 1 })
+    }
+  }
+  phys.bonds = bonds
+}
+
 // ── Canvas rendering ──────────────────────────────────────────────────────────
 
 const COLOR_STOPS = [

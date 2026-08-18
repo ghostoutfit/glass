@@ -1,6 +1,7 @@
 import { useMemo, useRef, useEffect } from 'react'
 import { initPhysics, stepPhysics, drawPhysics, crystallize, setSiOr0,
-         computeAmorphousTargets, computeSlowCoolTargets, initPrecompute, stepPrecompute } from './meltPhysics.js'
+         computeAmorphousTargets, computeSlowCoolTargets, initPrecompute, stepPrecompute,
+         rebuildBonds } from './meltPhysics.js'
 
 const VW      = 600
 const VH_GRID = 350
@@ -192,7 +193,7 @@ function LegendDot({ cx, cy, r, fill, label }) {
   )
 }
 
-export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, attractK = 0, debug = false, bondNums = false, precompute = false, tempC = 20, simSpeed = 1, coolingMode = null, onTempUpdate = null }) {
+export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, attractK = 0, debug = false, bondNums = false, precompute = false, tempC = 20, simSpeed = 1, coolingMode = null, onTempUpdate = null, replayFrame = null, onReplayReady = null }) {
   const types = useMemo(
     () => buildGrid(sio2Pct, na2oPct, caoPct),
     [sio2Pct, na2oPct, caoPct]
@@ -229,12 +230,18 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
   const debugRef            = useRef(debug)
   const bondNumsRef         = useRef(bondNums)
   const precomputeRef       = useRef(precompute)
+  const replayFrameRef      = useRef(replayFrame)
+  const onReplayReadyRef    = useRef(onReplayReady)
+  const replayBufferRef     = useRef([])
+  const replayNotifiedRef   = useRef(false)
 
   useEffect(() => { onTempUpdateRef.current = onTempUpdate }, [onTempUpdate])
   useEffect(() => { attractKRef.current = attractK }, [attractK])
   useEffect(() => { debugRef.current = debug }, [debug])
   useEffect(() => { bondNumsRef.current = bondNums }, [bondNums])
   useEffect(() => { precomputeRef.current = precompute }, [precompute])
+  useEffect(() => { replayFrameRef.current = replayFrame }, [replayFrame])
+  useEffect(() => { onReplayReadyRef.current = onReplayReady }, [onReplayReady])
 
   // Keep the physics module's Si-O r0 in sync with the slider
   useEffect(() => { setSiOr0(sioR0) }, [sioR0])
@@ -271,6 +278,8 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
         if (cm === 'fast' || cm === 'slow') {
           coolingStartTempRef.current = effectiveTempRef.current
           coolingFrameRef.current     = 0
+          replayBufferRef.current     = []
+          replayNotifiedRef.current   = false
           // Initialize precompute targets when cooling starts (if enabled)
           if (precomputeRef.current && physRef.current) {
             const targets = cm === 'slow'
@@ -279,8 +288,12 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
             initPrecompute(physRef.current, targets)
           }
         } else {
-          // Cooling cancelled — discard precompute state
+          // Cooling ended — discard precompute state, notify replay ready
           if (physRef.current) delete physRef.current.precompute
+          if (!replayNotifiedRef.current && replayBufferRef.current.length > 0) {
+            replayNotifiedRef.current = true
+            onReplayReadyRef.current?.(replayBufferRef.current.length)
+          }
         }
         prevCoolingRef.current = cm
       }
@@ -306,6 +319,22 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
 
       const phys = physRef.current
       if (phys) {
+        const rf = replayFrameRef.current
+
+        // ── Replay mode: draw a stored snapshot ──────────────────────
+        if (rf !== null && replayBufferRef.current[rf]) {
+          const snap = replayBufferRef.current[rf]
+          const ps   = phys.particles
+          for (let i = 0; i < ps.length; i++) {
+            ps[i].px = snap[i * 2]; ps[i].x = snap[i * 2]
+            ps[i].py = snap[i * 2 + 1]; ps[i].y = snap[i * 2 + 1]
+          }
+          rebuildBonds(phys)
+          drawPhysics(canvasRef.current, phys, VW, VH, 1, debugRef.current, bondNumsRef.current)
+          rafRef.current = requestAnimationFrame(frame)
+          return
+        }
+
         const usePrecompute = precomputeRef.current && !!phys.precompute && (cm === 'fast' || cm === 'slow')
 
         if (usePrecompute) {
@@ -316,7 +345,6 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
           const speed = speedRef.current
           let lerpT   = 1
 
-          // Physics step(s) — always use Berendsen thermostat (coolingFactor = 1.0)
           if (speed >= 1) {
             const steps = Math.floor(speed)
             for (let s = 0; s < steps; s++) {
@@ -334,7 +362,6 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
             lerpT = frameAccRef.current
           }
 
-          // ── Crystallization nudge (slow cool only) ────────────────
           if (cm === 'slow') {
             const cp = crystParamsRef.current
             if (T < cp.threshold && coolingFrameRef.current % CRYST_INTERVAL === 0) {
@@ -343,6 +370,23 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
           }
 
           drawPhysics(canvasRef.current, phys, VW, VH, lerpT, debugRef.current, bondNumsRef.current)
+        }
+
+        // ── Record frame for replay ───────────────────────────────────
+        if (cm === 'fast' || cm === 'slow') {
+          const ps   = phys.particles
+          const snap = new Float32Array(ps.length * 2)
+          for (let i = 0; i < ps.length; i++) { snap[i * 2] = ps[i].x; snap[i * 2 + 1] = ps[i].y }
+          replayBufferRef.current.push(snap)
+
+          // Notify when ramp completes
+          if (!replayNotifiedRef.current) {
+            const dur = cm === 'fast' ? FAST_COOL_FRAMES : SLOW_COOL_FRAMES
+            if (coolingFrameRef.current >= dur) {
+              replayNotifiedRef.current = true
+              onReplayReadyRef.current?.(replayBufferRef.current.length)
+            }
+          }
         }
       }
       rafRef.current = requestAnimationFrame(frame)

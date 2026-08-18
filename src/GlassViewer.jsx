@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import CompositionView from './CompositionView'
 import NetworksView from './NetworksView'
 import './GlassViewer.css'
@@ -21,8 +21,44 @@ export default function GlassViewer() {
   const [narrowTemp, setNarrowTemp] = useState(false)
   const [coolingMode, setCoolingMode] = useState(null) // null | 'slow' | 'fast'
   const [displayTemp, setDisplayTemp] = useState(tempC)
-  const [precompute, setPrecompute] = useState(true)
-  const [bondNums, setBondNums]     = useState(false)
+  const [precompute, setPrecompute]       = useState(true)
+  const [bondNums, setBondNums]           = useState(false)
+  const [replayFrameCount, setReplayFrameCount] = useState(0)
+  const [replayFrame, setReplayFrame]     = useState(null)
+  const [replayPlaying, setReplayPlaying] = useState(false)
+  const replayRafRef = useRef(null)
+
+  const handleReplayReady = useCallback(count => {
+    setReplayFrameCount(count)
+    setReplayFrame(null)
+    setReplayPlaying(false)
+  }, [])
+
+  // Auto-advance replay frames
+  useEffect(() => {
+    if (!replayPlaying) { cancelAnimationFrame(replayRafRef.current); return }
+    let last = null
+    const tick = ts => {
+      if (last !== null && ts - last < 16) { replayRafRef.current = requestAnimationFrame(tick); return }
+      last = ts
+      setReplayFrame(f => {
+        const next = (f ?? 0) + 1
+        if (next >= replayFrameCount) { setReplayPlaying(false); return replayFrameCount - 1 }
+        return next
+      })
+      replayRafRef.current = requestAnimationFrame(tick)
+    }
+    replayRafRef.current = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(replayRafRef.current)
+  }, [replayPlaying, replayFrameCount])
+
+  // Reset replay when starting a new cooling session
+  const startCooling = useCallback(mode => {
+    setReplayFrameCount(0)
+    setReplayFrame(null)
+    setReplayPlaying(false)
+    setCoolingMode(m => m === mode ? null : mode)
+  }, [])
   const tempMax = narrowTemp ? 700 : 2000
   const p = PRESETS.find(x => x.id === presetId)
 
@@ -69,11 +105,11 @@ export default function GlassViewer() {
             <span className="temp-val">{Math.min(coolingMode ? displayTemp : tempC, tempMax)} °C</span>
             <button
               className={`cool-btn ${coolingMode === 'slow' ? 'active' : ''}`}
-              onClick={() => setCoolingMode(m => m === 'slow' ? null : 'slow')}
+              onClick={() => startCooling('slow')}
             >Slow Cool</button>
             <button
               className={`cool-btn ${coolingMode === 'fast' ? 'active' : ''}`}
-              onClick={() => setCoolingMode(m => m === 'fast' ? null : 'fast')}
+              onClick={() => startCooling('fast')}
             >Fast Cool</button>
             <button
               className={`range-toggle ${narrowTemp ? 'active' : ''}`}
@@ -102,6 +138,29 @@ export default function GlassViewer() {
           </span>
         </div>
       </header>
+
+      {tab === 'melt' && replayFrameCount > 0 && (
+        <div className="replay-bar">
+          <button
+            className={`replay-btn ${replayPlaying ? 'active' : ''}`}
+            onClick={() => {
+              if (replayFrame === null) setReplayFrame(0)
+              setReplayPlaying(p => !p)
+            }}
+          >{replayPlaying ? '■ Stop' : '▶ Replay'}</button>
+          <input
+            type="range"
+            className="replay-range"
+            min={0} max={replayFrameCount - 1}
+            value={replayFrame ?? 0}
+            onChange={e => { setReplayPlaying(false); setReplayFrame(Number(e.target.value)) }}
+          />
+          <span className="replay-time">
+            {replayFrame ?? 0} / {replayFrameCount - 1}
+          </span>
+          <button className="replay-btn" onClick={() => setReplayFrame(null)}>Live</button>
+        </div>
+      )}
 
       {tab === 'melt' && showDev && (
         <div className="dev-bar">
@@ -146,6 +205,7 @@ export default function GlassViewer() {
               bondNums={bondNums} precompute={precompute}
               tempC={tempC} simSpeed={simSpeed} coolingMode={coolingMode}
               onTempUpdate={handleTempUpdate}
+              replayFrame={replayFrame} onReplayReady={handleReplayReady}
             />
           : <NetworksView sio2Pct={p.sio2} na2oPct={p.na2o} caoPct={p.cao} />
         }

@@ -182,6 +182,45 @@ body {
 .dev-toggle input { cursor: pointer; accent-color: #8070c0; }
 .dev-toggle:hover { color: #999; }
 
+/* ── Replay bar ── */
+.replay-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 20px;
+  background: #141a14;
+  border-bottom: 1px solid #1e301e;
+  flex-shrink: 0;
+}
+
+.replay-btn {
+  padding: 4px 10px;
+  border: 1px solid #3a6040;
+  border-radius: 4px;
+  background: #1e2e1e;
+  color: #6aaa70;
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.replay-btn:hover  { background: #2a3e2a; color: #8acc90; }
+.replay-btn.active { background: #1a4a20; border-color: #4a9050; color: #aaeab0; }
+
+.replay-range {
+  flex: 1;
+  accent-color: #4a9050;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.replay-time {
+  font-size: 11px;
+  color: #4a7050;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 /* ── Dev slider bar ── */
 .dev-bar {
   display: flex;
