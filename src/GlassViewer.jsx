@@ -26,7 +26,7 @@ export default function GlassViewer() {
   const tempMax = narrowTemp ? 700 : 2000
   const p = PRESETS.find(x => x.id === presetId)
 
-  const handleTempUpdate = useCallback(t => setDisplayTemp(t), [])
+  const handleTempUpdate = useCallback(t => { setDisplayTemp(t); setTempC(t) }, [])
 
   const switchPreset = id => { setCoolingMode(null); setPresetId(id) }
 
