@@ -520,49 +520,80 @@ export function crystallize(phys, strength, minCluster, angleTol = 25) {
 
 // ── Pre-computed cooling targets ─────────────────────────────────────────────
 //
-// computeAmorphousTargets: damped physics relaxation (T=0, long-range attract ON)
-// on cloned positions.  Returns settled amorphous layout as target array.
+// computeAmorphousTargets: generates a random network layout matching the
+// NetworksView amorphous sketch — Si by random sequential addition, O at
+// Si-Si bond midpoints, ions hanging off O perpendicularly.
 export function computeAmorphousTargets(phys) {
   const { particles, n } = phys
-  const px = new Float32Array(n), py = new Float32Array(n)
-  const vx = new Float32Array(n), vy = new Float32Array(n)
-  const fx = new Float32Array(n), fy = new Float32Array(n)
-  for (let i = 0; i < n; i++) { px[i] = particles[i].x; py[i] = particles[i].y }
 
-  for (let step = 0; step < 80; step++) {
-    fx.fill(0); fy.fill(0)
-    for (let i = 0; i < n; i++) {
-      const ti = particles[i].typeId
-      for (let j = i + 1; j < n; j++) {
-        const dx = px[j] - px[i]; if (dx > ATTRACT_RANGE || dx < -ATTRACT_RANGE) continue
-        const dy = py[j] - py[i]; if (dy > ATTRACT_RANGE || dy < -ATTRACT_RANGE) continue
-        const d2 = dx*dx + dy*dy; if (d2 < 0.01 || d2 >= ATTRACT_RANGE*ATTRACT_RANGE) continue
-        const d = Math.sqrt(d2), nx = dx/d, ny = dy/d
-        const spec = PAIR_TABLE[ti][particles[j].typeId]
-        if (spec) {
-          const cut = spec.r0 * spec.mult
-          if (d < cut) {
-            if (!spec.oneSided || d > spec.r0) {
-              const f = spec.k * (d - spec.r0)
-              fx[i]+=f*nx; fy[i]+=f*ny; fx[j]-=f*nx; fy[j]-=f*ny
-            }
-          } else {
-            const f = 0.06 * spec.r0 / d   // long-range pull to bring pairs within bond range
-            fx[i]+=f*nx; fy[i]+=f*ny; fx[j]-=f*nx; fy[j]-=f*ny
-          }
-        } else {
-          const cut = (particles[i].r + particles[j].r) * REP_MULT
-          if (d < cut) { const f = -REP_K*(cut-d); fx[i]+=f*nx; fy[i]+=f*ny; fx[j]-=f*nx; fy[j]-=f*ny }
-        }
-      }
+  const counts = [0, 0, 0, 0]
+  for (const p of particles) counts[p.typeId]++
+  const [nSi, nO, nNa, nCa] = counts
+
+  const a     = PREFERRED['O-Si'].r0 * 2   // 18px
+  const minD  = a * 0.68
+  const minSq = (minD * 0.99) ** 2
+  const maxSq = (a * 1.90) ** 2
+  const pad   = a
+
+  // Place Si by random sequential addition
+  const siPos = []
+  let tries = 0
+  while (siPos.length < nSi && tries < 100000) {
+    tries++
+    const x = pad + Math.random() * (SIM_W - 2 * pad)
+    const y = pad + Math.random() * (SIM_H - 2 * pad)
+    let ok = true
+    for (const s of siPos) {
+      if ((s.x - x) ** 2 + (s.y - y) ** 2 < minSq) { ok = false; break }
     }
-    for (let i = 0; i < n; i++) {
-      vx[i] = vx[i]*0.4 + fx[i];  vy[i] = vy[i]*0.4 + fy[i]
-      px[i] = Math.max(particles[i].r+2, Math.min(SIM_W-particles[i].r-2, px[i]+vx[i]))
-      py[i] = Math.max(particles[i].r+2, Math.min(SIM_H-particles[i].r-2, py[i]+vy[i]))
+    if (ok) siPos.push({ x, y })
+  }
+
+  // Bond Si pairs (closest first, max 3 bonds per Si)
+  const cands = []
+  for (let i = 0; i < siPos.length; i++) {
+    for (let j = i + 1; j < siPos.length; j++) {
+      const dx = siPos[j].x - siPos[i].x, dy = siPos[j].y - siPos[i].y
+      const dSq = dx * dx + dy * dy
+      if (dSq > minSq && dSq < maxSq) cands.push({ i, j, dSq })
     }
   }
-  return Array.from({length: n}, (_, i) => ({ x: px[i], y: py[i] }))
+  cands.sort((a, b) => a.dSq - b.dSq)
+
+  const conn = new Array(siPos.length).fill(0)
+  const oBonds = []
+  for (const { i, j } of cands) {
+    if (conn[i] < 3 && conn[j] < 3) {
+      conn[i]++; conn[j]++
+      oBonds.push({ x: (siPos[i].x + siPos[j].x) / 2, y: (siPos[i].y + siPos[j].y) / 2, si1: i, si2: j })
+    }
+  }
+
+  // Ion targets: perpendicular off shuffled O bond midpoints
+  const shuffled = [...oBonds].sort(() => Math.random() - 0.5)
+  const ionTargets = []
+  for (const ob of shuffled) {
+    if (ionTargets.length >= nNa + nCa) break
+    const s1 = siPos[ob.si1], s2 = siPos[ob.si2]
+    const len = Math.hypot(s2.x - s1.x, s2.y - s1.y)
+    const px = -(s2.y - s1.y) / len, py = (s2.x - s1.x) / len
+    const flip = Math.random() < 0.5 ? 1 : -1
+    const ix = ob.x + flip * px * 13, iy = ob.y + flip * py * 13
+    if (ix > 4 && ix < SIM_W - 4 && iy > 4 && iy < SIM_H - 4) ionTargets.push({ x: ix, y: iy })
+  }
+
+  // Map targets back to particle order by type
+  const targets = new Array(n)
+  let si = 0, o = 0, na = 0, ca = 0
+  for (let i = 0; i < n; i++) {
+    const p = particles[i]
+    if (p.typeId === 0)      targets[i] = siPos[si++]    ?? { x: p.x, y: p.y }
+    else if (p.typeId === 1) targets[i] = oBonds[o++]    ? { x: oBonds[o - 1].x, y: oBonds[o - 1].y } : { x: p.x, y: p.y }
+    else if (p.typeId === 2) targets[i] = ionTargets[na++] ?? { x: p.x, y: p.y }
+    else                     targets[i] = ionTargets[nNa + ca++] ?? { x: p.x, y: p.y }
+  }
+  return targets
 }
 
 // computeSlowCoolTargets: hex crystal lattice stamped from center, particles
