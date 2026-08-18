@@ -627,12 +627,20 @@ export function computeSlowCoolTargets(phys, sio2Pct, _na2oPct, _caoPct) {
   const ni  = Math.ceil(SIM_W / a1x) + 1
   const nj  = Math.ceil(SIM_H / a2y) + 1
 
-  // Random nucleation seeds — domains grow from here
-  const numSeeds = 2 + Math.floor(Math.random() * 3)   // 2–4 seeds
-  const seeds = Array.from({ length: numSeeds }, () => ({
-    x: SIM_W * (0.12 + Math.random() * 0.76),
-    y: SIM_H * (0.12 + Math.random() * 0.76),
-  }))
+  // Pick nucleation seeds from actual Si particle positions so crystal sites
+  // grow from where atoms already are, minimising travel distances.
+  const siParticles = particles.filter(p => p.typeId === 0)
+  const numSeeds = Math.min(siParticles.length, 2 + Math.floor(Math.random() * 3))
+  const shuffled = [...siParticles].sort(() => Math.random() - 0.5)
+  // Space seeds out: reject candidates too close to already-chosen seeds
+  const seeds = []
+  const minSeedGap = Math.min(SIM_W, SIM_H) * 0.25
+  for (const p of shuffled) {
+    if (seeds.length >= numSeeds) break
+    if (seeds.every(s => Math.hypot(p.x - s.x, p.y - s.y) > minSeedGap))
+      seeds.push({ x: p.x, y: p.y })
+  }
+  if (seeds.length === 0) seeds.push(siParticles[0] ?? { x: SIM_W/2, y: SIM_H/2 })
   const nearestSeedDist = (x, y) =>
     seeds.reduce((best, s) => Math.min(best, Math.hypot(x - s.x, y - s.y)), Infinity)
 
