@@ -8,7 +8,6 @@ const SUBSTEPS       = 6      // more substeps → fewer tunnelling events at hi
 const THERMAL_SPEED  = 0.005  // v_rms = THERMAL_SPEED × √T  (px/substep per √°C)
 const THERMOSTAT_TAU = 0.10   // Berendsen coupling: fraction of (v_target/v_rms − 1) per substep
 const WALL_K         = 1.0    // soft boundary spring
-const WALL_BUF       = 100    // invisible buffer beyond visible area before walls push back
 
 // Opposite-charge pairs: preferred distance, spring constant, cutoff multiplier.
 // Each species sits on its own hex lattice scaled so O midpoints match r0 exactly:
@@ -320,8 +319,8 @@ export function stepPhysics(phys, tempC, coolingFactor = 1.0, attractK = 0, cool
     for (let i = 0; i < n; i++) {
       const p  = particles[i]
       const m  = p.r + 2
-      const x0 = -WALL_BUF + m,          x1 = SIM_W + WALL_BUF - m
-      const y0 = -WALL_BUF + m,          y1 = SIM_H + WALL_BUF - m
+      const x0 = m,      x1 = SIM_W - m
+      const y0 = m,      y1 = SIM_H - m
       if (p.x < x0) fx[i] += WALL_K * (x0 - p.x)
       if (p.x > x1) fx[i] += WALL_K * (x1 - p.x)
       if (p.y < y0) fy[i] += WALL_K * (y0 - p.y)
