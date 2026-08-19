@@ -153,7 +153,7 @@ export function initPhysics(cellData) {
     n,
     fx: new Float32Array(n),
     fy: new Float32Array(n),
-    hasBeenMelted: false,
+    hasBeenMelted: true,   // anchor disabled — walls contain the system
   }
 }
 
@@ -363,26 +363,19 @@ export function stepPhysics(phys, tempC, coolingFactor = 1.0, attractK = 0, cool
       // Cooling mode: apply per-substep damping (nth root of the per-step factor)
       const sf = Math.pow(coolingFactor, 1 / SUBSTEPS)
       for (let i = 0; i < n; i++) { particles[i].vx *= sf; particles[i].vy *= sf }
-    } else if (vTarget < 0.001) {
-      // T ≈ 0: damp velocities to rest
-      for (let i = 0; i < n; i++) { particles[i].vx *= 0.8; particles[i].vy *= 0.8 }
     } else {
-      // Berendsen thermostat: rescale toward target speed
-      let sumV2 = 0
+      // Langevin thermostat: per-particle damping + independent Gaussian kick.
+      // Each atom gets its own random velocity draw each substep, producing a
+      // natural Maxwell-Boltzmann distribution (vs Berendsen's uniform rescaling).
+      // Steady-state: <vx²+vy²> ≈ vTarget² (same average KE as before).
+      const DAMP      = 1 - THERMOSTAT_TAU
+      const kickSigma = vTarget * Math.sqrt(THERMOSTAT_TAU)
       for (let i = 0; i < n; i++) {
-        const p = particles[i]; sumV2 += p.vx * p.vx + p.vy * p.vy
-      }
-      const vRms = Math.sqrt(sumV2 / n)
-      if (vRms < 0.001) {
-        // Cold start: initialize with random velocities at target
-        for (let i = 0; i < n; i++) {
-          const theta = Math.random() * Math.PI * 2
-          particles[i].vx = vTarget * Math.cos(theta)
-          particles[i].vy = vTarget * Math.sin(theta)
-        }
-      } else {
-        const scale = 1 + THERMOSTAT_TAU * (vTarget / vRms - 1)
-        for (let i = 0; i < n; i++) { particles[i].vx *= scale; particles[i].vy *= scale }
+        const u1 = Math.random() || 1e-10
+        const r  = Math.sqrt(-2 * Math.log(u1)) * kickSigma  // Box-Muller magnitude
+        const a  = Math.random() * Math.PI * 2
+        particles[i].vx = particles[i].vx * DAMP + r * Math.cos(a)
+        particles[i].vy = particles[i].vy * DAMP + r * Math.sin(a)
       }
     }
   }
