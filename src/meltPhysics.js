@@ -175,7 +175,7 @@ const COORD_TARGET   = [3, 2, 1, 2]   // Si, O, Na, Ca (typeId order)
 // coolingMode:  null | 'fast' | 'slow'
 export function stepPhysics(phys, tempC, coolingFactor = 1.0, attractK = 0, coolingMode = null) {
   const { particles, n, fx, fy } = phys
-  const vTarget = THERMAL_SPEED * Math.sqrt(Math.max(0, tempC))
+  const vTarget = THERMAL_SPEED * Math.sqrt(Math.max(30, tempC))
 
   if (!phys.hasBeenMelted && tempC > ANCHOR_MELT_TEMP) phys.hasBeenMelted = true
   const anchorStr = phys.hasBeenMelted
