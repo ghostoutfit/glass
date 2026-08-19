@@ -304,7 +304,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
         coolingFrameRef.current++
         const dur = cm === 'fast' ? FAST_COOL_FRAMES : SLOW_COOL_FRAMES
         const t   = Math.min(1, coolingFrameRef.current / dur)
-        T = coolingStartTempRef.current * (1 - t) + 20 * t
+        T = coolingStartTempRef.current * (1 - t) + 200 * t
         effectiveTempRef.current = T
       } else {
         T = tempRef.current
