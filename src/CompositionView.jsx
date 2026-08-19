@@ -273,22 +273,22 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
     function frame() {
       const cm = coolingRef.current
 
-      // ── Detect cooling mode change and reset ramp state ──────────
+      // ── Detect cooling/heating mode change and reset ramp state ─────
       if (cm !== prevCoolingRef.current) {
-        if (cm === 'fast' || cm === 'slow') {
+        if (cm === 'fast' || cm === 'slow' || cm === 'fastHeat' || cm === 'slowHeat') {
           coolingStartTempRef.current = effectiveTempRef.current
           coolingFrameRef.current     = 0
           replayBufferRef.current     = []
           replayNotifiedRef.current   = false
-          // Initialize precompute targets when cooling starts (if enabled)
-          if (precomputeRef.current && physRef.current) {
+          // Precompute targets only for cooling (heating uses live physics)
+          if (precomputeRef.current && physRef.current && (cm === 'fast' || cm === 'slow')) {
             const targets = cm === 'slow'
               ? computeSlowCoolTargets(physRef.current, sio2Pct)
               : computeAmorphousTargets(physRef.current)
             initPrecompute(physRef.current, targets)
           }
         } else {
-          // Cooling ended — discard precompute state, notify replay ready
+          // Ramp ended — discard precompute state, notify replay ready
           if (physRef.current) delete physRef.current.precompute
           if (!replayNotifiedRef.current && replayBufferRef.current.length > 0) {
             replayNotifiedRef.current = true
@@ -306,14 +306,20 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
         const t   = Math.min(1, coolingFrameRef.current / dur)
         T = coolingStartTempRef.current * (1 - t) + 200 * t
         effectiveTempRef.current = T
+      } else if (cm === 'fastHeat' || cm === 'slowHeat') {
+        coolingFrameRef.current++
+        const dur = cm === 'fastHeat' ? FAST_COOL_FRAMES : SLOW_COOL_FRAMES
+        const t   = Math.min(1, coolingFrameRef.current / dur)
+        T = coolingStartTempRef.current * (1 - t) + 1500 * t
+        effectiveTempRef.current = T
       } else {
         T = tempRef.current
         effectiveTempRef.current = T
       }
 
       // Propagate effective temperature to parent display (throttled to every 6 frames)
-      if (onTempUpdateRef.current && (cm === 'fast' || cm === 'slow') &&
-          coolingFrameRef.current % 6 === 0) {
+      const isRamping = cm === 'fast' || cm === 'slow' || cm === 'fastHeat' || cm === 'slowHeat'
+      if (onTempUpdateRef.current && isRamping && coolingFrameRef.current % 6 === 0) {
         onTempUpdateRef.current(Math.round(T))
       }
 
@@ -373,7 +379,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
         }
 
         // ── Record frame for replay ───────────────────────────────────
-        if (cm === 'fast' || cm === 'slow') {
+        if (isRamping) {
           const ps   = phys.particles
           const snap = new Float32Array(ps.length * 2)
           for (let i = 0; i < ps.length; i++) { snap[i * 2] = ps[i].x; snap[i * 2 + 1] = ps[i].y }
@@ -381,7 +387,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
 
           // Notify when ramp completes
           if (!replayNotifiedRef.current) {
-            const dur = cm === 'fast' ? FAST_COOL_FRAMES : SLOW_COOL_FRAMES
+            const dur = (cm === 'fast' || cm === 'fastHeat') ? FAST_COOL_FRAMES : SLOW_COOL_FRAMES
             if (coolingFrameRef.current >= dur) {
               replayNotifiedRef.current = true
               onReplayReadyRef.current?.(replayBufferRef.current.length)

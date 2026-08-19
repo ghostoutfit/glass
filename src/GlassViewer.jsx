@@ -104,6 +104,14 @@ export default function GlassViewer() {
             />
             <span className="temp-val">{Math.min(coolingMode ? displayTemp : tempC, tempMax)} °C</span>
             <button
+              className={`heat-btn ${coolingMode === 'slowHeat' ? 'active' : ''}`}
+              onClick={() => startCooling('slowHeat')}
+            >Slow Heat</button>
+            <button
+              className={`heat-btn ${coolingMode === 'fastHeat' ? 'active' : ''}`}
+              onClick={() => startCooling('fastHeat')}
+            >Fast Heat</button>
+            <button
               className={`cool-btn ${coolingMode === 'slow' ? 'active' : ''}`}
               onClick={() => startCooling('slow')}
             >Slow Cool</button>

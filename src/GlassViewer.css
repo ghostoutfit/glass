@@ -118,6 +118,21 @@ body {
   cursor: pointer;
 }
 
+.heat-btn {
+  padding: 4px 9px;
+  border: 1px solid #644;
+  border-radius: 4px;
+  background: #342424;
+  color: #cc8877;
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.heat-btn:hover { background: #483030; color: #eeaa88; }
+.heat-btn.active { background: #501a1a; border-color: #cc4433; color: #ff8866; }
+
 .cool-btn {
   padding: 4px 9px;
   border: 1px solid #446;
