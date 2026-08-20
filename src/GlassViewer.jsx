@@ -13,14 +13,16 @@ const PRESETS = [
 export default function GlassViewer() {
   const [tab, setTab]               = useState('melt')
   const [presetId, setPresetId]     = useState('pure')
-  const [tempC, setTempC]           = useState(20)
+  const [energyVal, setEnergyVal]   = useState(20)      // slider value 0-2000 (energy target)
+  const [derivedTemp, setDerivedTemp] = useState(20)    // temperature computed from KE
+  const [displayEnergy, setDisplayEnergy] = useState(20) // shown during ramps
   const [simSpeed, setSimSpeed]     = useState(0.5)
   const [sioR0, setSioR0]           = useState(9)
   const [attractK, setAttractK]     = useState(0.02)
   const [showDev, setShowDev]       = useState(true)
+  const [showGraphs, setShowGraphs] = useState(false)
   const [narrowTemp, setNarrowTemp] = useState(false)
-  const [coolingMode, setCoolingMode] = useState(null) // null | 'slow' | 'fast'
-  const [displayTemp, setDisplayTemp] = useState(tempC)
+  const [coolingMode, setCoolingMode] = useState(null)
   const [precompute, setPrecompute]       = useState(true)
   const [bondNums, setBondNums]           = useState(false)
   const [replayFrameCount, setReplayFrameCount] = useState(0)
@@ -32,6 +34,13 @@ export default function GlassViewer() {
     setReplayFrameCount(count)
     setReplayFrame(null)
     setReplayPlaying(false)
+  }, [])
+
+  // Receives slider-equivalent energy value from ramp (to sync slider position)
+  const handleTempUpdate = useCallback(val => { setDisplayEnergy(val) }, [])
+  // Receives KE, PE, derived temperature from each physics frame
+  const handleEnergyUpdate = useCallback((_ke, _pe, derivedT) => {
+    setDerivedTemp(derivedT)
   }, [])
 
   // Auto-advance replay frames
@@ -52,17 +61,14 @@ export default function GlassViewer() {
     return () => cancelAnimationFrame(replayRafRef.current)
   }, [replayPlaying, replayFrameCount])
 
-  // Reset replay when starting a new cooling session
   const startCooling = useCallback(mode => {
     setReplayFrameCount(0)
     setReplayFrame(null)
     setReplayPlaying(false)
     setCoolingMode(m => m === mode ? null : mode)
   }, [])
-  const tempMax = narrowTemp ? 700 : 2000
+  const energyMax = narrowTemp ? 700 : 2000
   const p = PRESETS.find(x => x.id === presetId)
-
-  const handleTempUpdate = useCallback(t => { setDisplayTemp(t); setTempC(t) }, [])
 
   const switchPreset = id => { setCoolingMode(null); setPresetId(id) }
 
@@ -94,15 +100,17 @@ export default function GlassViewer() {
           {/* ── Melt-only controls ── */}
           {tab === 'melt' && <>
             <div className="toolbar-divider" />
-            <span className="toolbar-label">Temperature</span>
+            <span className="toolbar-label">Energy</span>
             <input
               type="range"
               className="temp-range"
-              min={0} max={tempMax} step={narrowTemp ? 5 : 10}
-              value={Math.min(tempC, tempMax)}
-              onChange={e => { setCoolingMode(null); setTempC(Number(e.target.value)); setDisplayTemp(Number(e.target.value)) }}
+              min={0} max={energyMax} step={narrowTemp ? 5 : 10}
+              value={Math.min(coolingMode ? displayEnergy : energyVal, energyMax)}
+              onChange={e => { setCoolingMode(null); setEnergyVal(Number(e.target.value)); setDisplayEnergy(Number(e.target.value)) }}
             />
-            <span className="temp-val">{Math.min(coolingMode ? displayTemp : tempC, tempMax)} °C</span>
+            <span className="temp-val">{Math.min(coolingMode ? displayEnergy : energyVal, energyMax)}</span>
+            <span className="toolbar-label" style={{ marginLeft: 6 }}>T:</span>
+            <span className="temp-val">{derivedTemp}°C</span>
             <button
               className={`heat-btn ${coolingMode === 'slowHeat' ? 'active' : ''}`}
               onClick={() => startCooling('slowHeat')}
@@ -122,8 +130,8 @@ export default function GlassViewer() {
             <button
               className={`range-toggle ${narrowTemp ? 'active' : ''}`}
               onClick={() => setNarrowTemp(n => !n)}
-              title="Toggle temperature range"
-            >0–{narrowTemp ? '2000' : '700'}°C</button>
+              title="Toggle energy range"
+            >0–{narrowTemp ? '2000' : '700'}</button>
             <div className="toolbar-divider" />
             <span className="speed-label">🐢</span>
             <input
@@ -201,6 +209,11 @@ export default function GlassViewer() {
             <input type="checkbox" checked={bondNums} onChange={e => setBondNums(e.target.checked)} />
             Bond #s
           </label>
+          <div className="toolbar-divider" />
+          <label className="dev-toggle">
+            <input type="checkbox" checked={showGraphs} onChange={e => setShowGraphs(e.target.checked)} />
+            Graphs
+          </label>
         </div>
       )}
 
@@ -211,8 +224,10 @@ export default function GlassViewer() {
               sio2Pct={p.sio2} na2oPct={p.na2o} caoPct={p.cao}
               sioR0={sioR0} attractK={attractK} debug={showDev}
               bondNums={bondNums} precompute={precompute}
-              tempC={tempC} simSpeed={simSpeed} coolingMode={coolingMode}
+              energyVal={energyVal} simSpeed={simSpeed} coolingMode={coolingMode}
               onTempUpdate={handleTempUpdate}
+              onEnergyUpdate={handleEnergyUpdate}
+              showGraphs={showGraphs}
               replayFrame={replayFrame} onReplayReady={handleReplayReady}
             />
           : <NetworksView sio2Pct={p.sio2} na2oPct={p.na2o} caoPct={p.cao} />

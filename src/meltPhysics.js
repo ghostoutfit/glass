@@ -5,7 +5,8 @@ export const SIM_W = 600
 export const SIM_H = 350   // grid area only
 
 const SUBSTEPS       = 6      // more substeps → fewer tunnelling events at high T
-const THERMAL_SPEED  = 0.005  // v_rms = THERMAL_SPEED × √T  (px/substep per √°C)
+export const THERMAL_SPEED  = 0.005  // v_rms = THERMAL_SPEED × √T  (px/substep per √°C)
+export const ENERGY_UNIT    = THERMAL_SPEED * THERMAL_SPEED * 0.5  // = 1.25e-5; ePerParticle = (sliderVal+273)*ENERGY_UNIT
 const THERMOSTAT_TAU = 0.10   // Berendsen coupling: fraction of (v_target/v_rms − 1) per substep
 const WALL_K         = 1.0    // soft boundary spring
 
@@ -169,18 +170,49 @@ export function initPhysics(cellData) {
 const ATTRACT_RANGE  = 40
 const COORD_TARGET   = [3, 2, 1, 2]   // Si, O, Na, Ca (typeId order)
 
+// ── Energy diagnostics ────────────────────────────────────────────────────────
+export function computeKE(phys) {
+  const { particles, n } = phys
+  let ke = 0
+  for (let i = 0; i < n; i++) { ke += particles[i].vx ** 2 + particles[i].vy ** 2 }
+  return ke * 0.5
+}
+
+// PE from bond springs: ½k(d−r0)² for each bond currently in range.
+// Si-O is one-sided (no compression spring), so skip ext < 0 for those.
+export function computePE(phys) {
+  const { particles, bonds } = phys
+  let pe = 0
+  for (const b of bonds) {
+    const spec = PAIR_TABLE[particles[b.i].typeId][particles[b.j].typeId]
+    if (!spec) continue
+    const ext = b.strain * spec.r0   // d − r0
+    if (spec.oneSided && ext < 0) continue
+    pe += 0.5 * spec.k * ext * ext
+  }
+  return pe
+}
+
 // ── Step ──────────────────────────────────────────────────────────────────────
+// ePerParticle: total energy target per particle (KE + PE). vTarget is derived
+//   by subtracting current PE so the thermostat chases KE = ePerParticle − PE/n.
 // coolingFactor: 1.0 = thermostat mode
 // attractK:     subtle pull strength, active only when coolingMode !== null
-// coolingMode:  null | 'fast' | 'slow'
-export function stepPhysics(phys, tempC, coolingFactor = 1.0, attractK = 0, coolingMode = null) {
+// coolingMode:  null | 'fast' | 'slow' | 'fastHeat' | 'slowHeat'
+export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 0, coolingMode = null) {
   const { particles, n, fx, fy } = phys
-  const vTarget = THERMAL_SPEED * Math.sqrt(tempC + 273)
 
-  if (!phys.hasBeenMelted && tempC > ANCHOR_MELT_TEMP) phys.hasBeenMelted = true
-  const anchorStr = phys.hasBeenMelted
-    ? 0
-    : ANCHOR_K * Math.max(0, 1 - tempC / ANCHOR_FADE_TEMP)
+  // Energy-based vTarget: subtract current PE/n from total energy target.
+  // Floor at ENERGY_UNIT*10 (≈10°C worth of KE) so particles never fully freeze.
+  const peNow       = computePE(phys)
+  const keTarget    = Math.max(ENERGY_UNIT * 10, ePerParticle - peNow / n)
+  const vTarget     = Math.sqrt(2 * keTarget)
+
+  // Derive current kinetic temperature for physics gates (attract modifier threshold)
+  const keNow       = computeKE(phys)
+  const derivedTempC = Math.max(-273, keNow / (n * ENERGY_UNIT) - 273)
+
+  const anchorStr = 0  // anchor permanently disabled (hasBeenMelted = true at init)
 
   // Per-atom opposite-charge bond counts and (for slow cool) Si bond-angle maps.
   // Both built from last frame's bond snapshot — one frame stale, acceptable.
@@ -266,7 +298,7 @@ export function stepPhysics(phys, tempC, coolingFactor = 1.0, attractK = 0, cool
 
           // Slow cool modifier gate: Na-O and Ca-O attraction only below 250°C
           const isSiO = spec === PAIR_TABLE[0][1]
-          if (coolingMode === 'slow' && !isSiO && tempC > 250) continue
+          if (coolingMode === 'slow' && !isSiO && derivedTempC > 250) continue
 
           const dx = pj.x - pi.x
           if (dx > ATTRACT_RANGE || dx < -ATTRACT_RANGE) continue

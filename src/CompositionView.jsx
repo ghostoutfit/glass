@@ -1,7 +1,7 @@
 import { useMemo, useRef, useEffect } from 'react'
 import { initPhysics, stepPhysics, drawPhysics, crystallize, setSiOr0,
          computeAmorphousTargets, computeSlowCoolTargets, initPrecompute, stepPrecompute,
-         rebuildBonds } from './meltPhysics.js'
+         rebuildBonds, computeKE, computePE, ENERGY_UNIT, THERMAL_SPEED } from './meltPhysics.js'
 
 const VW      = 600
 const VH_GRID = 350
@@ -181,6 +181,106 @@ function buildAllAtoms(types, sioR0) {
   return [...si.cats, ...na.cats, ...ca.cats, ...si.oAtoms, ...na.oAtoms, ...ca.oAtoms]
 }
 
+// ── Graph drawing helpers ─────────────────────────────────────────────────────
+function setupCanvas(canvas) {
+  if (!canvas || !canvas.clientWidth) return null
+  const dpr = window.devicePixelRatio || 1
+  const w = canvas.clientWidth, h = canvas.clientHeight
+  const cw = Math.round(w * dpr), ch = Math.round(h * dpr)
+  if (canvas.width !== cw || canvas.height !== ch) { canvas.width = cw; canvas.height = ch }
+  const ctx = canvas.getContext('2d')
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  return { ctx, w, h }
+}
+
+function drawTEGraph(canvas, histE, histT, head, count, histLen) {
+  const s = setupCanvas(canvas)
+  if (!s) return
+  const { ctx, w, h } = s
+  const pL = 34, pR = 8, pT = 6, pB = 18
+  const pw = w - pL - pR, ph = h - pT - pB
+
+  ctx.fillStyle = '#111'
+  ctx.fillRect(0, 0, w, h)
+
+  // Axes
+  ctx.strokeStyle = '#333'; ctx.lineWidth = 1
+  ctx.beginPath()
+  ctx.moveTo(pL, pT); ctx.lineTo(pL, pT + ph)
+  ctx.lineTo(pL + pw, pT + ph)
+  ctx.stroke()
+
+  // Axis labels
+  ctx.fillStyle = '#555'; ctx.font = '9px monospace'; ctx.textAlign = 'right'; ctx.textBaseline = 'middle'
+  ctx.fillText('2000', pL - 2, pT)
+  ctx.fillText('0', pL - 2, pT + ph)
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top'
+  ctx.fillText('0', pL, pT + ph + 2)
+  ctx.fillText('2000', pL + pw, pT + ph + 2)
+  ctx.fillText('Energy →', pL + pw / 2, pT + ph + 2)
+  ctx.save(); ctx.translate(9, pT + ph / 2); ctx.rotate(-Math.PI / 2)
+  ctx.fillText('Temp °C', 0, 0)
+  ctx.restore()
+
+  if (count < 2) return
+
+  ctx.strokeStyle = '#c07040'; ctx.lineWidth = 1.5; ctx.lineJoin = 'round'
+  ctx.beginPath()
+  for (let i = 0; i < count; i++) {
+    const idx = (head - count + i + histLen) % histLen
+    const x = pL + (histE[idx] / 2000) * pw
+    const y = pT + ph - (Math.max(0, histT[idx]) / 2000) * ph
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)
+  }
+  ctx.stroke()
+
+  // Current point dot
+  const lastIdx = (head - 1 + histLen) % histLen
+  const lx = pL + (histE[lastIdx] / 2000) * pw
+  const ly = pT + ph - (Math.max(0, histT[lastIdx]) / 2000) * ph
+  ctx.fillStyle = '#ffaa60'; ctx.beginPath(); ctx.arc(lx, ly, 3, 0, Math.PI * 2); ctx.fill()
+}
+
+function drawBarGraph(canvas, ke, pe, n) {
+  const s = setupCanvas(canvas)
+  if (!s || !n) return
+  const { ctx, w, h } = s
+  const pL = 8, pR = 8, pT = 6, pB = 18
+  const pw = w - pL - pR, ph = h - pT - pB
+
+  ctx.fillStyle = '#111'
+  ctx.fillRect(0, 0, w, h)
+
+  // Scale bars to per-particle energy, max = (2000+273)*ENERGY_UNIT
+  const E_MAX = (2000 + 273) * ENERGY_UNIT
+  const keP = ke / n, peP = pe / n
+  const barW = pw / 2 - 4
+
+  const keH = Math.min(ph, (keP / E_MAX) * ph)
+  const peH = Math.min(ph, (peP / E_MAX) * ph)
+
+  // KE bar (left)
+  ctx.fillStyle = '#c06030'
+  ctx.fillRect(pL, pT + ph - keH, barW, keH)
+  // PE bar (right)
+  ctx.fillStyle = '#4060c0'
+  ctx.fillRect(pL + barW + 8, pT + ph - peH, barW, peH)
+
+  // Baseline
+  ctx.strokeStyle = '#333'; ctx.lineWidth = 1
+  ctx.beginPath(); ctx.moveTo(pL, pT + ph); ctx.lineTo(pL + pw, pT + ph); ctx.stroke()
+
+  // Labels
+  ctx.fillStyle = '#888'; ctx.font = '9px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'top'
+  ctx.fillText('KE', pL + barW / 2, pT + ph + 2)
+  ctx.fillText('PE', pL + barW + 8 + barW / 2, pT + ph + 2)
+
+  // Values
+  ctx.fillStyle = '#aaa'; ctx.textBaseline = 'bottom'
+  if (keH > 12) ctx.fillText((keP * 1e4).toFixed(1), pL + barW / 2, pT + ph - keH - 1)
+  if (peH > 12) ctx.fillText((peP * 1e4).toFixed(1), pL + barW + 8 + barW / 2, pT + ph - peH - 1)
+}
+
 function LegendDot({ cx, cy, r, fill, label }) {
   return (
     <>
@@ -193,7 +293,7 @@ function LegendDot({ cx, cy, r, fill, label }) {
   )
 }
 
-export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, attractK = 0, debug = false, bondNums = false, precompute = false, tempC = 20, simSpeed = 1, coolingMode = null, onTempUpdate = null, replayFrame = null, onReplayReady = null }) {
+export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, attractK = 0, debug = false, bondNums = false, precompute = false, energyVal = 20, simSpeed = 1, coolingMode = null, onTempUpdate = null, onEnergyUpdate = null, replayFrame = null, onReplayReady = null, showGraphs = false }) {
   const types = useMemo(
     () => buildGrid(sio2Pct, na2oPct, caoPct),
     [sio2Pct, na2oPct, caoPct]
@@ -212,20 +312,24 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
   })), [types, allAtoms])
 
   // ── Physics refs ──────────────────────────────────────────────
-  const canvasRef          = useRef(null)
-  const physRef            = useRef(null)
-  const rafRef             = useRef(null)
-  const tempRef            = useRef(tempC)
-  const speedRef           = useRef(simSpeed)
-  const coolingRef         = useRef(coolingMode)
-  const frameAccRef        = useRef(0)
-  // Cooling state
-  const effectiveTempRef    = useRef(tempC)   // tracks temp during active cooling ramp
+  const canvasRef           = useRef(null)
+  const graphTERef          = useRef(null)   // T-vs-E history graph canvas
+  const graphBarRef         = useRef(null)   // KE/PE bar chart canvas
+  const physRef             = useRef(null)
+  const rafRef              = useRef(null)
+  const energyValRef        = useRef(energyVal)
+  const speedRef            = useRef(simSpeed)
+  const coolingRef          = useRef(coolingMode)
+  const showGraphsRef       = useRef(showGraphs)
+  const frameAccRef         = useRef(0)
+  // Cooling/heating state (energy-based)
+  const effectiveERef       = useRef((energyVal + 273) * ENERGY_UNIT)  // ePerParticle during ramp
   const prevCoolingRef      = useRef(null)
-  const coolingStartTempRef = useRef(tempC)
+  const coolingStartERef    = useRef((energyVal + 273) * ENERGY_UNIT)
   const coolingFrameRef     = useRef(0)
   const crystParamsRef      = useRef(getCrystParams(sio2Pct, na2oPct, caoPct))
   const onTempUpdateRef     = useRef(onTempUpdate)
+  const onEnergyUpdateRef   = useRef(onEnergyUpdate)
   const attractKRef         = useRef(attractK)
   const debugRef            = useRef(debug)
   const bondNumsRef         = useRef(bondNums)
@@ -234,23 +338,33 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
   const onReplayReadyRef    = useRef(onReplayReady)
   const replayBufferRef     = useRef([])
   const replayNotifiedRef   = useRef(false)
+  // Graph history ring buffer (T vs E)
+  const HIST_LEN            = 1200
+  const histERef            = useRef(new Float32Array(HIST_LEN))
+  const histTRef            = useRef(new Float32Array(HIST_LEN))
+  const histHeadRef         = useRef(0)
+  const histCountRef        = useRef(0)
+  const histFrameRef        = useRef(0)  // throttle: record every 3 frames
 
   useEffect(() => { onTempUpdateRef.current = onTempUpdate }, [onTempUpdate])
+  useEffect(() => { onEnergyUpdateRef.current = onEnergyUpdate }, [onEnergyUpdate])
   useEffect(() => { attractKRef.current = attractK }, [attractK])
   useEffect(() => { debugRef.current = debug }, [debug])
   useEffect(() => { bondNumsRef.current = bondNums }, [bondNums])
   useEffect(() => { precomputeRef.current = precompute }, [precompute])
   useEffect(() => { replayFrameRef.current = replayFrame }, [replayFrame])
   useEffect(() => { onReplayReadyRef.current = onReplayReady }, [onReplayReady])
+  useEffect(() => { showGraphsRef.current = showGraphs }, [showGraphs])
 
   // Keep the physics module's Si-O r0 in sync with the slider
   useEffect(() => { setSiOr0(sioR0) }, [sioR0])
 
-  // Sync slider temperature to effective temp when not cooling
+  // Sync energy target ref when not cooling
   useEffect(() => {
-    tempRef.current = tempC
-    if (!coolingRef.current) effectiveTempRef.current = tempC
-  }, [tempC])
+    energyValRef.current = energyVal
+    const ePerParticle = (energyVal + 273) * ENERGY_UNIT
+    if (!coolingRef.current) effectiveERef.current = ePerParticle
+  }, [energyVal])
 
   useEffect(() => { speedRef.current = simSpeed }, [simSpeed])
   useEffect(() => { coolingRef.current = coolingMode }, [coolingMode])
@@ -273,14 +387,14 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
     function frame() {
       const cm = coolingRef.current
 
-      // ── Detect cooling/heating mode change and reset ramp state ─────
+      // ── Detect ramp mode change ───────────────────────────────────
       if (cm !== prevCoolingRef.current) {
         if (cm === 'fast' || cm === 'slow' || cm === 'fastHeat' || cm === 'slowHeat') {
-          coolingStartTempRef.current = effectiveTempRef.current
-          coolingFrameRef.current     = 0
-          replayBufferRef.current     = []
-          replayNotifiedRef.current   = false
-          // Precompute targets only for cooling (heating uses live physics)
+          coolingStartERef.current  = effectiveERef.current
+          coolingFrameRef.current   = 0
+          replayBufferRef.current   = []
+          replayNotifiedRef.current = false
+          histHeadRef.current  = 0; histCountRef.current  = 0  // clear T-vs-E history on new ramp
           if (precomputeRef.current && physRef.current && (cm === 'fast' || cm === 'slow')) {
             const targets = cm === 'slow'
               ? computeSlowCoolTargets(physRef.current, sio2Pct)
@@ -288,7 +402,6 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
             initPrecompute(physRef.current, targets)
           }
         } else {
-          // Ramp ended — discard precompute state, notify replay ready
           if (physRef.current) delete physRef.current.precompute
           if (!replayNotifiedRef.current && replayBufferRef.current.length > 0) {
             replayNotifiedRef.current = true
@@ -298,36 +411,40 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
         prevCoolingRef.current = cm
       }
 
-      // ── Compute effective temperature for this frame ──────────────
-      let T
+      // ── Compute energy target for this frame ──────────────────────
+      // All ramps are energy-based: ePerParticle = (sliderVal+273)*ENERGY_UNIT
+      const E_COOL_END = (200  + 273) * ENERGY_UNIT
+      const E_HEAT_END = (1500 + 273) * ENERGY_UNIT
+      let ePerParticle
+      const isRamping = cm === 'fast' || cm === 'slow' || cm === 'fastHeat' || cm === 'slowHeat'
       if (cm === 'fast' || cm === 'slow') {
         coolingFrameRef.current++
         const dur = cm === 'fast' ? FAST_COOL_FRAMES : SLOW_COOL_FRAMES
         const t   = Math.min(1, coolingFrameRef.current / dur)
-        T = coolingStartTempRef.current * (1 - t) + 200 * t
-        effectiveTempRef.current = T
+        ePerParticle = coolingStartERef.current * (1 - t) + E_COOL_END * t
+        effectiveERef.current = ePerParticle
       } else if (cm === 'fastHeat' || cm === 'slowHeat') {
         coolingFrameRef.current++
         const dur = cm === 'fastHeat' ? FAST_COOL_FRAMES : SLOW_COOL_FRAMES
         const t   = Math.min(1, coolingFrameRef.current / dur)
-        T = coolingStartTempRef.current * (1 - t) + 1500 * t
-        effectiveTempRef.current = T
+        ePerParticle = coolingStartERef.current * (1 - t) + E_HEAT_END * t
+        effectiveERef.current = ePerParticle
       } else {
-        T = tempRef.current
-        effectiveTempRef.current = T
+        ePerParticle = (energyValRef.current + 273) * ENERGY_UNIT
+        effectiveERef.current = ePerParticle
       }
 
-      // Propagate effective temperature to parent display (throttled to every 6 frames)
-      const isRamping = cm === 'fast' || cm === 'slow' || cm === 'fastHeat' || cm === 'slowHeat'
+      // Propagate slider-equivalent energy value to parent (throttled, every 6 frames)
       if (onTempUpdateRef.current && isRamping && coolingFrameRef.current % 6 === 0) {
-        onTempUpdateRef.current(Math.round(T))
+        // Convert back to slider-equivalent so GlassViewer can sync the slider
+        onTempUpdateRef.current(Math.round(ePerParticle / ENERGY_UNIT - 273))
       }
 
       const phys = physRef.current
       if (phys) {
         const rf = replayFrameRef.current
 
-        // ── Replay mode: draw a stored snapshot ──────────────────────
+        // ── Replay mode ───────────────────────────────────────────────
         if (rf !== null && replayBufferRef.current[rf]) {
           const snap = replayBufferRef.current[rf]
           const ps   = phys.particles
@@ -355,7 +472,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
             const steps = Math.floor(speed)
             for (let s = 0; s < steps; s++) {
               for (const p of phys.particles) { p.px = p.x; p.py = p.y }
-              stepPhysics(phys, T, 1.0, attractKRef.current, cm)
+              stepPhysics(phys, ePerParticle, 1.0, attractKRef.current, cm)
             }
             frameAccRef.current = 0
           } else {
@@ -363,14 +480,18 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
             if (frameAccRef.current >= 1) {
               frameAccRef.current -= 1
               for (const p of phys.particles) { p.px = p.x; p.py = p.y }
-              stepPhysics(phys, T, 1.0, attractKRef.current, cm)
+              stepPhysics(phys, ePerParticle, 1.0, attractKRef.current, cm)
             }
             lerpT = frameAccRef.current
           }
 
+          // Crystallization nudge (slow cool only, temperature-gated via derived T inside stepPhysics)
           if (cm === 'slow') {
             const cp = crystParamsRef.current
-            if (T < cp.threshold && coolingFrameRef.current % CRYST_INTERVAL === 0) {
+            // Derive temp from current KE for the crystallize gate
+            const ke = computeKE(phys)
+            const derivedT = ke / (phys.n * ENERGY_UNIT) - 273
+            if (derivedT < cp.threshold && coolingFrameRef.current % CRYST_INTERVAL === 0) {
               crystallize(phys, cp.strength, cp.minCluster, cp.angleTol)
             }
           }
@@ -378,14 +499,39 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
           drawPhysics(canvasRef.current, phys, VW, VH, lerpT, debugRef.current, bondNumsRef.current)
         }
 
-        // ── Record frame for replay ───────────────────────────────────
+        // ── KE / PE diagnostics + graph history ──────────────────────
+        const ke = computeKE(phys)
+        const pe = computePE(phys)
+        const n  = phys.n
+        const derivedTempC = Math.round(ke / (n * ENERGY_UNIT) - 273)
+        onEnergyUpdateRef.current?.(ke, pe, derivedTempC)
+
+        // Record into ring buffer (every 3 frames to avoid redundancy)
+        histFrameRef.current++
+        if (histFrameRef.current >= 3) {
+          histFrameRef.current = 0
+          const sliderEquiv = Math.max(0, Math.min(2000, ePerParticle / ENERGY_UNIT - 273))
+          const head = histHeadRef.current
+          histERef.current[head] = sliderEquiv
+          histTRef.current[head] = Math.max(-273, derivedTempC)
+          histHeadRef.current = (head + 1) % HIST_LEN
+          if (histCountRef.current < HIST_LEN) histCountRef.current++
+        }
+
+        // ── Draw energy graphs ────────────────────────────────────────
+        if (showGraphsRef.current) {
+          drawTEGraph(graphTERef.current, histERef.current, histTRef.current,
+                      histHeadRef.current, histCountRef.current, HIST_LEN)
+          drawBarGraph(graphBarRef.current, ke, pe, n)
+        }
+
+        // ── Record replay snapshot ────────────────────────────────────
         if (isRamping) {
           const ps   = phys.particles
           const snap = new Float32Array(ps.length * 2)
           for (let i = 0; i < ps.length; i++) { snap[i * 2] = ps[i].x; snap[i * 2 + 1] = ps[i].y }
           replayBufferRef.current.push(snap)
 
-          // Notify when ramp completes
           if (!replayNotifiedRef.current) {
             const dur = (cm === 'fast' || cm === 'fastHeat') ? FAST_COOL_FRAMES : SLOW_COOL_FRAMES
             if (coolingFrameRef.current >= dur) {
@@ -402,33 +548,33 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
   }, [])  // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
-    <div style={{ position: 'relative', flex: 1, minHeight: 0 }}>
-      {/* SVG — legend strip only */}
-      <svg
-        width="100%"
-        height="100%"
-        viewBox={`0 0 ${VW} ${VH}`}
-        preserveAspectRatio="xMidYMid meet"
-        style={{ display: 'block' }}
-      >
-        <rect width={VW} height={VH} fill="#1a1a1a" />
-        <g transform={`translate(10, ${VH_GRID + 7})`}>
-          <LegendDot cx={6}   cy={0} r={4}   fill={C.Si} label="Si" />
-          <LegendDot cx={44}  cy={0} r={5}   fill={C.Ca} label="Ca²⁺" />
-          <LegendDot cx={96}  cy={0} r={4}   fill={C.Na} label="Na⁺" />
-          <LegendDot cx={140} cy={0} r={2.5} fill={C.O}  label="O²⁻" />
-        </g>
-      </svg>
+    <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
+      {/* Main sim area */}
+      <div style={{ position: 'relative', flex: 1, minHeight: 0 }}>
+        <svg
+          width="100%" height="100%"
+          viewBox={`0 0 ${VW} ${VH}`}
+          preserveAspectRatio="xMidYMid meet"
+          style={{ display: 'block' }}
+        >
+          <rect width={VW} height={VH} fill="#1a1a1a" />
+          <g transform={`translate(10, ${VH_GRID + 7})`}>
+            <LegendDot cx={6}   cy={0} r={4}   fill={C.Si} label="Si" />
+            <LegendDot cx={44}  cy={0} r={5}   fill={C.Ca} label="Ca²⁺" />
+            <LegendDot cx={96}  cy={0} r={4}   fill={C.Na} label="Na⁺" />
+            <LegendDot cx={140} cy={0} r={2.5} fill={C.O}  label="O²⁻" />
+          </g>
+        </svg>
+        <canvas ref={canvasRef} style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none' }} />
+      </div>
 
-      {/* Physics canvas — always on top */}
-      <canvas
-        ref={canvasRef}
-        style={{
-          position: 'absolute', top: 0, left: 0,
-          width: '100%', height: '100%',
-          pointerEvents: 'none',
-        }}
-      />
+      {/* Energy graphs — shown when showGraphs is true */}
+      {showGraphs && (
+        <div className="graph-panel">
+          <canvas ref={graphTERef} className="graph-canvas" title="Temperature vs Energy" />
+          <canvas ref={graphBarRef} className="graph-canvas graph-bar" title="KE vs PE" />
+        </div>
+      )}
     </div>
   )
 }

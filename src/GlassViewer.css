@@ -236,6 +236,30 @@ body {
   white-space: nowrap;
 }
 
+/* ── Energy graph panel ── */
+.graph-panel {
+  display: flex;
+  gap: 8px;
+  height: 110px;
+  padding: 4px 8px 4px;
+  background: #111;
+  border-top: 1px solid #222;
+  flex-shrink: 0;
+}
+
+.graph-canvas {
+  flex: 1;
+  height: 100%;
+  display: block;
+  border-radius: 3px;
+  background: #111;
+}
+
+.graph-bar {
+  flex: none;
+  width: 80px;
+}
+
 /* ── Dev slider bar ── */
 .dev-bar {
   display: flex;
