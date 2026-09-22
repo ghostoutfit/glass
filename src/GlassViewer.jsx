@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import CompositionView from './CompositionView'
 import NetworksView from './NetworksView'
+import BlobView from './BlobView'
 import './GlassViewer.css'
 
 const PRESETS = [
@@ -86,6 +87,10 @@ export default function GlassViewer() {
             className={`tab-btn ${tab === 'networks' ? 'active' : ''}`}
             onClick={() => setTab('networks')}
           >Networks</button>
+          <button
+            className={`tab-btn ${tab === 'blob' ? 'active' : ''}`}
+            onClick={() => setTab('blob')}
+          >Blob</button>
 
           <div className="toolbar-divider" />
 
@@ -230,7 +235,9 @@ export default function GlassViewer() {
               showGraphs={showGraphs}
               replayFrame={replayFrame} onReplayReady={handleReplayReady}
             />
-          : <NetworksView sio2Pct={p.sio2} na2oPct={p.na2o} caoPct={p.cao} />
+          : tab === 'networks'
+            ? <NetworksView sio2Pct={p.sio2} na2oPct={p.na2o} caoPct={p.cao} />
+            : <BlobView />
         }
       </main>
     </div>

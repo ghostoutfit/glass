@@ -1,12 +1,45 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>glass</title>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.jsx"></script>
-  </body>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Glass Simulator</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0 }
+    body {
+      background: #0e0c0a;
+      color: #c8a878;
+      font-family: system-ui, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .container { text-align: center; }
+    h1 { font-size: 2rem; font-weight: 300; letter-spacing: 0.1em; margin-bottom: 2rem; color: #e8c898; }
+    .versions { list-style: none; display: flex; flex-direction: column; gap: 1rem; }
+    .versions a {
+      display: block;
+      padding: 0.75rem 2.5rem;
+      border: 1px solid rgba(200,168,120,0.3);
+      border-radius: 4px;
+      color: #c8a878;
+      text-decoration: none;
+      font-size: 0.95rem;
+      letter-spacing: 0.05em;
+      transition: border-color 0.15s, color 0.15s, background 0.15s;
+    }
+    .versions a:hover { border-color: rgba(200,168,120,0.8); color: #f0d8a8; background: rgba(200,168,120,0.06); }
+    .tag { font-size: 0.75rem; opacity: 0.5; margin-left: 0.5rem; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Glass Simulator</h1>
+    <ul class="versions">
+      <li><a href="./v1/">v1<span class="tag">blob + melt + networks</span></a></li>
+      <li><a href="./v2/">v2<span class="tag">new physics engine</span></a></li>
+    </ul>
+  </div>
+</body>
 </html>
