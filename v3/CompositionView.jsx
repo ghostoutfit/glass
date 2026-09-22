@@ -29,6 +29,22 @@ const CRYST_INTERVAL   = 10    // frames between crystallization checks during s
 // minCluster: minimum connected hex-environment Si atoms to trigger nudge
 // strength: fraction of displacement corrected per check (0 → 1)
 // angleTol: degrees tolerance on each 120° gap in the Si-O ring
+function countBonds(phys) {
+  if (!phys?.rigidBonds || !phys?.particles) return null
+  const r = { sio: { intact: 0, total: 0 }, nao: { intact: 0, total: 0 }, cao: { intact: 0, total: 0 } }
+  for (const b of phys.rigidBonds) {
+    const ti = phys.particles[b.i].typeId, tj = phys.particles[b.j].typeId
+    let cat
+    if (!b.breakable)              cat = 'sio'
+    else if (ti === 2 || tj === 2) cat = 'nao'
+    else if (ti === 3 || tj === 3) cat = 'cao'
+    else continue
+    r[cat].total++
+    if (!b.broken) r[cat].intact++
+  }
+  return r
+}
+
 function getCrystParams(sio2Pct, na2oPct, caoPct) {
   const add = na2oPct + caoPct
   if (add <= 5) {
@@ -313,7 +329,7 @@ function LegendDot({ cx, cy, r, fill, label }) {
   )
 }
 
-export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, attractK = 0, debug = false, bondNums = false, precompute = false, meltTemp = 700, simSpeed = 1, coolingMode = null, onTempUpdate = null, onEnergyUpdate = null, replayFrame = null, onReplayReady = null, showGraphs = false, darkMode = true, showCharge = false, showField = true }) {
+export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, attractK = 0, debug = false, bondNums = false, precompute = false, meltTemp = 700, simSpeed = 1, coolingMode = null, onTempUpdate = null, onEnergyUpdate = null, onBondCounts = null, replayFrame = null, onReplayReady = null, showGraphs = false, darkMode = true, showCharge = false, showField = true }) {
   const types = useMemo(
     () => buildGrid(sio2Pct, na2oPct, caoPct),
     [sio2Pct, na2oPct, caoPct]
@@ -362,6 +378,8 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
   const onReplayReadyRef    = useRef(onReplayReady)
   const replayBufferRef     = useRef([])
   const replayNotifiedRef   = useRef(false)
+  const onBondCountsRef     = useRef(onBondCounts)
+  const lastBondCountTsRef  = useRef(0)
   // Graph history — grows forever, never wraps
   const histRef             = useRef([])   // {e, t}[]
   const histFrameRef        = useRef(0)    // throttle: record every 3 frames
@@ -377,6 +395,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
   useEffect(() => { showFieldRef.current = showField }, [showField])
   useEffect(() => { replayFrameRef.current = replayFrame }, [replayFrame])
   useEffect(() => { onReplayReadyRef.current = onReplayReady }, [onReplayReady])
+  useEffect(() => { onBondCountsRef.current = onBondCounts }, [onBondCounts])
   useEffect(() => { showGraphsRef.current = showGraphs }, [showGraphs])
 
   // Keep the physics module's Si-O r0 in sync with the slider
@@ -596,6 +615,12 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
               onReplayReadyRef.current?.(replayBufferRef.current.length)
             }
           }
+        }
+
+        // Bond counts (throttled to ~3×/s)
+        if (onBondCountsRef.current && phys.rigidBonds && ts - lastBondCountTsRef.current > 300) {
+          lastBondCountTsRef.current = ts
+          onBondCountsRef.current(countBonds(phys))
         }
       }
       rafRef.current = requestAnimationFrame(frame)

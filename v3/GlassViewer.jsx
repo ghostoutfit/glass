@@ -187,6 +187,9 @@ export default function GlassViewer() {
   const [meltHeatMode, setMeltHeatMode] = useState(null)  // 'slow' | 'fast' | null
   const [precompute, setPrecompute]   = useState(true)
   const [bondNums, setBondNums]       = useState(false)
+  const [bondCounts,        setBondCounts]        = useState(null)
+  const [initialBondCounts, setInitialBondCounts] = useState(null)
+  const initialBondCapturedRef = useRef(false)
   const [replayFrameCount, setReplayFrameCount] = useState(0)
   const [replayFrame, setReplayFrame]     = useState(null)
   const [replayPlaying, setReplayPlaying] = useState(false)
@@ -336,6 +339,14 @@ export default function GlassViewer() {
       meltSimRef.current.energyInput = next === 'fast' ? 100 : next === 'slow' ? 50 : 0
       return next
     })
+  }, [])
+
+  const handleBondCounts = useCallback(counts => {
+    setBondCounts(counts)
+    if (!initialBondCapturedRef.current && counts) {
+      setInitialBondCounts(counts)
+      initialBondCapturedRef.current = true
+    }
   }, [])
 
   // ── Glass / box canvas loop — canvas always mounted so RAF never drops ────
@@ -992,7 +1003,9 @@ export default function GlassViewer() {
   const switchPreset = id => {
     setCoolingMode(null); setPresetId(id)
     presetIdRef.current = id
-    glassVisualTypesRef.current = null   // force re-assign visual types on next init
+    glassVisualTypesRef.current = null
+    setBondCounts(null); setInitialBondCounts(null)
+    initialBondCapturedRef.current = false
   }
 
   const lcdStyle = { position:'relative', background:'#909e77', border:'1px solid rgba(100,90,70,0.5)', borderRadius:3, fontFamily:'"DSEG7","Courier New",monospace', fontSize:15, letterSpacing:'0.05em', lineHeight:1, userSelect:'none', flexShrink:0 }
@@ -1221,6 +1234,77 @@ export default function GlassViewer() {
               )
             })()}
 
+            {/* Bond count table — mirrors concrete v4 layout */}
+            {showCount && bondCounts && (() => {
+              const initial = initialBondCounts ?? bondCounts
+              const tested  = initialBondCounts !== null
+              const cols = [
+                { key: 'sio', label: 'Si-O', color: '#d4a020', typeA: 'Si', rA: 5,   typeB: 'O', rB: 3.5 },
+                initial.nao.total > 0
+                  ? { key: 'nao', label: 'Na-O', color: '#4aaa60', typeA: 'Na', rA: 4.5, typeB: 'O', rB: 3.5 }
+                  : null,
+                initial.cao.total > 0
+                  ? { key: 'cao', label: 'Ca-O', color: '#4a96be', typeA: 'Ca', rA: 4.5, typeB: 'O', rB: 3.5 }
+                  : null,
+              ].filter(Boolean)
+
+              const colData = cols.map(({ key, label, color, typeA, rA, typeB, rB }) => ({
+                key, label, color, typeA, rA, typeB, rB,
+                before: initial[key].intact,
+                now:    bondCounts[key].intact,
+                broken: Math.max(0, initial[key].intact - bondCounts[key].intact),
+              }))
+              const totalBroken = colData.reduce((s, d) => s + d.broken, 0)
+              const gridCols = `42px ${cols.map(() => '0.9fr').join(' ')}`
+              const rowLabelStyle = { fontSize: 13, letterSpacing: '0.07em', color: darkMode ? '#888' : '#666', fontFamily: 'system-ui, sans-serif' }
+
+              return (
+                <div style={{ padding: '2px 6px', display: 'flex', flexDirection: 'column', gap: 0 }}>
+                  {/* Column headers */}
+                  <div style={{ display: 'grid', gridTemplateColumns: gridCols, gap: 0, alignItems: 'end', marginBottom: 4 }}>
+                    <span />
+                    {colData.map(({ key, label, color, typeA, rA, typeB, rB }) => (
+                      <div key={key} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 3 }}>
+                          <GlassAtomIcon type={typeA} iconR={rA} showCharge={showCharge} darkMode={darkMode} />
+                          <span style={{ fontSize: 9, color: darkMode ? '#444' : '#bbb', lineHeight: 1 }}>—</span>
+                          <GlassAtomIcon type={typeB} iconR={rB} showCharge={showCharge} darkMode={darkMode} />
+                        </div>
+                        <span style={{ fontSize: 12, color, letterSpacing: '0.04em', lineHeight: 1, textAlign: 'center', fontFamily: 'system-ui, sans-serif' }}>{label}</span>
+                      </div>
+                    ))}
+                  </div>
+                  {/* Value rows */}
+                  {[
+                    { key: 'before', label: 'Before', getCell: d => ({ val: d.before }) },
+                    { key: 'now',    label: 'Now',    getCell: d => ({ val: tested ? d.now : null }) },
+                    { key: 'broken', label: 'Broken', getCell: d => ({
+                      val: tested ? d.broken : null,
+                      pct: tested && d.before > 0 ? d.broken / d.before * 100 : null,
+                      bold: true,
+                    }) },
+                    { key: 'total', label: 'Total', getCell: d => ({
+                      pct: tested && totalBroken > 0 ? d.broken / totalBroken * 100 : null,
+                    }) },
+                  ].map(({ key, label, getCell }) => (
+                    <div key={key} style={{ display: 'grid', gridTemplateColumns: gridCols, gap: 0, alignItems: 'baseline', marginBottom: 3 }}>
+                      <span style={rowLabelStyle}>{label}</span>
+                      {colData.map(d => {
+                        const { val, pct, bold } = getCell(d)
+                        return (
+                          <div key={d.key} style={{ textAlign: 'center' }}>
+                            {val != null && <div style={{ fontSize: 22, fontVariantNumeric: 'tabular-nums', color: d.color, fontWeight: bold ? 700 : 500, lineHeight: 1.1, fontFamily: 'system-ui, sans-serif' }}>{val}</div>}
+                            {pct != null && <div style={{ fontSize: 17, color: d.color, opacity: 0.75, fontVariantNumeric: 'tabular-nums', lineHeight: 1.1, fontFamily: 'system-ui, sans-serif' }}>{Math.round(pct)}%</div>}
+                            {val == null && pct == null && <span style={{ fontSize: 21, color: darkMode ? '#333' : '#bbb', fontFamily: 'system-ui, sans-serif' }}>—</span>}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  ))}
+                </div>
+              )
+            })()}
+
             {/* Bond strain gradient — same SVG as concrete v4 */}
             {showField && (
               <svg viewBox="0 0 200 50" width="100%" style={{ display: 'block', flexShrink: 0 }}>
@@ -1297,6 +1381,7 @@ export default function GlassViewer() {
               bondNums={bondNums} precompute={precompute}
               meltTemp={meltLocalTemp} simSpeed={simSpeed} coolingMode={coolingMode}
               onTempUpdate={handleTempUpdate} onEnergyUpdate={handleEnergyUpdate}
+              onBondCounts={handleBondCounts}
               showGraphs={showGraphs}
               replayFrame={replayFrame} onReplayReady={handleReplayReady}
               darkMode={darkMode} showCharge={showCharge} showField={showField}
