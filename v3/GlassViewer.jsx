@@ -144,6 +144,40 @@ function glassGlowColor(tempC) {
   return 'rgba(255,170,45,1.0)'
 }
 
+// Fill + glow ramp for sil blobs — #c87333 copper at formation, warms to gold
+// Stops are [t, [r,g,b]] where t = (tempC - 700) / 800 (range 700–1500°C).
+// Colors are midpoints between avg-sand and Na measured at each temperature.
+const _BLOB_STOPS = [
+  [0.000, [199, 178, 161]],  //  700°C — extrapolated  #c7b2a1
+  [0.375, [213, 159, 125]],  // 1000°C — measured      #d59f7d
+  [0.542, [219, 151, 115]],  // 1133°C — measured      #db9773
+  [0.769, [225, 136,  89]],  // 1315°C — measured      #e18859
+  [1.000, [237, 128,  65]],  // 1500°C — measured      #ed8041
+]
+function blobFillColor(tempC) {
+  const t = Math.max(0, Math.min(1, (tempC - 700) / 800))
+  for (let i = 1; i < _BLOB_STOPS.length; i++) {
+    if (t <= _BLOB_STOPS[i][0]) {
+      const f = (t - _BLOB_STOPS[i-1][0]) / (_BLOB_STOPS[i][0] - _BLOB_STOPS[i-1][0])
+      const [r1,g1,b1] = _BLOB_STOPS[i-1][1], [r2,g2,b2] = _BLOB_STOPS[i][1]
+      return `rgb(${~~(r1+(r2-r1)*f)},${~~(g1+(g2-g1)*f)},${~~(b1+(b2-b1)*f)})`
+    }
+  }
+  return 'rgb(237,128,65)'
+}
+function blobGlowColor(tempC) {
+  const t = Math.max(0, Math.min(1, (tempC - 700) / 800))
+  for (let i = 1; i < _BLOB_STOPS.length; i++) {
+    if (t <= _BLOB_STOPS[i][0]) {
+      const f = (t - _BLOB_STOPS[i-1][0]) / (_BLOB_STOPS[i][0] - _BLOB_STOPS[i-1][0])
+      const [r1,g1,b1] = _BLOB_STOPS[i-1][1], [r2,g2,b2] = _BLOB_STOPS[i][1]
+      const alpha = 0.20 + 0.25 * t
+      return `rgba(${~~(r1+(r2-r1)*f)},${~~(g1+(g2-g1)*f)},${~~(b1+(b2-b1)*f)},${alpha.toFixed(2)})`
+    }
+  }
+  return 'rgba(237,128,65,0.45)'
+}
+
 // Temperature → glass fill color (blackbody-ish ramp for molten glass)
 const _GLASS_STOPS = [
   [0.00, [50,  22,  8]],
@@ -270,11 +304,16 @@ export default function GlassViewer() {
   const [baseEnergyRate,  setBaseEnergyRate]  = useState(200)
   const [boxState,        setBoxState]        = useState('sand')
   const [multiRadius,     setMultiRadius]     = useState(true)
+  const [showBlobGlow,    setShowBlobGlow]    = useState(true)
+  const [blobHue,         setBlobHue]         = useState(0)
+  const [blobBright,      setBlobBright]      = useState(1.0)
+  const [sandPaused,      setSandPaused]      = useState(false)
 
   const boxCanvasRef  = useRef(null)
   const miniCanvasRef = useRef(null)
   const boxSimRef = useRef({
     showBox: true, showStick: false, autoRotate: true, showMetaball: true, boxState: 'sand', multiRadius: true,
+    showBlobGlow: true, blobHue: 0, blobBright: 1.0, sandPaused: false,
     temp: 25, floorMode: false, floorY: 0,
     energyInput: 0, directTempMode: false, showEnergyGraph: false,
     zone1End: 400, zone2End: 750,
@@ -366,7 +405,7 @@ export default function GlassViewer() {
       const st = meltTempRef.current
       const elapsed = st.lastTs ? Math.min((ts - st.lastTs) / 1000, 0.05) : 0
       st.lastTs = ts
-      if (s.energyInput !== 0 && elapsed > 0) {
+      if (!boxSimRef.current.sandPaused && s.energyInput !== 0 && elapsed > 0) {
         const input   = s.energyInput
         const atFloor = st.temp <= 0 && input < 0
         if (!atFloor) {
@@ -436,8 +475,10 @@ export default function GlassViewer() {
     sandGlowOff.width  = BOX_SIZE; sandGlowOff.height = BOX_SIZE
     const sandMeltOff   = document.createElement('canvas')
     sandMeltOff.width   = BOX_SIZE; sandMeltOff.height = BOX_SIZE
+    const smctx         = sandMeltOff.getContext('2d')
     const sandMeltCrisp = document.createElement('canvas')
     sandMeltCrisp.width = BOX_SIZE; sandMeltCrisp.height = BOX_SIZE
+    const smctx2        = sandMeltCrisp.getContext('2d', { willReadFrequently: true })
 
 
     // Full-canvas offscreens for floor-mode metaball (canvas-sized, resize with viewport)
@@ -550,7 +591,7 @@ export default function GlassViewer() {
     const miniCrisp = document.createElement('canvas')
     miniCrisp.width = BOX_SIZE; miniCrisp.height = BOX_SIZE
     const mictx     = miniOff.getContext('2d')
-    const mictx2    = miniCrisp.getContext('2d')
+    const mictx2    = miniCrisp.getContext('2d', { willReadFrequently: true })
 
     let raf
 
@@ -685,30 +726,32 @@ export default function GlassViewer() {
         if (s.boxState === 'sand') {
           if (!phys.naBlobs) phys.naBlobs = []
           if (!phys.blobMct) phys.blobMct = {}
-          phys.accumulator += elapsed
-          while (phys.accumulator >= FIXED_DT) {
-            stepNaBlobSprings(phys.naBlobs, FIXED_DT)
-            stepSandPhysics(phys.sandParticles, FIXED_DT, HS, box.boxAngle)
-            checkNaBlobMerges(phys.naBlobs, phys.blobMct, phys.sandParticles, s.temp)
-            phys.accumulator -= FIXED_DT
-          }
-          // Na₂O grain merging — once per visual frame, only for soda preset
-          const isSoda = presetIdRef.current === 'soda'
-          if (isSoda && phys.sandParticles && phys.nNaOriginal > 0) {
-            const tempFactor = Math.max(0, Math.min(1, (s.temp - 700) / 500))
-            const meldFrac   = Math.min(1, phys.meldCount / phys.nNaOriginal)
-            const meldProb   = tempFactor >= 1 ? 1 : tempFactor * 0.015 * (1 + meldFrac * 5)
-            if (meldProb > 0) {
-              phys.meldCount += mergeSodaGrains(phys.sandParticles, meldProb)
+          if (!s.sandPaused) {
+            phys.accumulator += elapsed
+            while (phys.accumulator >= FIXED_DT) {
+              stepNaBlobSprings(phys.naBlobs, FIXED_DT, box.boxAngle)
+              stepSandPhysics(phys.sandParticles, FIXED_DT, HS, box.boxAngle)
+              checkNaBlobMerges(phys.naBlobs, phys.blobMct, phys.sandParticles, s.temp)
+              phys.accumulator -= FIXED_DT
             }
-            convertLargeNaGrains(phys.sandParticles, phys.naBlobs)
-            absorbNearbyGrains(phys.sandParticles, phys.naBlobs, s.temp)
-            // Na + Sand → silicate (> 1000°C); silicate + silicate (> 1200°C)
-            const siFactor  = Math.max(0, Math.min(1, (s.temp - 1000) / 200))
-            const silFactor = Math.max(0, Math.min(1, (s.temp - 1200) / 200))
-            const naSandProb = siFactor >= 1 ? 0.03 : siFactor * 0.015
-            const silSilProb = silFactor >= 1 ? 1    : silFactor * 0.02
-            mergeSilicateGrains(phys.sandParticles, naSandProb, silSilProb)
+            // Na₂O grain merging — once per visual frame, only for soda preset
+            const isSoda = presetIdRef.current === 'soda'
+            if (isSoda && phys.sandParticles && phys.nNaOriginal > 0) {
+              const tempFactor = Math.max(0, Math.min(1, (s.temp - 700) / 500))
+              const meldFrac   = Math.min(1, phys.meldCount / phys.nNaOriginal)
+              const meldProb   = tempFactor >= 1 ? 1 : tempFactor * 0.015 * (1 + meldFrac * 5)
+              if (meldProb > 0) {
+                phys.meldCount += mergeSodaGrains(phys.sandParticles, meldProb)
+              }
+              convertLargeNaGrains(phys.sandParticles, phys.naBlobs)
+              absorbNearbyGrains(phys.sandParticles, phys.naBlobs, s.temp)
+              // Na + Sand → silicate (> 1000°C); silicate + silicate (> 1200°C)
+              const siFactor  = Math.max(0, Math.min(1, (s.temp - 1000) / 200))
+              const silFactor = Math.max(0, Math.min(1, (s.temp - 1200) / 200))
+              const naSandProb = siFactor * 0.004
+              const silSilProb = silFactor * 0.004
+              mergeSilicateGrains(phys.sandParticles, naSandProb, silSilProb, 3)
+            }
           }
         } else {
           // Freeze/unfreeze transition
@@ -817,12 +860,91 @@ export default function GlassViewer() {
             }
           }
 
-          // Na₂O blobs — white convex-hull filled shapes
+          // Na₂O blobs — solid fill + separate transparent glow overlay (same as sand)
           if (phys.naBlobs?.length) {
-            ctx.fillStyle = 'rgba(255,255,255,0.92)'
+            const t = Math.max(0, Math.min(1, (s.temp - 700) / 500))
+
+            // Pass 1A: sub-circle halos (additive) → crisp binary mask in smctx2
+            smctx.globalCompositeOperation = 'source-over'
+            smctx.clearRect(0, 0, BOX_SIZE, BOX_SIZE)
+            smctx.globalCompositeOperation = 'lighter'
             for (const blob of phys.naBlobs) {
-              if (buildNaBlobPath(ctx, blob)) ctx.fill()
+              for (const p of blob.particles) {
+                if (p.type !== 'na-sub') continue
+                const px = p.x + HS, py = p.y + HS
+                const br = p.r * 8
+                const grad = smctx.createRadialGradient(px, py, 0, px, py, br)
+                grad.addColorStop(0,   'rgba(255,255,255,1.0)')
+                grad.addColorStop(0.3, 'rgba(220,220,220,0.65)')
+                grad.addColorStop(1,   'rgba(0,0,0,0)')
+                smctx.fillStyle = grad
+                smctx.beginPath(); smctx.arc(px, py, br, 0, Math.PI * 2); smctx.fill()
+              }
             }
+            smctx.globalCompositeOperation = 'source-over'
+
+            // Pass 1B: contrast → near-binary mask, then hard-threshold alpha to true binary
+            smctx2.clearRect(0, 0, BOX_SIZE, BOX_SIZE)
+            smctx2.filter = 'contrast(9999)'
+            smctx2.drawImage(sandMeltOff, 0, 0)
+            smctx2.filter = 'none'
+            const imgD = smctx2.getImageData(0, 0, BOX_SIZE, BOX_SIZE)
+            const px = imgD.data
+            for (let i = 3; i < px.length; i += 4) px[i] = px[i] > 64 ? 255 : 0
+            smctx2.putImageData(imgD, 0, 0)
+
+            // Pass 1C: colorize mask with solid fill color → draw onto scene
+            smctx.clearRect(0, 0, BOX_SIZE, BOX_SIZE)
+            smctx.drawImage(sandMeltCrisp, 0, 0)
+            smctx.save()
+            smctx.globalCompositeOperation = 'source-in'
+            smctx.fillStyle = blobFillColor(s.temp)
+            smctx.fillRect(0, 0, BOX_SIZE, BOX_SIZE)
+            smctx.restore()
+            ctx.filter = `hue-rotate(${s.blobHue}deg) brightness(${s.blobBright})`
+            ctx.drawImage(sandMeltOff, -HS, -HS, BOX_SIZE, BOX_SIZE)
+            ctx.filter = 'none'
+
+            // Pass 2: soft glow overlay — blur the crisp mask, tint at low alpha, draw lighter
+            if (s.showBlobGlow) {
+              const glowBlur = Math.round(4 + 6 * t)
+              smctx.clearRect(0, 0, BOX_SIZE, BOX_SIZE)
+              smctx.filter = `blur(${glowBlur}px)`
+              smctx.drawImage(sandMeltCrisp, 0, 0)
+              smctx.filter = 'none'
+              smctx.save()
+              smctx.globalCompositeOperation = 'source-in'
+              smctx.fillStyle = blobGlowColor(s.temp)
+              smctx.fillRect(0, 0, BOX_SIZE, BOX_SIZE)
+              smctx.restore()
+              ctx.filter = `hue-rotate(${s.blobHue}deg) brightness(${s.blobBright})`
+              ctx.globalCompositeOperation = 'lighter'
+              ctx.drawImage(sandMeltOff, -HS, -HS, BOX_SIZE, BOX_SIZE)
+              ctx.filter = 'none'
+              ctx.globalCompositeOperation = 'source-over'
+            }
+
+            // Pass 3: same heat glow as pure sand, using blob sub-circles as sources
+            if (heatT > 0) {
+              const gc = sandGlowOff.getContext('2d')
+              gc.clearRect(0, 0, BOX_SIZE, BOX_SIZE)
+              gc.globalCompositeOperation = 'lighter'
+              gc.fillStyle = `rgba(255,${glowG},0,${heatT * heatT * 0.35})`
+              for (const blob of phys.naBlobs) {
+                for (const p of blob.particles) {
+                  if (p.type !== 'na-sub') continue
+                  gc.beginPath()
+                  gc.arc(p.x + HS, p.y + HS, p.r * 1.8, 0, Math.PI * 2)
+                  gc.fill()
+                }
+              }
+              ctx.filter = `blur(${Math.round(heatT * 12)}px)`
+              ctx.globalCompositeOperation = 'lighter'
+              ctx.drawImage(sandGlowOff, -HS, -HS, BOX_SIZE, BOX_SIZE)
+              ctx.filter = 'none'
+              ctx.globalCompositeOperation = 'source-over'
+            }
+
             window._naBlobs = phys.naBlobs
             window._blobMct = phys.blobMct
           }
@@ -1093,35 +1215,138 @@ export default function GlassViewer() {
           mx.fillRect(0, 0, cW, cH)
 
           if (s.boxState === 'sand') {
+            const heatT  = Math.max(0, Math.min(1, (s.temp - 300) / 1200))
+            const hotR   = 255, hotG = Math.round(80 * Math.pow(heatT, 2))
+            const glowG  = Math.round(140 * Math.pow(heatT, 2.5))
+            const _isSoda   = presetIdRef.current === 'soda'
+            const _naAsMeta = _isSoda && s.temp >= 700
+            const scale  = fitSize / BOX_SIZE
+
+            // Background + sand grains
             mx.save()
             mx.translate(cx, cy); mx.rotate(boxAngle)
             mx.fillStyle = '#161210'
             mx.fillRect(-fitSize / 2, -fitSize / 2, fitSize, fitSize)
-            const scale = fitSize / BOX_SIZE
             mx.lineWidth = 0.4
             for (const g of phys.sandParticles) {
+              if (g.type === 'na-sub' || g.type === 'na-ctr') continue
+              if (heatT > 0) {
+                const blend = heatT * heatT * 0.6
+                mx.fillStyle = `rgb(${Math.round(g._cr + (hotR - g._cr) * blend)},${Math.round(g._cg + (hotG - g._cg) * blend)},${Math.round(g._cb * (1 - blend))})`
+              } else {
+                mx.fillStyle = g.color
+              }
               const gr = Math.max(1.2, g.r * scale)
-              mx.fillStyle = g.color
               mx.beginPath()
               if (g.type === 'na') {
                 mx.arc(g.x * scale, g.y * scale, gr, 0, Math.PI * 2)
-                mx.closePath()
-                mx.fill()
-                mx.strokeStyle = 'rgba(160,210,240,0.3)'
-                mx.stroke()
+                mx.closePath(); mx.fill()
+                mx.strokeStyle = 'rgba(160,210,240,0.3)'; mx.stroke()
               } else {
                 for (let k = 0; k < 6; k++) {
                   const a = g.angle + k * Math.PI / 3
                   const hx = g.x * scale + gr * Math.cos(a), hy = g.y * scale + gr * Math.sin(a)
                   k === 0 ? mx.moveTo(hx, hy) : mx.lineTo(hx, hy)
                 }
-                mx.closePath()
-                mx.fill()
-                mx.strokeStyle = 'rgba(0,0,0,0.3)'
-                mx.stroke()
+                mx.closePath(); mx.fill()
+                mx.strokeStyle = 'rgba(0,0,0,0.3)'; mx.stroke()
               }
             }
             mx.restore()
+
+            // Na₂O blobs — same metaball pipeline as the main view
+            if (phys.naBlobs?.length) {
+              // Pass 1A: additive halos → miniOff
+              mictx.globalCompositeOperation = 'source-over'
+              mictx.clearRect(0, 0, BOX_SIZE, BOX_SIZE)
+              mictx.globalCompositeOperation = 'lighter'
+              for (const blob of phys.naBlobs) {
+                for (const p of blob.particles) {
+                  if (p.type !== 'na-sub') continue
+                  const px = p.x + HS, py = p.y + HS
+                  const br = p.r * 8
+                  const grad = mictx.createRadialGradient(px, py, 0, px, py, br)
+                  grad.addColorStop(0,   'rgba(255,255,255,1.0)')
+                  grad.addColorStop(0.3, 'rgba(220,220,220,0.65)')
+                  grad.addColorStop(1,   'rgba(0,0,0,0)')
+                  mictx.fillStyle = grad
+                  mictx.beginPath(); mictx.arc(px, py, br, 0, Math.PI * 2); mictx.fill()
+                }
+              }
+              mictx.globalCompositeOperation = 'source-over'
+
+              // Pass 1B: hard-threshold alpha to true binary mask
+              mictx2.clearRect(0, 0, BOX_SIZE, BOX_SIZE)
+              mictx2.filter = 'contrast(9999)'
+              mictx2.drawImage(miniOff, 0, 0)
+              mictx2.filter = 'none'
+              const imgD = mictx2.getImageData(0, 0, BOX_SIZE, BOX_SIZE)
+              const pxd  = imgD.data
+              for (let i = 3; i < pxd.length; i += 4) pxd[i] = pxd[i] > 64 ? 255 : 0
+              mictx2.putImageData(imgD, 0, 0)
+
+              // Pass 1C: colorize solid fill
+              mictx.clearRect(0, 0, BOX_SIZE, BOX_SIZE)
+              mictx.drawImage(miniCrisp, 0, 0)
+              mictx.save()
+              mictx.globalCompositeOperation = 'source-in'
+              mictx.fillStyle = blobFillColor(s.temp)
+              mictx.fillRect(0, 0, BOX_SIZE, BOX_SIZE)
+              mictx.restore()
+              mx.save()
+              mx.translate(cx, cy); mx.rotate(boxAngle)
+              mx.filter = `hue-rotate(${s.blobHue}deg) brightness(${s.blobBright})`
+              mx.drawImage(miniOff, -fitSize / 2, -fitSize / 2, fitSize, fitSize)
+              mx.filter = 'none'
+              mx.restore()
+
+              // Pass 2: glow overlay
+              if (s.showBlobGlow) {
+                const tBlob   = Math.max(0, Math.min(1, (s.temp - 700) / 500))
+                const glowBlur = Math.round(4 + 6 * tBlob)
+                mictx.clearRect(0, 0, BOX_SIZE, BOX_SIZE)
+                mictx.filter = `blur(${glowBlur}px)`
+                mictx.drawImage(miniCrisp, 0, 0)
+                mictx.filter = 'none'
+                mictx.save()
+                mictx.globalCompositeOperation = 'source-in'
+                mictx.fillStyle = blobGlowColor(s.temp)
+                mictx.fillRect(0, 0, BOX_SIZE, BOX_SIZE)
+                mictx.restore()
+                mx.save()
+                mx.translate(cx, cy); mx.rotate(boxAngle)
+                mx.filter = `hue-rotate(${s.blobHue}deg) brightness(${s.blobBright})`
+                mx.globalCompositeOperation = 'lighter'
+                mx.drawImage(miniOff, -fitSize / 2, -fitSize / 2, fitSize, fitSize)
+                mx.filter = 'none'
+                mx.globalCompositeOperation = 'source-over'
+                mx.restore()
+              }
+
+              // Pass 3: heat glow (same orange-red additive halo as sand)
+              if (heatT > 0) {
+                mictx.clearRect(0, 0, BOX_SIZE, BOX_SIZE)
+                mictx.globalCompositeOperation = 'lighter'
+                mictx.fillStyle = `rgba(255,${glowG},0,${heatT * heatT * 0.35})`
+                for (const blob of phys.naBlobs) {
+                  for (const p of blob.particles) {
+                    if (p.type !== 'na-sub') continue
+                    mictx.beginPath()
+                    mictx.arc(p.x + HS, p.y + HS, p.r * 1.8, 0, Math.PI * 2)
+                    mictx.fill()
+                  }
+                }
+                mictx.globalCompositeOperation = 'source-over'
+                mx.save()
+                mx.translate(cx, cy); mx.rotate(boxAngle)
+                mx.filter = `blur(${Math.round(heatT * 12)}px)`
+                mx.globalCompositeOperation = 'lighter'
+                mx.drawImage(miniOff, -fitSize / 2, -fitSize / 2, fitSize, fitSize)
+                mx.filter = 'none'
+                mx.globalCompositeOperation = 'source-over'
+                mx.restore()
+              }
+            }
           } else {
             const t     = Math.max(0, Math.min(1, (s.temp - 25) / (1200 - 25)))
             const blobR = PARTICLE_R * 5
@@ -1333,10 +1558,8 @@ export default function GlassViewer() {
             {/* Left/center: two-row layout */}
             <div style={{ flex:1, display:'flex', flexDirection:'column', gap:3, minWidth:0 }}>
 
-              {/* Row 1: presets + main tab controls */}
+              {/* Row 1: presets + composition label */}
               <div style={{ display:'flex', alignItems:'center', gap:4, minWidth:0 }}>
-
-                {/* Presets — always visible */}
                 <div style={{ display:'flex', gap:3 }}>
                   {PRESETS.map(preset => (
                     <button key={preset.id}
@@ -1345,9 +1568,16 @@ export default function GlassViewer() {
                     >{preset.label}</button>
                   ))}
                 </div>
-                <div className="toolbar-divider" />
+                <div style={{flex:1}} />
+                <span style={{fontSize:11, color:'rgba(30,45,60,0.50)', fontVariantNumeric:'tabular-nums', whiteSpace:'nowrap'}}>
+                  SiO₂ {p.sio2}% · Na₂O {p.na2o}% · CaO {p.cao}%
+                </span>
+              </div>
 
-                {/* Melt-tab controls (heat/cool in row 2) */}
+              {/* Row 2: all tab-specific controls */}
+              <div style={{ display:'flex', alignItems:'center', gap:4, minWidth:0, flexWrap:'wrap' }}>
+
+                {/* Melt tab */}
                 {tab === 'melt' && <>
                   <button className="action-btn replay-btn" style={{padding:'3px 10px', fontSize:12}}
                     disabled={replayFrameCount === 0}
@@ -1356,14 +1586,21 @@ export default function GlassViewer() {
                     disabled={replayFrameCount === 0}
                     onClick={() => { setReplayFrame(0); setReplayPlaying(true) }}>🐇 ↺</button>
                   <div className="toolbar-divider" />
-                  {/* Melt temp LCD */}
+                  <button className={`action-btn test-btn${meltHeatMode==='slow'?' active':''}`}
+                    style={{padding:'3px 9px', fontSize:11}} onClick={() => toggleMeltHeat('slow')}>Slow Heat</button>
+                  <button className={`action-btn test-btn${meltHeatMode==='fast'?' active':''}`}
+                    style={{padding:'3px 9px', fontSize:11}} onClick={() => toggleMeltHeat('fast')}>Fast Heat</button>
+                  <button className={`action-btn reset-btn${coolingMode==='slow'?' active':''}`}
+                    style={{padding:'3px 9px', fontSize:11}} onClick={() => startCooling('slow')}>Slow Cool</button>
+                  <button className={`action-btn reset-btn${coolingMode==='fast'?' active':''}`}
+                    style={{padding:'3px 9px', fontSize:11}} onClick={() => startCooling('fast')}>Fast Cool</button>
+                  <div className="toolbar-divider" />
                   <div style={lcdStyle}>
                     <span style={{visibility:'hidden', display:'block', padding:'3px 6px'}}>1200</span>
                     <span style={{position:'absolute', inset:0, padding:'3px 6px', color:'rgba(60,60,60,0.15)', textAlign:'right'}}>1200</span>
                     <span style={{position:'absolute', inset:0, padding:'3px 6px', color:'rgba(60,60,60,0.75)', textAlign:'right'}}>{meltLocalTemp}</span>
                   </div>
                   <span style={{fontSize:12, fontWeight:700, color:'rgba(30,45,60,0.70)'}}>°C</span>
-                  {/* Energy slider */}
                   <div style={{display:'flex', alignItems:'center', gap:3}}>
                     <span style={{color:'rgba(30,45,60,0.55)', fontSize:13}}>−</span>
                     <input type="range" style={{width:70, accentColor:'#c06040', cursor:'pointer'}}
@@ -1371,18 +1608,16 @@ export default function GlassViewer() {
                       onChange={onMeltEnergyChange} onMouseUp={onMeltEnergyRelease} onTouchEnd={onMeltEnergyRelease} />
                     <span style={{color:'rgba(30,45,60,0.55)', fontSize:13}}>+</span>
                   </div>
-                  {/* Speed */}
                   <span style={{fontSize:13, lineHeight:1}}>🐢</span>
                   <input type="range" style={{width:55, cursor:'pointer', accentColor:'#6a9060'}}
                     min={0.05} max={0.5} step={0.025} value={simSpeed}
                     onChange={e => setSimSpeed(+e.target.value)} />
                   <span style={{fontSize:13, lineHeight:1}}>🐇</span>
-                  {/* Graphs toggle */}
                   <button className={`action-btn replay-btn${showGraphs?' active':''}`}
                     style={{padding:'3px 9px', fontSize:11}} onClick={() => setShowGraphs(v => !v)}>Graphs</button>
                 </>}
 
-                {/* Glass-tab controls */}
+                {/* Glass tab */}
                 {tab === 'glass' && <>
                   <button className={`action-btn test-btn${meltHeatMode==='slow'?' active':''}`}
                     style={{padding:'3px 9px', fontSize:11}} onClick={() => toggleMeltHeat('slow')}>Slow Heat</button>
@@ -1409,9 +1644,7 @@ export default function GlassViewer() {
                     <button className={`action-btn replay-btn${autoRotate?' active':''}`}
                       style={{padding:'3px 9px', fontSize:11}}
                       onClick={() => {
-                        const v = !autoRotate
-                        setAutoRotate(v)
-                        boxSimRef.current.autoRotate = v
+                        const v = !autoRotate; setAutoRotate(v); boxSimRef.current.autoRotate = v
                         if (!v && boxSimRef.current.box) boxSimRef.current.box.boxAngularVel = 0
                       }}>Rotate</button>
                     <button className={`action-btn replay-btn${showStick?' active':''}`}
@@ -1420,36 +1653,43 @@ export default function GlassViewer() {
                     <button className={`action-btn replay-btn${multiRadius?' active':''}`}
                       style={{padding:'3px 9px', fontSize:11}}
                       onClick={() => {
-                        const v = !multiRadius
-                        setMultiRadius(v)
-                        boxSimRef.current.multiRadius = v
+                        const v = !multiRadius; setMultiRadius(v); boxSimRef.current.multiRadius = v
                         physRef.current.sandParticles = null
                       }}>Multi R</button>
                   </>}
                   <button className={`action-btn replay-btn${showEnergyGraph?' active':''}`}
                     style={{padding:'3px 9px', fontSize:11}} onClick={onToggleEnergyGraph}>E–T</button>
+                  {presetId === 'soda' && <>
+                    <div className="toolbar-divider" />
+                    <button className={`action-btn replay-btn${sandPaused?' active':''}`}
+                      style={{padding:'3px 9px', fontSize:11}}
+                      onClick={() => { const v=!sandPaused; setSandPaused(v); boxSimRef.current.sandPaused=v }}>
+                      {sandPaused ? 'Resume' : 'Pause'}
+                    </button>
+                    <button className="action-btn reset-btn"
+                      style={{padding:'3px 9px', fontSize:11}}
+                      onClick={() => {
+                        physRef.current.sandParticles = null
+                        physRef.current.naBlobs = []
+                        physRef.current.blobMct = {}
+                        physRef.current.meldCount = 0
+                        setSandPaused(false); boxSimRef.current.sandPaused = false
+                      }}>Reset</button>
+                    <div className="toolbar-divider" />
+                    <button className={`action-btn replay-btn${showBlobGlow?' active':''}`}
+                      style={{padding:'3px 9px', fontSize:11}}
+                      onClick={() => { const v=!showBlobGlow; setShowBlobGlow(v); boxSimRef.current.showBlobGlow=v }}>Glow</button>
+                    <span style={{fontSize:11, color:'rgba(30,45,60,0.50)'}}>Hue</span>
+                    <input type="range" style={{width:55, cursor:'pointer', accentColor:'#c87333'}}
+                      min={-60} max={60} step={1} value={blobHue}
+                      onChange={e => { const v=+e.target.value; setBlobHue(v); boxSimRef.current.blobHue=v }} />
+                    <span style={{fontSize:11, color:'rgba(30,45,60,0.50)'}}>Bright</span>
+                    <input type="range" style={{width:55, cursor:'pointer', accentColor:'#c87333'}}
+                      min={0.3} max={2.0} step={0.05} value={blobBright}
+                      onChange={e => { const v=+e.target.value; setBlobBright(v); boxSimRef.current.blobBright=v }} />
+                  </>}
                 </>}
-
-                {/* Composition label */}
-                <div style={{flex:1}} />
-                <span style={{fontSize:11, color:'rgba(30,45,60,0.50)', fontVariantNumeric:'tabular-nums', whiteSpace:'nowrap'}}>
-                  SiO₂ {p.sio2}% · Na₂O {p.na2o}% · CaO {p.cao}%
-                </span>
               </div>
-
-              {/* Row 2: heat/cool buttons (melt tab only) */}
-              {tab === 'melt' && (
-                <div style={{ display:'flex', alignItems:'center', gap:3 }}>
-                  <button className={`action-btn test-btn${meltHeatMode==='slow'?' active':''}`}
-                    style={{padding:'3px 9px', fontSize:11}} onClick={() => toggleMeltHeat('slow')}>Slow Heat</button>
-                  <button className={`action-btn test-btn${meltHeatMode==='fast'?' active':''}`}
-                    style={{padding:'3px 9px', fontSize:11}} onClick={() => toggleMeltHeat('fast')}>Fast Heat</button>
-                  <button className={`action-btn reset-btn${coolingMode==='slow'?' active':''}`}
-                    style={{padding:'3px 9px', fontSize:11}} onClick={() => startCooling('slow')}>Slow Cool</button>
-                  <button className={`action-btn reset-btn${coolingMode==='fast'?' active':''}`}
-                    style={{padding:'3px 9px', fontSize:11}} onClick={() => startCooling('fast')}>Fast Cool</button>
-                </div>
-              )}
 
             </div>
 

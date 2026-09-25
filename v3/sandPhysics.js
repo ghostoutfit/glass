@@ -60,8 +60,12 @@ export function initSandParticles(HS, multiRadius = true, na2oPct = 0, nGrains =
   const nNa         = Math.round(naCountFrac * nGrains)
 
   const r      = GRAIN_R
-  const stepX  = r * 2
-  const stepY  = r * Math.sqrt(3)
+  // Spread grains to fill ~90% of box height with gaps, staying within walls.
+  // Formula derived by solving: (rows-1)*stepY ≈ 0.9*(2*HS-2r)
+  const boxInner = 2 * HS - r * 2
+  const spread   = Math.max(1.0, Math.sqrt(0.90 * boxInner * boxInner / (nGrains * 2 * r * r * Math.sqrt(3))) * 0.70)
+  const stepX  = r * 2 * spread
+  const stepY  = r * Math.sqrt(3) * spread
   const cols   = Math.floor((2 * HS - r * 2) / stepX)
   const startX = -(cols - 1) * stepX / 2
 
@@ -157,13 +161,14 @@ export function mergeSodaGrains(grains, meldProb) {
 
 // Na + Sand → silicate, and silicate + silicate → silicate.
 // Called once per visual frame. Returns merge count.
-export function mergeSilicateGrains(grains, naSandProb, silSilProb) {
+export function mergeSilicateGrains(grains, naSandProb, silSilProb, maxMerges = 5) {
   if (naSandProb <= 0 && silSilProb <= 0) return 0
   const n = grains.length
   _toAbsorb.fill(0, 0, n)
   let merged = 0
 
   for (let ai = 0; ai < n; ai++) {
+    if (merged >= maxMerges) break
     if (_toAbsorb[ai]) continue
     const a = grains[ai]
     const isNa  = a.type === 'na'
@@ -376,7 +381,10 @@ export function makeNaBlob(cx, cy, vx, vy, blobR) {
   return { id, blobR, particles, springs }
 }
 
-export function stepNaBlobSprings(naBlobs, dt) {
+export function stepNaBlobSprings(naBlobs, dt, boxAngle = 0) {
+  const gx = Math.sin(boxAngle)
+  const gy = Math.cos(boxAngle)
+
   for (const blob of naBlobs) {
     for (const s of blob.springs) {
       const a = s.a, b = s.b
@@ -386,6 +394,24 @@ export function stepNaBlobSprings(naBlobs, dt) {
       const fx = f * dx / d, fy = f * dy / d
       a.vx += fx * dt; a.vy += fy * dt
       b.vx -= fx * dt; b.vy -= fy * dt
+    }
+
+    const orbs = blob.particles.filter(p => p.type === 'na-sub')
+    if (orbs.length < 3) continue
+    let avgSpd = 0
+    for (const p of orbs) avgSpd += Math.hypot(p.vx, p.vy)
+    avgSpd /= orbs.length
+    const settleFactor = Math.max(0, 1 - avgSpd / 1.5)
+    if (settleFactor <= 0) continue
+
+    const ctr = blob.particles[0]
+    for (const p of orbs) {
+      const dx = p.x - ctr.x, dy = p.y - ctr.y
+      const gravComp = dx * gx + dy * gy
+      if (gravComp >= 0) continue
+      const flatK = 0.8 * settleFactor
+      p.vx -= flatK * gravComp * gx * dt
+      p.vy -= flatK * gravComp * gy * dt
     }
   }
 }
@@ -476,8 +502,8 @@ export function checkNaBlobMerges(naBlobs, mct, grains, temp = 1000) {
 export function absorbNearbyGrains(grains, naBlobs, temp) {
   if (!naBlobs.length) return
   const tempF    = Math.max(0, Math.min(1, (temp - 700) / 500))
-  const naSilProb = tempF * 0.04
-  const sandProb  = tempF * 0.01   // sand dissolves ~4× slower than Na/silicate
+  const naSilProb = tempF * 0.008
+  const sandProb  = tempF * 0.002  // sand dissolves ~4× slower than Na/silicate
   if (naSilProb <= 0) return
 
   for (const blob of naBlobs) {
