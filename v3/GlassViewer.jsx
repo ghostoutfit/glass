@@ -147,6 +147,7 @@ function glassGlowColor(tempC) {
 // Fill + glow ramp for sil blobs — #c87333 copper at formation, warms to gold
 // Stops are [t, [r,g,b]] where t = (tempC - 700) / 800 (range 700–1500°C).
 // Colors are midpoints between avg-sand and Na measured at each temperature.
+// t = (tempC - 700) / 800, range 700–1500°C — clamped above 1500°C
 const _BLOB_STOPS = [
   [0.000, [199, 178, 161]],  //  700°C — extrapolated  #c7b2a1
   [0.375, [213, 159, 125]],  // 1000°C — measured      #d59f7d
@@ -155,6 +156,11 @@ const _BLOB_STOPS = [
   [1.000, [237, 128,  65]],  // 1500°C — measured      #ed8041
 ]
 function blobFillColor(tempC) {
+  if (tempC < 700) {
+    // Darken from warm pinkish (700°C) toward near-black (25°C) — same feel as glassColor
+    const tc = Math.max(0, (tempC - 25) / (700 - 25))
+    return `rgb(${~~(30 + (199-30)*tc)},${~~(12 + (178-12)*tc)},${~~(5 + (161-5)*tc)})`
+  }
   const t = Math.max(0, Math.min(1, (tempC - 700) / 800))
   for (let i = 1; i < _BLOB_STOPS.length; i++) {
     if (t <= _BLOB_STOPS[i][0]) {
@@ -166,6 +172,7 @@ function blobFillColor(tempC) {
   return 'rgb(237,128,65)'
 }
 function blobGlowColor(tempC) {
+  if (tempC < 700) return 'rgba(0,0,0,0)'
   const t = Math.max(0, Math.min(1, (tempC - 700) / 800))
   for (let i = 1; i < _BLOB_STOPS.length; i++) {
     if (t <= _BLOB_STOPS[i][0]) {
@@ -406,11 +413,12 @@ export default function GlassViewer() {
       const elapsed = st.lastTs ? Math.min((ts - st.lastTs) / 1000, 0.05) : 0
       st.lastTs = ts
       if (!boxSimRef.current.sandPaused && s.energyInput !== 0 && elapsed > 0) {
-        const input   = s.energyInput
-        const atFloor = st.temp <= 0 && input < 0
-        if (!atFloor) {
-          st.temp = Math.max(0,
-            st.temp + (input / 100) * s.baseRate * elapsed)
+        const input      = s.energyInput
+        const atFloor    = st.temp <= 0    && input < 0
+        const atCeiling  = st.temp >= 2000 && input > 0
+        if (!atFloor && !atCeiling) {
+          st.temp = Math.max(0, Math.min(2000,
+            st.temp + (input / 100) * s.baseRate * elapsed))
           if (++tick % 6 === 0) setMeltLocalTemp(Math.round(st.temp))
         }
       }
@@ -446,10 +454,16 @@ export default function GlassViewer() {
 
   const startCooling = useCallback(mode => {
     setReplayFrameCount(0); setReplayFrame(null); setReplayPlaying(false)
-    setCoolingMode(m => m === mode ? null : mode)
+    setMeltHeatMode(null)
+    setCoolingMode(m => {
+      const next = m === mode ? null : mode
+      meltSimRef.current.energyInput = next === 'fast' ? -100 : next === 'slow' ? -50 : 0
+      return next
+    })
   }, [])
 
   const toggleMeltHeat = useCallback(mode => {
+    setCoolingMode(prev => { if (prev) meltSimRef.current.energyInput = 0; return null })
     setMeltHeatMode(prev => {
       const next = prev === mode ? null : mode
       meltSimRef.current.energyInput = next === 'fast' ? 100 : next === 'slow' ? 50 : 0
@@ -729,7 +743,7 @@ export default function GlassViewer() {
           if (!s.sandPaused) {
             phys.accumulator += elapsed
             while (phys.accumulator >= FIXED_DT) {
-              stepNaBlobSprings(phys.naBlobs, FIXED_DT, box.boxAngle)
+              stepNaBlobSprings(phys.naBlobs, FIXED_DT, box.boxAngle, s.temp)
               stepSandPhysics(phys.sandParticles, FIXED_DT, HS, box.boxAngle)
               checkNaBlobMerges(phys.naBlobs, phys.blobMct, phys.sandParticles, s.temp)
               phys.accumulator -= FIXED_DT
@@ -1255,7 +1269,7 @@ export default function GlassViewer() {
             mx.restore()
 
             // Na₂O blobs — same metaball pipeline as the main view
-            if (phys.naBlobs?.length) {
+            if (phys.naBlobs?.length && s.temp >= 700) {
               // Pass 1A: additive halos → miniOff
               mictx.globalCompositeOperation = 'source-over'
               mictx.clearRect(0, 0, BOX_SIZE, BOX_SIZE)
@@ -1596,8 +1610,8 @@ export default function GlassViewer() {
                     style={{padding:'3px 9px', fontSize:11}} onClick={() => startCooling('fast')}>Fast Cool</button>
                   <div className="toolbar-divider" />
                   <div style={lcdStyle}>
-                    <span style={{visibility:'hidden', display:'block', padding:'3px 6px'}}>1200</span>
-                    <span style={{position:'absolute', inset:0, padding:'3px 6px', color:'rgba(60,60,60,0.15)', textAlign:'right'}}>1200</span>
+                    <span style={{visibility:'hidden', display:'block', padding:'3px 6px'}}>2000</span>
+                    <span style={{position:'absolute', inset:0, padding:'3px 6px', color:'rgba(60,60,60,0.15)', textAlign:'right'}}>2000</span>
                     <span style={{position:'absolute', inset:0, padding:'3px 6px', color:'rgba(60,60,60,0.75)', textAlign:'right'}}>{meltLocalTemp}</span>
                   </div>
                   <span style={{fontSize:12, fontWeight:700, color:'rgba(30,45,60,0.70)'}}>°C</span>
@@ -1628,8 +1642,8 @@ export default function GlassViewer() {
                   <button className={`action-btn reset-btn${coolingMode==='fast'?' active':''}`}
                     style={{padding:'3px 9px', fontSize:11}} onClick={() => startCooling('fast')}>Fast Cool</button>
                   <div style={lcdStyle}>
-                    <span style={{visibility:'hidden', display:'block', padding:'3px 6px'}}>1200</span>
-                    <span style={{position:'absolute', inset:0, padding:'3px 6px', color:'rgba(60,60,60,0.15)', textAlign:'right'}}>1200</span>
+                    <span style={{visibility:'hidden', display:'block', padding:'3px 6px'}}>2000</span>
+                    <span style={{position:'absolute', inset:0, padding:'3px 6px', color:'rgba(60,60,60,0.15)', textAlign:'right'}}>2000</span>
                     <span style={{position:'absolute', inset:0, padding:'3px 6px', color:'rgba(60,60,60,0.75)', textAlign:'right'}}>{meltLocalTemp}</span>
                   </div>
                   <span style={{fontSize:12, fontWeight:700, color:'rgba(30,45,60,0.70)'}}>°C</span>

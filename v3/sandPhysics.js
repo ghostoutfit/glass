@@ -12,7 +12,7 @@ const DAMPING_SLOW     = 0.80    // extra damping for near-stationary grains
 const DAMPING_FAST     = 0.97    // light damping for fast-moving grains
 const SPEED_SQ_MAX     = 10 * 10 // speed² above which DAMPING_FAST fully applies
 const WALL_RESTITUTION = 0.18
-const RESOLVE_PASSES   = 20
+const RESOLVE_PASSES   = 10
 
 export const SAND_COLORS = [
   '#c8a84c', '#b89840', '#c4a050', '#a88838',
@@ -39,6 +39,7 @@ function rebuildGrid(grains, HS) {
   _gridH.fill(-1)
   for (let i = 0; i < grains.length; i++) {
     const g  = grains[i]
+    if (g.type === 'na-sub' || g.type === 'na-ctr') continue  // springs handle blobs
     const cx = Math.min(_gridW - 1, Math.max(0, (g.x + HS) / CELL | 0))
     const cy = Math.min(_gridW - 1, Math.max(0, (g.y + HS) / CELL | 0))
     const k  = cy * _gridW + cx
@@ -378,12 +379,18 @@ export function makeNaBlob(cx, cy, vx, vy, blobR) {
     }
   }
 
-  return { id, blobR, particles, springs }
+  return { id, blobR, particles, springs, orbs }
 }
 
-export function stepNaBlobSprings(naBlobs, dt, boxAngle = 0) {
+export function stepNaBlobSprings(naBlobs, dt, boxAngle = 0, temp = 1000) {
   const gx = Math.sin(boxAngle)
   const gy = Math.cos(boxAngle)
+
+  // v2-style continuous stiffening: both factors are cubic in (1-t)
+  // so they're near-zero above ~800°C and ramp sharply below 400°C.
+  const tFull     = Math.max(0, Math.min(1, (temp - 25) / (1200 - 25)))
+  const velDamp   = 0.15 * Math.pow(1 - tFull, 3)  // kills inertia per step
+  const rigidFrac = 0.90 * Math.pow(1 - tFull, 3)  // projects toward CM velocity
 
   for (const blob of naBlobs) {
     for (const s of blob.springs) {
@@ -396,8 +403,26 @@ export function stepNaBlobSprings(naBlobs, dt, boxAngle = 0) {
       b.vx -= fx * dt; b.vy -= fy * dt
     }
 
-    const orbs = blob.particles.filter(p => p.type === 'na-sub')
-    if (orbs.length < 3) continue
+    const orbs = blob.orbs ?? (blob.orbs = blob.particles.filter(p => p.type === 'na-sub'))
+    if (orbs.length < 1) continue
+
+    // Kill inertia — dominant at cold temps, zero at hot
+    if (velDamp > 0) {
+      for (const p of orbs) { p.vx *= (1 - velDamp); p.vy *= (1 - velDamp) }
+    }
+
+    // Project toward CM velocity — makes blob move as one rigid piece when cold
+    if (rigidFrac > 0) {
+      let cvx = 0, cvy = 0
+      for (const p of orbs) { cvx += p.vx; cvy += p.vy }
+      cvx /= orbs.length; cvy /= orbs.length
+      for (const p of orbs) {
+        p.vx += (cvx - p.vx) * rigidFrac
+        p.vy += (cvy - p.vy) * rigidFrac
+      }
+    }
+
+    if (orbs.length < 3 || temp < 700) continue
     let avgSpd = 0
     for (const p of orbs) avgSpd += Math.hypot(p.vx, p.vy)
     avgSpd /= orbs.length
@@ -461,6 +486,7 @@ function mergeNaBlobs(b1, b2, grains) {
     particles: [newCtr, ...allOrbs],
     springs: [],
     merged: true,
+    orbs: allOrbs,
   }
 }
 
@@ -508,6 +534,8 @@ export function absorbNearbyGrains(grains, naBlobs, temp) {
 
   for (const blob of naBlobs) {
     let absorbed = false
+    const ctr0 = blob.particles[0]
+    const aabbR = blob.blobR + NA_R + 3 + 2  // conservative AABB radius
 
     for (let i = grains.length - 1; i >= 0 && !absorbed; i--) {
       const g = grains[i]
@@ -519,11 +547,15 @@ export function absorbNearbyGrains(grains, naBlobs, temp) {
       const prob = isSand ? sandProb : naSilProb
       if (prob <= 0) continue
 
+      // AABB pre-cull against blob center before doing the per-sub-circle scan
+      if (Math.abs(g.x - ctr0.x) > aabbR || Math.abs(g.y - ctr0.y) > aabbR) continue
+
       // Check proximity to nearest sub-circle (catches grains inside the hull
       // even when the phantom center has drifted away from them)
       let minD2 = Infinity
       const contactR = g.r + NA_R + 3
-      for (const p of blob.particles) {
+      const blobOrbs = blob.orbs ?? blob.particles
+      for (const p of blobOrbs) {
         if (p.type !== 'na-sub') continue
         const dx = g.x - p.x, dy = g.y - p.y
         minD2 = Math.min(minD2, dx * dx + dy * dy)
@@ -537,6 +569,7 @@ export function absorbNearbyGrains(grains, naBlobs, temp) {
       g.blobId = blob.id
       g.color  = '#fff'; g._cr = 255; g._cg = 255; g._cb = 255
       blob.particles.push(g)
+      if (blob.orbs) blob.orbs.push(g)
 
       if (!blob.merged) {
         const ctr = blob.particles[0]
