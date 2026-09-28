@@ -1,7 +1,8 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import CompositionView from './CompositionView'
-import NetworksView from './NetworksView'
 import { initParticles, stepPhysics, stepFloorPhysics, PARTICLE_R, FIXED_DT, T_RIGID, freezeParticles, syncParticlesToRigidBody, stepRigidBody } from './glassPhysics.js'
+import { setSioHotMult, setFreeAttractSiOMult, setSioExclMult, setCrystJiggleMult, setBreakStrain, setReformStrain, setCrystAnchorK, setLiberateFrac, setSioK, setNaOK, setNaAnchorK, setNaLiberateFrac, setNaBreakStrain, setLatticeSpeedMult, setFreedSpeedMult, setReintBondN, setReintFrameM } from './meltPhysics.js'
+import { setVisualScale } from './renderer.js'
 import { initSandParticles, stepSandPhysics, mergeSodaGrains, mergeSilicateGrains, convertLargeNaGrains, stepNaBlobSprings, checkNaBlobMerges, absorbNearbyGrains, GRAIN_R as SAND_GRAIN_R, NA_BLOB_R_CTR } from './sandPhysics.js'
 import './GlassViewer.css'
 
@@ -97,7 +98,7 @@ function assignGlassTypes(n, sio2, na2o, cao) {
 // Charge overlay is rendered directly on the atom via box-shadow glow (no separate key section)
 function GlassAtomIcon({ type, iconR, showCharge = false, darkMode = true }) {
   const FILL   = { Si: '#d4a020', O: '#cc3a3a', Na: '#4aaa60', Ca: '#4a96be' }
-  const CHGRGB = { Si: '62,127,214', Ca: '62,127,214', O: '231,131,42', Na: '231,131,42' }
+  const CHGRGB = { Si: '62,127,214', Ca: '62,127,214', Na: '62,127,214', O: '231,131,42' }
   const fill = FILL[type] ?? '#aaa'
   const rgb  = CHGRGB[type]
   const diam = iconR * 2
@@ -261,48 +262,76 @@ const CORNER_R    = 26
 const STICK_LEN   = 300
 const STICK_ANGLE = 10 * Math.PI / 180
 
+// Heat capacity multiplier — temperature rises slower in the melt zone.
+// Matches the Na-O break zone from the graph markers (650–1130°C).
+function meltHeatCapacity(tempC) {
+  const lo = 650, hi = 1130
+  if (tempC <= lo || tempC >= hi) return 1.0
+  const t = (tempC - lo) / (hi - lo)
+  return 1.0 + 3.5 * Math.sin(Math.PI * t)
+}
+
 export default function GlassViewer() {
   const [darkMode,   setDarkMode]   = useState(true)
-  const [showCount,  setShowCount]  = useState(true)
+  const [bondView, setBondView] = useState('graph')  // 'count' | 'graph'
+  const graphCanvasRef  = useRef(null)
+  const graphXMaxRef    = useRef(5000)
+  const graphDragRef    = useRef(null)   // { startX, startXMax } while dragging
   const [showCharge, setShowCharge] = useState(false)
-  const [showField,  setShowField]  = useState(false)
-  const [showDev,    setShowDev]    = useState(false)
+  const [showField,  setShowField]  = useState(true)
+  const [showDev,    setShowDev]    = useState(true)
 
-  const [tab, setTab]             = useState('glass')
+  const [tab, setTab]             = useState('melt')
   const [presetId, setPresetId]   = useState('soda')
   const [meltEnergyIn,   setMeltEnergyIn]   = useState(0)    // -100..100, snaps to 0
-  const [meltLocalTemp,  setMeltLocalTemp]  = useState(25)   // melt tab's own temperature
-  const [derivedTemp,    setDerivedTemp]    = useState(25)   // KE-measured temperature
+  const [meltLocalTemp,  setMeltLocalTemp]  = useState(500)  // melt tab's own temperature
+  const [derivedTemp,    setDerivedTemp]    = useState(500)  // KE-measured temperature
   const [simSpeed, setSimSpeed]   = useState(0.5)
   const [sioR0, setSioR0]         = useState(9)
-  const [attractK, setAttractK]   = useState(0.02)
-  const [showGraphs, setShowGraphs]   = useState(false)
+  const [attractK, setAttractK]         = useState(0.10)
+  const [attractFalloff, setAttractFalloff] = useState(1.0)
+  const [speedMult, setSpeedMult]       = useState(1.0)
+  const [sioHotMult, setSioHotMultState]       = useState(1.07)
+  const [freeAttractSiOMult, setFreeAttractSiOMultState] = useState(1.0)
+  const [sioExclMult, setSioExclMultState]     = useState(1.4)
+  const [crystJiggleMult, setCrystJiggleMultState] = useState(1.0)
+  const [sioK,        setSioKState]       = useState(0.061)
+  const [naOK,        setNaOKState]       = useState(0.042)
+  const [breakStrain, setBreakStrainState] = useState(0.07)
+  const [reformStrain,  setReformStrainState]  = useState(0.0)
+  const [crystAnchorK,  setCrystAnchorKState]  = useState(0.06)
+  const [liberateFrac,  setLiberateFracState]  = useState(0.5)
+  const [naAnchorK,     setNaAnchorKState]     = useState(0.06)
+  const [naLiberateFrac, setNaLiberateFracState] = useState(0.5)
+  const [naBreakStrain, setNaBreakStrainState] = useState(0.1)
+  const [latticeSpeedMult, setLatticeSpeedMultState] = useState(1.0)
+  const [freedSpeedMult,   setFreedSpeedMultState]   = useState(3.5)
+  const [reintBondN,       setReintBondNState]       = useState(2)
+  const [reintFrameM,      setReintFrameMState]      = useState(30)
+  const [visualScale, setVisualScaleState]     = useState(3.3)
   const [coolingMode, setCoolingMode] = useState(null)
   const [meltHeatMode, setMeltHeatMode] = useState(null)  // 'slow' | 'fast' | null
-  const [precompute, setPrecompute]   = useState(true)
   const [bondNums, setBondNums]       = useState(false)
+  const [atomColorMode,   setAtomColorMode]   = useState('normal')
+  const [showBrokenBonds, setShowBrokenBonds] = useState(false)
+  const [showLiveStats,   setShowLiveStats]   = useState(true)
+  const [showMiniView, setShowMiniView] = useState(true)
   const [bondCounts,        setBondCounts]        = useState(null)
   const [initialBondCounts, setInitialBondCounts] = useState(null)
+  const [modeBondCounts,    setModeBondCounts]    = useState(null)
   const initialBondCapturedRef = useRef(false)
+  const bondCountsRef          = useRef(null)
+  const prevCoolingModeRef     = useRef(null)
   const [replayFrameCount, setReplayFrameCount] = useState(0)
   const [replayFrame, setReplayFrame]     = useState(null)
   const [replayPlaying, setReplayPlaying] = useState(false)
   const replayRafRef = useRef(null)
 
   // Glass tab controls
-  const [showBox,      setShowBox]      = useState(true)
-  const [showStick,    setShowStick]    = useState(false)
   const [autoRotate,   setAutoRotate]   = useState(true)
-  const [showMetaball, setShowMetaball] = useState(true)
   const [glassTemp,       setGlassTemp]       = useState(600)
   const [glassEnergyIn,   setGlassEnergyIn]   = useState(0)     // -100..100, snaps to 0
-  const [directTempMode,  setDirectTempMode]  = useState(false)
   const [glassDevMode,    setGlassDevMode]    = useState(false)
-  const [showEnergyGraph, setShowEnergyGraph] = useState(false)
-  const graphCanvasRef  = useRef(null)
-  const graphDataRef    = useRef([])   // {e, t}[] — raw samples
-  const graphDragRef    = useRef({ dragging: false, ox: 0, oy: 0 })
-  const [graphPos, setGraphPos] = useState({ x: 0, y: 0, w: 300, h: 240, init: false })
   const [zone1End,        setZone1End]        = useState(400)
   const [zone2End,        setZone2End]        = useState(750)
   const [zone1Rate,       setZone1Rate]       = useState(2.0)
@@ -310,25 +339,21 @@ export default function GlassViewer() {
   const [zone3Rate,       setZone3Rate]       = useState(1.5)
   const [baseEnergyRate,  setBaseEnergyRate]  = useState(200)
   const [boxState,        setBoxState]        = useState('sand')
-  const [multiRadius,     setMultiRadius]     = useState(true)
-  const [showBlobGlow,    setShowBlobGlow]    = useState(true)
-  const [blobHue,         setBlobHue]         = useState(0)
-  const [blobBright,      setBlobBright]      = useState(1.0)
   const [sandPaused,      setSandPaused]      = useState(false)
+  const [sandDevMode,     setSandDevMode]     = useState(false)
 
   const boxCanvasRef  = useRef(null)
   const miniCanvasRef = useRef(null)
   const boxSimRef = useRef({
-    showBox: true, showStick: false, autoRotate: true, showMetaball: true, boxState: 'sand', multiRadius: true,
-    showBlobGlow: true, blobHue: 0, blobBright: 1.0, sandPaused: false,
+    autoRotate: true, boxState: 'sand', multiRadius: true,
+    sandPaused: false, showMiniView: true,
     temp: 25, floorMode: false, floorY: 0,
-    energyInput: 0, directTempMode: false, showEnergyGraph: false,
+    energyInput: 0,
     zone1End: 400, zone2End: 750,
     zone1Rate: 2.0, zone2Rate: 0.3, zone3Rate: 1.5,
     baseRate: 200, lastFrameTs: 0, lastTempUpdate: 0,
     box: null,
     mouse: { x: -400, y: -400 },
-    stick: null, stickDrag: null,
   })
   const physRef = useRef({ particles: null, springs: null, accumulator: 0, prevTime: null, rigidBody: null })
 
@@ -360,14 +385,16 @@ export default function GlassViewer() {
   const sharedTempRef = useRef({ temp: 25, lastTs: 0, cumulativeEnergy: 0 })
 
   // Melt tab has its own independent temperature driven by its own energy input
-  const meltTempRef = useRef({ temp: 25, lastTs: 0 })
+  const meltTempRef             = useRef({ temp: 500, lastTs: 0, cumulativeEnergy: 0 })
+  const meltCumulativeEnergyRef = useRef(0)  // raw energy accumulated (x-axis for T-E graph)
   const meltSimRef  = useRef({
     energyInput: 0,
     baseRate: 200,
   })
 
   useEffect(() => { boxSimRef.current.boxState = boxState }, [boxState])
-  useEffect(() => { boxSimRef.current.multiRadius = multiRadius }, [multiRadius])
+  useEffect(() => { boxSimRef.current.sandDevMode = sandDevMode }, [sandDevMode])
+  useEffect(() => { boxSimRef.current.showMiniView = showMiniView }, [showMiniView])
 
   useEffect(() => {
     document.body.style.background = darkMode ? '#080808' : '#e8e3da'
@@ -382,7 +409,7 @@ export default function GlassViewer() {
     const handler = e => {
       if (e.target.tagName === 'TEXTAREA' || (e.target.tagName === 'INPUT' && e.target.type !== 'range')) return
       buf = (buf + e.key.toLowerCase()).slice(-3)
-      if (buf === 'dev') { setShowDev(d => !d); buf = '' }
+      if (buf === 'dev') { setShowDev(d => !d); setSandDevMode(d => !d); buf = '' }
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
@@ -415,10 +442,12 @@ export default function GlassViewer() {
       if (!boxSimRef.current.sandPaused && s.energyInput !== 0 && elapsed > 0) {
         const input      = s.energyInput
         const atFloor    = st.temp <= 0    && input < 0
-        const atCeiling  = st.temp >= 2000 && input > 0
+        const atCeiling  = st.temp >= 1800 && input > 0
         if (!atFloor && !atCeiling) {
-          st.temp = Math.max(0, Math.min(2000,
-            st.temp + (input / 100) * s.baseRate * elapsed))
+          const rawDelta = (input / 100) * s.baseRate * elapsed
+          meltCumulativeEnergyRef.current += rawDelta
+          const hcFactor = meltHeatCapacity(st.temp)
+          st.temp = Math.max(0, Math.min(1800, st.temp + rawDelta / hcFactor))
           if (++tick % 6 === 0) setMeltLocalTemp(Math.round(st.temp))
         }
       }
@@ -457,6 +486,7 @@ export default function GlassViewer() {
     setMeltHeatMode(null)
     setCoolingMode(m => {
       const next = m === mode ? null : mode
+      if (next !== null) window.resetLifetimes?.()
       meltSimRef.current.energyInput = next === 'fast' ? -100 : next === 'slow' ? -50 : 0
       return next
     })
@@ -466,6 +496,7 @@ export default function GlassViewer() {
     setCoolingMode(prev => { if (prev) meltSimRef.current.energyInput = 0; return null })
     setMeltHeatMode(prev => {
       const next = prev === mode ? null : mode
+      if (next !== null) window.resetLifetimes?.()
       meltSimRef.current.energyInput = next === 'fast' ? 100 : next === 'slow' ? 50 : 0
       return next
     })
@@ -473,11 +504,22 @@ export default function GlassViewer() {
 
   const handleBondCounts = useCallback(counts => {
     setBondCounts(counts)
+    bondCountsRef.current = counts
     if (!initialBondCapturedRef.current && counts) {
       setInitialBondCounts(counts)
       initialBondCapturedRef.current = true
     }
   }, [])
+
+  // Capture mode baseline when entering a heating/cooling run; clear on null mode
+  useEffect(() => {
+    if (coolingMode !== null && coolingMode !== prevCoolingModeRef.current) {
+      setModeBondCounts(bondCountsRef.current)
+    } else if (coolingMode === null) {
+      setModeBondCounts(null)
+    }
+    prevCoolingModeRef.current = coolingMode
+  }, [coolingMode])
 
   // ── Glass / box canvas loop — canvas always mounted so RAF never drops ────
   useEffect(() => {
@@ -543,22 +585,13 @@ export default function GlassViewer() {
         s.box.boxAngularVel = newAngle - s.box.boxAngle
         s.box.boxAngle = newAngle
       }
-      if (s.stickDrag && s.stick) {
-        s.stick.x = wx - s.stickDrag.offsetX
-        s.stick.y = wy - s.stickDrag.offsetY
-      }
     }
     const onDown = e => {
       const { wx, wy } = worldPos(e)
       const s = boxSimRef.current
       s.mouse.x = wx; s.mouse.y = wy
-      if (s.showBox) {
+      {
         const onCorner = cornersWorld().some(c => Math.hypot(c.wx - wx, c.wy - wy) < CORNER_R * getDrawScale())
-        if (s.showStick && !onCorner) {
-          if (!s.stick) s.stick = { x: wx, y: wy }
-          s.stickDrag = { offsetX: wx - s.stick.x, offsetY: wy - s.stick.y }
-          return
-        }
         if (onCorner && s.box) {
           const bcx = canvas.width / 2, bcy = canvas.height / 2
           s.box.cornerDrag = {
@@ -566,16 +599,11 @@ export default function GlassViewer() {
             startBoxAngle:   s.box.boxAngle,
           }
         }
-      } else if (s.showStick) {
-        // Floor mode — drag stick as landing surface
-        if (!s.stick) s.stick = { x: wx, y: wy }
-        s.stickDrag = { offsetX: wx - s.stick.x, offsetY: wy - s.stick.y }
       }
     }
     const onUp = () => {
       const s = boxSimRef.current
       if (s.box) s.box.cornerDrag = null
-      s.stickDrag = null
     }
 
     canvas.addEventListener('mousemove',  onMouseMove)
@@ -626,72 +654,10 @@ export default function GlassViewer() {
         s.lastTempUpdate = ts
       }
 
-      // Energy graph: collect sample + redraw graph canvas
-      if (s.showEnergyGraph && frameElapsed > 0) {
-        const data = graphDataRef.current
-        data.push({ e: sharedTempRef.current.cumulativeEnergy, t: s.temp })
-        const gc = graphCanvasRef.current
-        if (gc) {
-          if (gc.offsetWidth && gc.offsetHeight) {
-            gc.width  = gc.offsetWidth
-            gc.height = gc.offsetHeight
-          }
-          const gw = gc.width, gh = gc.height
-          const gx = gc.getContext('2d')
-          gx.clearRect(0, 0, gw, gh)
-          gx.fillStyle = '#0e0e0e'
-          gx.fillRect(0, 0, gw, gh)
-
-          const PAD_L = 28, PAD_R = 8, PAD_T = 6, PAD_B = 14
-          const plotW = gw - PAD_L - PAD_R, plotH = gh - PAD_T - PAD_B
-
-          const E_MIN = -1200, E_MAX = 500, T_MIN = 0, T_MAX = 1500
-          const N = data.length
-          const toX = e  => PAD_L + (e  - E_MIN) / (E_MAX - E_MIN) * plotW
-          const toY = t  => PAD_T + plotH - (t  - T_MIN) / (T_MAX - T_MIN) * plotH
-
-          // Axes
-          gx.strokeStyle = '#333'; gx.lineWidth = 1
-          gx.strokeRect(PAD_L, PAD_T, plotW, plotH)
-
-          // Grid lines
-          gx.setLineDash([2, 4]); gx.strokeStyle = '#222'
-          for (const tv of [200, 400, 600, 800, 1000, 1200]) {
-            const py = toY(tv)
-            gx.beginPath(); gx.moveTo(PAD_L, py); gx.lineTo(PAD_L + plotW, py); gx.stroke()
-          }
-          // Zero-energy vertical
-          gx.strokeStyle = '#2c2c2c'
-          gx.beginPath(); gx.moveTo(toX(0), PAD_T); gx.lineTo(toX(0), PAD_T + plotH); gx.stroke()
-          gx.setLineDash([])
-
-          // Temperature axis labels only
-          gx.fillStyle = '#444'; gx.font = '9px monospace'; gx.textAlign = 'right'
-          for (const tv of [200, 600, 1000, 1400]) {
-            gx.fillText(tv, PAD_L - 3, toY(tv) + 3)
-          }
-          // Y axis title
-          gx.fillStyle = '#555'; gx.font = '9px monospace'
-          gx.save(); gx.translate(8, PAD_T + plotH / 2); gx.rotate(-Math.PI / 2)
-          gx.textAlign = 'center'; gx.fillText('Temp °C', 0, 0); gx.restore()
-
-          // Points: persistent, no fade
-          gx.fillStyle = 'rgba(200,140,60,0.7)'
-          for (let i = 0; i < N; i++) {
-            gx.fillRect(toX(data[i].e) - 1, toY(data[i].t) - 1, 2, 2)
-          }
-          // Current point highlight
-          if (N > 0) {
-            const last = data[N - 1]
-            gx.fillStyle = '#ffcc66'
-            gx.beginPath(); gx.arc(toX(last.e), toY(last.t), 3, 0, Math.PI * 2); gx.fill()
-          }
-        }
-      }
 
       ctx.clearRect(0, 0, canvas.width, canvas.height)
 
-      if (s.showBox) {
+      if (true) {
         if (!s.box) s.box = { boxAngle: 0, boxAngularVel: 0, cornerDrag: null }
         if (s.floorMode) {
           // Returning from floor mode — reset to fresh particle state
@@ -915,12 +881,10 @@ export default function GlassViewer() {
             smctx.fillStyle = blobFillColor(s.temp)
             smctx.fillRect(0, 0, BOX_SIZE, BOX_SIZE)
             smctx.restore()
-            ctx.filter = `hue-rotate(${s.blobHue}deg) brightness(${s.blobBright})`
             ctx.drawImage(sandMeltOff, -HS, -HS, BOX_SIZE, BOX_SIZE)
-            ctx.filter = 'none'
 
             // Pass 2: soft glow overlay — blur the crisp mask, tint at low alpha, draw lighter
-            if (s.showBlobGlow) {
+            {
               const glowBlur = Math.round(4 + 6 * t)
               smctx.clearRect(0, 0, BOX_SIZE, BOX_SIZE)
               smctx.filter = `blur(${glowBlur}px)`
@@ -931,10 +895,8 @@ export default function GlassViewer() {
               smctx.fillStyle = blobGlowColor(s.temp)
               smctx.fillRect(0, 0, BOX_SIZE, BOX_SIZE)
               smctx.restore()
-              ctx.filter = `hue-rotate(${s.blobHue}deg) brightness(${s.blobBright})`
               ctx.globalCompositeOperation = 'lighter'
               ctx.drawImage(sandMeltOff, -HS, -HS, BOX_SIZE, BOX_SIZE)
-              ctx.filter = 'none'
               ctx.globalCompositeOperation = 'source-over'
             }
 
@@ -962,7 +924,7 @@ export default function GlassViewer() {
             window._naBlobs = phys.naBlobs
             window._blobMct = phys.blobMct
           }
-        } else if (s.showMetaball) {
+        } else {
           const t     = Math.max(0, Math.min(1, (s.temp - 25) / (1200 - 25)))
           const blobR = PARTICLE_R * 5
 
@@ -1008,18 +970,6 @@ export default function GlassViewer() {
           ctx.shadowBlur  = Math.round(4 + 26 * t)
           ctx.drawImage(metaballOff, -HS, -HS, BOX_SIZE, BOX_SIZE)
           ctx.restore()
-        } else {
-          ctx.fillStyle = '#888888'
-          ctx.fillRect(-HS, -HS, BOX_SIZE, BOX_SIZE)
-          const vtypes = glassVisualTypesRef.current
-          for (let i = 0; i < phys.particles.length; i++) {
-            const p = phys.particles[i]
-            const vt = vtypes ? vtypes[i] : 1
-            ctx.fillStyle = GLASS_TYPE_COLORS[vt]
-            ctx.globalAlpha = 0.87
-            ctx.beginPath(); ctx.arc(p.x, p.y, GLASS_TYPE_R[vt], 0, Math.PI * 2); ctx.fill()
-          }
-          ctx.globalAlpha = 1
         }
 
         ctx.restore()
@@ -1031,8 +981,8 @@ export default function GlassViewer() {
         ctx.strokeRect(-HS, -HS, BOX_SIZE, BOX_SIZE)
         ctx.restore()
 
-        // Non-sand entity count — diagnostic HUD
-        if (s.boxState === 'sand' && phys.sandParticles) {
+        // Non-sand entity count — diagnostic HUD (dev mode only)
+        if (s.sandDevMode && s.boxState === 'sand' && phys.sandParticles) {
           let nNa = 0, nSil = 0, nSub = 0, nSand = 0
           for (const g of phys.sandParticles) {
             if (g.type === 'na') nNa++
@@ -1062,27 +1012,6 @@ export default function GlassViewer() {
           ctx.restore()
         }
 
-        // Stick
-        if (s.showStick && s.stick) {
-          const { x: sx, y: sy } = s.stick
-          const dragging = !!s.stickDrag
-          ctx.save()
-          ctx.translate(sx, sy); ctx.rotate(-STICK_ANGLE)
-          ctx.shadowColor = 'rgba(0,0,0,0.55)'; ctx.shadowBlur = 6
-          const sg = ctx.createLinearGradient(0, -4, 0, 4)
-          sg.addColorStop(0,   '#d4a860'); sg.addColorStop(0.4, '#c09040'); sg.addColorStop(1, '#7a5020')
-          ctx.fillStyle = sg
-          ctx.beginPath(); ctx.roundRect(2, -3.5, STICK_LEN - 4, 7, 3); ctx.fill()
-          ctx.shadowBlur = 0; ctx.fillStyle = '#4a2810'
-          ctx.beginPath(); ctx.moveTo(2,-3.5); ctx.lineTo(-10,0); ctx.lineTo(2,3.5); ctx.closePath(); ctx.fill()
-          ctx.fillStyle = dragging ? 'rgba(255,220,140,0.5)' : 'rgba(255,220,140,0.25)'
-          ctx.beginPath(); ctx.roundRect(4, -3.5, STICK_LEN - 20, 2.5, 1); ctx.fill()
-          ctx.restore()
-          ctx.save()
-          ctx.beginPath(); ctx.arc(sx, sy, dragging ? 5 : 3, 0, Math.PI * 2)
-          ctx.fillStyle = dragging ? 'rgba(220,170,80,0.9)' : 'rgba(100,65,25,0.7)'; ctx.fill()
-          ctx.restore()
-        }
       } else {
         // Box is off — transition existing particles to floor mode, then run it
 
@@ -1115,14 +1044,9 @@ export default function GlassViewer() {
           const elapsed = Math.min((ts - phys.prevTime) / 1000, 0.05)
           phys.prevTime = ts
 
-          const stickA = s.showStick && s.stick ? s.stick : null
-          const stickB = stickA ? {
-            x: s.stick.x + STICK_LEN * Math.cos(STICK_ANGLE),
-            y: s.stick.y - STICK_LEN * Math.sin(STICK_ANGLE),
-          } : null
           phys.accumulator += elapsed
           while (phys.accumulator >= FIXED_DT) {
-            stepFloorPhysics(phys.particles, phys.springs, FIXED_DT, s.floorY, canvas.width, s.temp, stickA, stickB)
+            stepFloorPhysics(phys.particles, phys.springs, FIXED_DT, s.floorY, canvas.width, s.temp, null, null)
             phys.accumulator -= FIXED_DT
           }
 
@@ -1138,8 +1062,7 @@ export default function GlassViewer() {
           ctx.strokeStyle = 'rgba(200,170,120,0.85)'; ctx.lineWidth = 3; ctx.stroke()
           ctx.restore()
 
-          // Glass blob — metaball or particle dots
-          if (s.showMetaball) {
+          // Glass blob — metaball
             const t     = Math.max(0, Math.min(1, (s.temp - 25) / (1200 - 25)))
             const blobR = PARTICLE_R * 5
             const fctx  = mFloorOff.getContext('2d')
@@ -1170,41 +1093,7 @@ export default function GlassViewer() {
             ctx.fillStyle = glassColor(s.temp)
             ctx.fillRect(0, 0, canvas.width, canvas.height)
             ctx.restore()
-          } else {
-            const vtypes = glassVisualTypesRef.current
-            for (let i = 0; i < phys.particles.length; i++) {
-              const p = phys.particles[i]
-              const vt = vtypes ? vtypes[i] : 1
-              ctx.fillStyle = GLASS_TYPE_COLORS[vt]
-              ctx.globalAlpha = 0.87
-              ctx.beginPath(); ctx.arc(p.x, p.y, GLASS_TYPE_R[vt], 0, Math.PI * 2); ctx.fill()
-            }
-            ctx.globalAlpha = 1
-          }
 
-          // Stick — same amber material as floor/walls
-          if (s.showStick && s.stick) {
-            const { x: sx, y: sy } = s.stick
-            const dragging = !!s.stickDrag
-            ctx.save()
-            ctx.translate(sx, sy); ctx.rotate(-STICK_ANGLE)
-            ctx.shadowColor = 'rgba(0,0,0,0.55)'; ctx.shadowBlur = 6
-            const sg2 = ctx.createLinearGradient(0, -4, 0, 4)
-            sg2.addColorStop(0,   '#d4a860')
-            sg2.addColorStop(0.4, '#c09040')
-            sg2.addColorStop(1,   '#7a5020')
-            ctx.fillStyle = sg2
-            ctx.beginPath(); ctx.roundRect(2, -3.5, STICK_LEN - 4, 7, 3); ctx.fill()
-            ctx.shadowBlur = 0; ctx.fillStyle = '#4a2810'
-            ctx.beginPath(); ctx.moveTo(2,-3.5); ctx.lineTo(-10,0); ctx.lineTo(2,3.5); ctx.closePath(); ctx.fill()
-            ctx.fillStyle = dragging ? 'rgba(255,220,140,0.5)' : 'rgba(255,220,140,0.25)'
-            ctx.beginPath(); ctx.roundRect(4, -3.5, STICK_LEN - 20, 2.5, 1); ctx.fill()
-            ctx.restore()
-            ctx.save()
-            ctx.beginPath(); ctx.arc(sx, sy, dragging ? 5 : 3, 0, Math.PI * 2)
-            ctx.fillStyle = dragging ? 'rgba(220,170,80,0.9)' : 'rgba(100,65,25,0.7)'; ctx.fill()
-            ctx.restore()
-          }
         } else if (!phys.particles) {
           s.floorMode = false
         }
@@ -1212,7 +1101,7 @@ export default function GlassViewer() {
 
       // ── Mini blob preview (blob-box) ──────────────────────────────
       const mc = miniCanvasRef.current
-      if (mc && s.showBox && (phys.particles?.length || phys.sandParticles?.length)) {
+      if (mc && s.showMiniView && (phys.particles?.length || phys.sandParticles?.length)) {
         const dpr = window.devicePixelRatio || 1
         const mW  = mc.clientWidth, mH = mc.clientHeight
         if (mW && mH) {
@@ -1268,6 +1157,28 @@ export default function GlassViewer() {
             }
             mx.restore()
 
+            // Sand heat glow — same two-pass approach as the main canvas
+            if (heatT > 0) {
+              mictx.clearRect(0, 0, BOX_SIZE, BOX_SIZE)
+              mictx.globalCompositeOperation = 'lighter'
+              mictx.fillStyle = `rgba(255,${glowG},0,${heatT * heatT * 0.28})`
+              for (const g of phys.sandParticles) {
+                if (g.type === 'na-sub' || g.type === 'na-ctr') continue
+                mictx.beginPath()
+                mictx.arc(g.x + HS, g.y + HS, g.r * 1.8, 0, Math.PI * 2)
+                mictx.fill()
+              }
+              mictx.globalCompositeOperation = 'source-over'
+              mx.save()
+              mx.translate(cx, cy); mx.rotate(boxAngle)
+              mx.filter = `blur(${Math.round(heatT * 10)}px)`
+              mx.globalCompositeOperation = 'lighter'
+              mx.drawImage(miniOff, -fitSize / 2, -fitSize / 2, fitSize, fitSize)
+              mx.filter = 'none'
+              mx.globalCompositeOperation = 'source-over'
+              mx.restore()
+            }
+
             // Na₂O blobs — same metaball pipeline as the main view
             if (phys.naBlobs?.length && s.temp >= 700) {
               // Pass 1A: additive halos → miniOff
@@ -1309,13 +1220,11 @@ export default function GlassViewer() {
               mictx.restore()
               mx.save()
               mx.translate(cx, cy); mx.rotate(boxAngle)
-              mx.filter = `hue-rotate(${s.blobHue}deg) brightness(${s.blobBright})`
               mx.drawImage(miniOff, -fitSize / 2, -fitSize / 2, fitSize, fitSize)
-              mx.filter = 'none'
               mx.restore()
 
               // Pass 2: glow overlay
-              if (s.showBlobGlow) {
+              {
                 const tBlob   = Math.max(0, Math.min(1, (s.temp - 700) / 500))
                 const glowBlur = Math.round(4 + 6 * tBlob)
                 mictx.clearRect(0, 0, BOX_SIZE, BOX_SIZE)
@@ -1329,10 +1238,8 @@ export default function GlassViewer() {
                 mictx.restore()
                 mx.save()
                 mx.translate(cx, cy); mx.rotate(boxAngle)
-                mx.filter = `hue-rotate(${s.blobHue}deg) brightness(${s.blobBright})`
                 mx.globalCompositeOperation = 'lighter'
                 mx.drawImage(miniOff, -fitSize / 2, -fitSize / 2, fitSize, fitSize)
-                mx.filter = 'none'
                 mx.globalCompositeOperation = 'source-over'
                 mx.restore()
               }
@@ -1439,30 +1346,9 @@ export default function GlassViewer() {
     }
   }, [])
 
-  const onBoxChange = useCallback(e => {
-    const v = e.target.checked
-    setShowBox(v); boxSimRef.current.showBox = v
-  }, [])
-  const onStickChange = useCallback(e => {
-    const v = e.target.checked
-    setShowStick(v); boxSimRef.current.showStick = v
-    if (!v) { boxSimRef.current.stick = null; boxSimRef.current.stickDrag = null }
-  }, [])
   const onAutoRotateChange = useCallback(e => {
     const v = e.target.checked
     setAutoRotate(v); boxSimRef.current.autoRotate = v
-  }, [])
-  const onMetaballChange = useCallback(e => {
-    const v = e.target.checked
-    setShowMetaball(v); boxSimRef.current.showMetaball = v
-  }, [])
-  const onDirectTempChange = useCallback(e => {
-    const v = e.target.checked
-    setDirectTempMode(v); boxSimRef.current.directTempMode = v
-  }, [])
-  const onDirectTempSlide = useCallback(e => {
-    const v = +e.target.value
-    setGlassTemp(v); boxSimRef.current.temp = v; sharedTempRef.current.temp = v
   }, [])
   const onEnergyInChange = useCallback(e => {
     const v = +e.target.value
@@ -1485,34 +1371,6 @@ export default function GlassViewer() {
   const onZone3RateChange  = useCallback(e => { const v = +e.target.value; setZone3Rate(v);      boxSimRef.current.zone3Rate = v   }, [])
   const onBaseRateChange   = useCallback(e => { const v = +e.target.value; setBaseEnergyRate(v); boxSimRef.current.baseRate = v    }, [])
 
-  const onToggleEnergyGraph = useCallback(() => {
-    setShowEnergyGraph(v => {
-      const next = !v
-      boxSimRef.current.showEnergyGraph = next
-      if (next && !graphPos.init) {
-        setGraphPos({
-          x: window.innerWidth - 316,
-          y: Math.round(window.innerHeight / 2) - 120,
-          w: 300, h: 240, init: true,
-        })
-      }
-      if (next) sharedTempRef.current.cumulativeEnergy = 0
-      if (!next) graphDataRef.current = []
-      return next
-    })
-  }, [graphPos.init])
-
-  const onGraphMouseDown = useCallback(e => {
-    const pos = graphPos
-    graphDragRef.current = { dragging: true, ox: e.clientX - pos.x, oy: e.clientY - pos.y }
-    const onMove = me => {
-      if (!graphDragRef.current.dragging) return
-      setGraphPos(p => ({ ...p, x: me.clientX - graphDragRef.current.ox, y: me.clientY - graphDragRef.current.oy }))
-    }
-    const onUp = () => { graphDragRef.current.dragging = false; window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp) }
-    window.addEventListener('mousemove', onMove)
-    window.addEventListener('mouseup', onUp)
-  }, [graphPos])
 
 
   const p            = PRESETS.find(x => x.id === presetId)
@@ -1520,16 +1378,18 @@ export default function GlassViewer() {
     setCoolingMode(null); setPresetId(id)
     presetIdRef.current = id
     glassVisualTypesRef.current = null
-    setBondCounts(null); setInitialBondCounts(null)
+    setBondCounts(null); setInitialBondCounts(null); setModeBondCounts(null)
     initialBondCapturedRef.current = false
+    bondCountsRef.current = null
     physRef.current.sandParticles = null
     physRef.current.naBlobs = []
     physRef.current.blobMct = {}
     const box = boxSimRef.current.box
     if (box) { box.boxAngle = 0; box.boxAngularVel = 0 }
     meltSimRef.current.energyInput = 0
-    meltTempRef.current.temp = 25
-    setMeltLocalTemp(25)
+    meltTempRef.current.temp = 500
+    meltCumulativeEnergyRef.current = 0
+    setMeltLocalTemp(500)
   }
 
   const lcdStyle = { position:'relative', background:'#909e77', border:'1px solid rgba(100,90,70,0.5)', borderRadius:3, fontFamily:'"DSEG7","Courier New",monospace', fontSize:15, letterSpacing:'0.05em', lineHeight:1, userSelect:'none', flexShrink:0 }
@@ -1562,9 +1422,12 @@ export default function GlassViewer() {
 
           {/* Tab strip */}
           <div style={{ display:'flex', justifyContent:'center', gap:2, marginBottom:5 }}>
-            <button className={`tab-btn ${tab==='melt'?'active':''}`}     onClick={() => setTab('melt')}>Melt</button>
-            <button className={`tab-btn ${tab==='networks'?'active':''}`} onClick={() => setTab('networks')}>Networks</button>
-            <button className={`tab-btn ${tab==='glass'?'active':''}`}    onClick={() => setTab('glass')}>Glass</button>
+            <button className={`tab-btn ${tab==='melt'?'active':''}`}  onClick={() => setTab('melt')}>Particles and Fields</button>
+            <button className={`tab-btn ${tab==='glass'?'active':''}`} onClick={() => setTab('glass')}>Bulk Material</button>
+            <label style={{ display:'flex', alignItems:'center', gap:3, fontSize:11, color:'#aaa', cursor:'pointer', marginLeft:2 }}>
+              <input type="checkbox" checked={showMiniView} onChange={e => setShowMiniView(e.target.checked)} style={{ margin:0 }} />
+              mini
+            </label>
           </div>
 
           {/* Action row */}
@@ -1610,8 +1473,8 @@ export default function GlassViewer() {
                     style={{padding:'3px 9px', fontSize:11}} onClick={() => startCooling('fast')}>Fast Cool</button>
                   <div className="toolbar-divider" />
                   <div style={lcdStyle}>
-                    <span style={{visibility:'hidden', display:'block', padding:'3px 6px'}}>2000</span>
-                    <span style={{position:'absolute', inset:0, padding:'3px 6px', color:'rgba(60,60,60,0.15)', textAlign:'right'}}>2000</span>
+                    <span style={{visibility:'hidden', display:'block', padding:'3px 6px'}}>1800</span>
+                    <span style={{position:'absolute', inset:0, padding:'3px 6px', color:'rgba(60,60,60,0.15)', textAlign:'right'}}>1800</span>
                     <span style={{position:'absolute', inset:0, padding:'3px 6px', color:'rgba(60,60,60,0.75)', textAlign:'right'}}>{meltLocalTemp}</span>
                   </div>
                   <span style={{fontSize:12, fontWeight:700, color:'rgba(30,45,60,0.70)'}}>°C</span>
@@ -1627,8 +1490,6 @@ export default function GlassViewer() {
                     min={0.05} max={0.5} step={0.025} value={simSpeed}
                     onChange={e => setSimSpeed(+e.target.value)} />
                   <span style={{fontSize:13, lineHeight:1}}>🐇</span>
-                  <button className={`action-btn replay-btn${showGraphs?' active':''}`}
-                    style={{padding:'3px 9px', fontSize:11}} onClick={() => setShowGraphs(v => !v)}>Graphs</button>
                 </>}
 
                 {/* Glass tab */}
@@ -1642,38 +1503,21 @@ export default function GlassViewer() {
                   <button className={`action-btn reset-btn${coolingMode==='fast'?' active':''}`}
                     style={{padding:'3px 9px', fontSize:11}} onClick={() => startCooling('fast')}>Fast Cool</button>
                   <div style={lcdStyle}>
-                    <span style={{visibility:'hidden', display:'block', padding:'3px 6px'}}>2000</span>
-                    <span style={{position:'absolute', inset:0, padding:'3px 6px', color:'rgba(60,60,60,0.15)', textAlign:'right'}}>2000</span>
+                    <span style={{visibility:'hidden', display:'block', padding:'3px 6px'}}>1800</span>
+                    <span style={{position:'absolute', inset:0, padding:'3px 6px', color:'rgba(60,60,60,0.15)', textAlign:'right'}}>1800</span>
                     <span style={{position:'absolute', inset:0, padding:'3px 6px', color:'rgba(60,60,60,0.75)', textAlign:'right'}}>{meltLocalTemp}</span>
                   </div>
                   <span style={{fontSize:12, fontWeight:700, color:'rgba(30,45,60,0.70)'}}>°C</span>
                   <div className="toolbar-divider" />
-                  <button className={`action-btn replay-btn${showBox?' active':''}`}
+                  <button className={`action-btn replay-btn${autoRotate?' active':''}`}
                     style={{padding:'3px 9px', fontSize:11}}
-                    onClick={() => { const v=!showBox; setShowBox(v); boxSimRef.current.showBox=v }}>Box</button>
-                  {showBox && <>
-                    <button className={`action-btn replay-btn${showMetaball?' active':''}`}
-                      style={{padding:'3px 9px', fontSize:11}}
-                      onClick={() => { const v=!showMetaball; setShowMetaball(v); boxSimRef.current.showMetaball=v }}>Metaball</button>
-                    <button className={`action-btn replay-btn${autoRotate?' active':''}`}
-                      style={{padding:'3px 9px', fontSize:11}}
-                      onClick={() => {
-                        const v = !autoRotate; setAutoRotate(v); boxSimRef.current.autoRotate = v
-                        if (!v && boxSimRef.current.box) boxSimRef.current.box.boxAngularVel = 0
-                      }}>Rotate</button>
-                    <button className={`action-btn replay-btn${showStick?' active':''}`}
-                      style={{padding:'3px 9px', fontSize:11}}
-                      onClick={() => { const v=!showStick; setShowStick(v); boxSimRef.current.showStick=v; if (!v) { boxSimRef.current.stick=null; boxSimRef.current.stickDrag=null } }}>Stick</button>
-                    <button className={`action-btn replay-btn${multiRadius?' active':''}`}
-                      style={{padding:'3px 9px', fontSize:11}}
-                      onClick={() => {
-                        const v = !multiRadius; setMultiRadius(v); boxSimRef.current.multiRadius = v
-                        physRef.current.sandParticles = null
-                      }}>Multi R</button>
-                  </>}
-                  <button className={`action-btn replay-btn${showEnergyGraph?' active':''}`}
-                    style={{padding:'3px 9px', fontSize:11}} onClick={onToggleEnergyGraph}>E–T</button>
-                  {presetId === 'soda' && <>
+                    onClick={() => {
+                      const v = !autoRotate; setAutoRotate(v); boxSimRef.current.autoRotate = v
+                      if (!v && boxSimRef.current.box) boxSimRef.current.box.boxAngularVel = 0
+                    }}>Rotate</button>
+
+
+                  {presetId === 'soda' && sandDevMode && <>
                     <div className="toolbar-divider" />
                     <button className={`action-btn replay-btn${sandPaused?' active':''}`}
                       style={{padding:'3px 9px', fontSize:11}}
@@ -1689,18 +1533,6 @@ export default function GlassViewer() {
                         physRef.current.meldCount = 0
                         setSandPaused(false); boxSimRef.current.sandPaused = false
                       }}>Reset</button>
-                    <div className="toolbar-divider" />
-                    <button className={`action-btn replay-btn${showBlobGlow?' active':''}`}
-                      style={{padding:'3px 9px', fontSize:11}}
-                      onClick={() => { const v=!showBlobGlow; setShowBlobGlow(v); boxSimRef.current.showBlobGlow=v }}>Glow</button>
-                    <span style={{fontSize:11, color:'rgba(30,45,60,0.50)'}}>Hue</span>
-                    <input type="range" style={{width:55, cursor:'pointer', accentColor:'#c87333'}}
-                      min={-60} max={60} step={1} value={blobHue}
-                      onChange={e => { const v=+e.target.value; setBlobHue(v); boxSimRef.current.blobHue=v }} />
-                    <span style={{fontSize:11, color:'rgba(30,45,60,0.50)'}}>Bright</span>
-                    <input type="range" style={{width:55, cursor:'pointer', accentColor:'#c87333'}}
-                      min={0.3} max={2.0} step={0.05} value={blobBright}
-                      onChange={e => { const v=+e.target.value; setBlobBright(v); boxSimRef.current.blobBright=v }} />
                   </>}
                 </>}
               </div>
@@ -1730,8 +1562,11 @@ export default function GlassViewer() {
               </div>
               <span style={{fontSize:11, fontWeight:700, letterSpacing:'0.09em', textTransform:'uppercase', color:'rgba(30,45,60,0.65)'}}>Visuals</span>
               <div style={{display:'flex', alignItems:'center', gap:3}}>
-                <button className={`action-btn replay-btn${showCount?' active':''}`}
-                  style={{padding:'3px 10px'}} onClick={() => setShowCount(f => !f)}>Count</button>
+                <button className="action-btn replay-btn active"
+                  style={{padding:'3px 10px', minWidth:52}}
+                  onClick={() => setBondView(v => v === 'count' ? 'graph' : 'count')}>
+                  {bondView === 'count' ? 'Count' : 'Graph'}
+                </button>
                 <button className={`action-btn replay-btn${showCharge?' active':''}`}
                   style={{padding:'3px 10px'}} onClick={() => setShowCharge(f => !f)}>Charge</button>
                 <button className={`action-btn replay-btn${showField?' active':''}`}
@@ -1751,12 +1586,11 @@ export default function GlassViewer() {
       <div className="main">
 
         {/* Left visuals panel — shown when any toggle is active */}
-        {(showCount || showCharge || showField || showDev) && (
+        {(bondView || showCharge || showField || showDev) && (
           <div className="viz-panel">
 
-            {/* Particle key — goldenrod SiO₂ box + green Na₂O box, matching concrete v4 layout */}
-            {/* Charge overlays on atom icons when showCharge; no separate charge section */}
-            {(showCount || showCharge) && (() => {
+            {/* Particle key — always visible at top */}
+            {(() => {
               const labelStyle = { fontSize: 22, color: darkMode ? '#999' : '#666', fontFamily: 'system-ui, sans-serif' }
               const sio2Atoms = [
                 { iconR: 6,   type: 'Si', label: <><b>Si</b> <sup>δ+</sup></> },
@@ -1794,8 +1628,57 @@ export default function GlassViewer() {
               )
             })()}
 
+            {/* Bond strain gradient — field legend */}
+            {showField && (
+              <svg viewBox="0 0 200 50" width="100%" style={{ display: 'block', flexShrink: 0 }}>
+                <defs>
+                  <linearGradient id="gl-strain-grad" x1="0" x2="1" y1="0" y2="0">
+                    {darkMode ? (<>
+                      <stop offset="0%"   stopColor="rgb(200,196,188)" />
+                      <stop offset="20%"  stopColor="rgb(195,90,255)" />
+                      <stop offset="55%"  stopColor="rgb(240,30,225)" />
+                      <stop offset="100%" stopColor="rgb(255,70,185)" />
+                    </>) : (<>
+                      <stop offset="0%"   stopColor="rgb(172,167,160)" />
+                      <stop offset="20%"  stopColor="rgb(190,100,220)" />
+                      <stop offset="55%"  stopColor="rgb(150,20,200)" />
+                      <stop offset="100%" stopColor="rgb(255,40,160)" />
+                    </>)}
+                  </linearGradient>
+                </defs>
+                <text x="0" y="14" style={{ fontSize: '14px', fill: darkMode ? '#999' : '#666', fontFamily: 'system-ui, sans-serif' }}>Energy in fields:</text>
+                <rect x="0" y="18" width="200" height="10" fill="url(#gl-strain-grad)" rx="1" />
+                <text x="0"   y="44" style={{ fontSize: '16px', fill: darkMode ? '#666' : '#888', fontFamily: 'system-ui, sans-serif' }}>Low</text>
+                <text x="200" y="44" style={{ fontSize: '16px', fill: darkMode ? '#666' : '#888', fontFamily: 'system-ui, sans-serif', textAnchor: 'end' }}>High</text>
+              </svg>
+            )}
+
+            {/* Graph in sidebar */}
+            {bondView === 'graph' && (
+              <canvas ref={graphCanvasRef}
+                style={{ display:'block', width:'100%', height:200, marginBottom:4, cursor:'ew-resize' }}
+                onMouseDown={e => {
+                  const drag = { startX: e.clientX, startXMax: graphXMaxRef.current }
+                  graphDragRef.current = drag
+                  const onMove = ev => {
+                    const dx = ev.clientX - drag.startX
+                    graphXMaxRef.current = Math.max(500, Math.min(50000,
+                      drag.startXMax * Math.pow(2, dx / 250)))
+                  }
+                  const onUp = () => {
+                    graphDragRef.current = null
+                    window.removeEventListener('mousemove', onMove)
+                    window.removeEventListener('mouseup', onUp)
+                  }
+                  window.addEventListener('mousemove', onMove)
+                  window.addEventListener('mouseup', onUp)
+                  e.preventDefault()
+                }}
+              />
+            )}
+
             {/* Bond count table — mirrors concrete v4 layout */}
-            {showCount && bondCounts && (() => {
+            {bondView === 'count' && bondCounts && (() => {
               const initial = initialBondCounts ?? bondCounts
               const tested  = initialBondCounts !== null
               const cols = [
@@ -1810,9 +1693,10 @@ export default function GlassViewer() {
 
               const colData = cols.map(({ key, label, color, typeA, rA, typeB, rB }) => ({
                 key, label, color, typeA, rA, typeB, rB,
-                before: initial[key].intact,
-                now:    bondCounts[key].intact,
-                broken: Math.max(0, initial[key].intact - bondCounts[key].intact),
+                before:    initial[key].intact,
+                now:       bondCounts[key].intact,
+                broken:    Math.max(0, initial[key].intact - bondCounts[key].intact),
+                modeDelta: modeBondCounts ? bondCounts[key].intact - modeBondCounts[key].intact : null,
               }))
               const totalBroken = colData.reduce((s, d) => s + d.broken, 0)
               const gridCols = `42px ${cols.map(() => '0.9fr').join(' ')}`
@@ -1846,14 +1730,24 @@ export default function GlassViewer() {
                     { key: 'total', label: 'Total', getCell: d => ({
                       pct: tested && totalBroken > 0 ? d.broken / totalBroken * 100 : null,
                     }) },
-                  ].map(({ key, label, getCell }) => (
+                    modeBondCounts ? { key: 'modeDelta', label: 'Run Δ', getCell: d => ({
+                      val: d.modeDelta,
+                      signed: true,
+                    }) } : null,
+                  ].filter(Boolean).map(({ key, label, getCell }) => (
                     <div key={key} style={{ display: 'grid', gridTemplateColumns: gridCols, gap: 0, alignItems: 'baseline', marginBottom: 3 }}>
                       <span style={rowLabelStyle}>{label}</span>
                       {colData.map(d => {
-                        const { val, pct, bold } = getCell(d)
+                        const { val, pct, bold, signed } = getCell(d)
+                        const signedColor = signed && val != null
+                          ? val > 0 ? '#50c878' : val < 0 ? '#e06060' : (darkMode ? '#888' : '#888')
+                          : d.color
+                        const signedLabel = signed && val != null
+                          ? (val > 0 ? '+' : '') + val
+                          : val
                         return (
                           <div key={d.key} style={{ textAlign: 'center' }}>
-                            {val != null && <div style={{ fontSize: 22, fontVariantNumeric: 'tabular-nums', color: d.color, fontWeight: bold ? 700 : 500, lineHeight: 1.1, fontFamily: 'system-ui, sans-serif' }}>{val}</div>}
+                            {val != null && <div style={{ fontSize: 22, fontVariantNumeric: 'tabular-nums', color: signed ? signedColor : d.color, fontWeight: bold ? 700 : 500, lineHeight: 1.1, fontFamily: 'system-ui, sans-serif' }}>{signedLabel}</div>}
                             {pct != null && <div style={{ fontSize: 17, color: d.color, opacity: 0.75, fontVariantNumeric: 'tabular-nums', lineHeight: 1.1, fontFamily: 'system-ui, sans-serif' }}>{Math.round(pct)}%</div>}
                             {val == null && pct == null && <span style={{ fontSize: 21, color: darkMode ? '#333' : '#bbb', fontFamily: 'system-ui, sans-serif' }}>—</span>}
                           </div>
@@ -1865,54 +1759,125 @@ export default function GlassViewer() {
               )
             })()}
 
-            {/* Bond strain gradient — same SVG as concrete v4 */}
-            {showField && (
-              <svg viewBox="0 0 200 50" width="100%" style={{ display: 'block', flexShrink: 0 }}>
-                <defs>
-                  <linearGradient id="gl-strain-grad" x1="0" x2="1" y1="0" y2="0">
-                    {darkMode ? (<>
-                      <stop offset="0%"   stopColor="rgb(200,196,188)" />
-                      <stop offset="20%"  stopColor="rgb(195,90,255)" />
-                      <stop offset="55%"  stopColor="rgb(240,30,225)" />
-                      <stop offset="100%" stopColor="rgb(255,70,185)" />
-                    </>) : (<>
-                      <stop offset="0%"   stopColor="rgb(172,167,160)" />
-                      <stop offset="20%"  stopColor="rgb(190,100,220)" />
-                      <stop offset="55%"  stopColor="rgb(150,20,200)" />
-                      <stop offset="100%" stopColor="rgb(255,40,160)" />
-                    </>)}
-                  </linearGradient>
-                </defs>
-                <text x="0" y="14" style={{ fontSize: '14px', fill: darkMode ? '#999' : '#666', fontFamily: 'system-ui, sans-serif' }}>Energy in fields:</text>
-                <rect x="0" y="18" width="200" height="10" fill="url(#gl-strain-grad)" rx="1" />
-                <text x="0"   y="44" style={{ fontSize: '16px', fill: darkMode ? '#666' : '#888', fontFamily: 'system-ui, sans-serif' }}>Low</text>
-                <text x="200" y="44" style={{ fontSize: '16px', fill: darkMode ? '#666' : '#888', fontFamily: 'system-ui, sans-serif', textAnchor: 'end' }}>High</text>
-              </svg>
-            )}
-
             {showDev && <>
               <div className="viz-section-title">Dev (type "dev" to hide)</div>
               {tab === 'melt' && <>
                 <div style={{fontSize:11, color:'#888', marginBottom:2}}>Si-O r₀: <span style={{color:'#a090d0'}}>{sioR0} px</span></div>
                 <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
                   min={5} max={15} step={0.5} value={sioR0} onChange={e => setSioR0(+e.target.value)} />
-                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Attract K: <span style={{color:'#a090d0'}}>{attractK===0?'off':attractK.toFixed(4)}</span></div>
+                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Attract K: <span style={{color:'#a090d0'}}>{attractK===0?'off':attractK.toFixed(3)}</span></div>
                 <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
-                  min={0} max={0.02} step={0.0005} value={attractK} onChange={e => setAttractK(+e.target.value)} />
+                  min={0} max={0.5} step={0.005} value={attractK} onChange={e => setAttractK(+e.target.value)} />
+                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Attract falloff</div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={1} max={4} step={0.1} value={attractFalloff} onChange={e => setAttractFalloff(+e.target.value)} />
+                <div style={{fontSize:11, color:'#a090d0', textAlign:'center', marginTop:1}}>{attractFalloff.toFixed(1)}</div>
+                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Speed ×</div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={0.5} max={4.0} step={0.05} value={speedMult} onChange={e => setSpeedMult(+e.target.value)} />
+                <div style={{fontSize:11, color:'#a090d0', textAlign:'center', marginTop:1}}>{speedMult.toFixed(2)}</div>
+                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Si-O hot capture ×: <span style={{color:'#a090d0'}}>{sioHotMult.toFixed(2)}</span></div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={1.01} max={1.50} step={0.01} value={sioHotMult}
+                  onChange={e => { const v = +e.target.value; setSioHotMultState(v); setSioHotMult(v) }} />
+                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Freed Si-O long-range attract (hot+cool): <span style={{color:'#a090d0'}}>{freeAttractSiOMult.toFixed(1)}</span></div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={0} max={4} step={0.1} value={freeAttractSiOMult}
+                  onChange={e => { const v = +e.target.value; setFreeAttractSiOMultState(v); setFreeAttractSiOMult(v) }} />
+                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Si-O freed excl ×: <span style={{color:'#a090d0'}}>{sioExclMult.toFixed(2)}</span> → minD={((3.2+2.3)*sioExclMult).toFixed(1)}px</div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={1.0} max={2.0} step={0.05} value={sioExclMult}
+                  onChange={e => { const v = +e.target.value; setSioExclMultState(v); setSioExclMult(v) }} />
+                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Crystal jiggle ×: <span style={{color:'#a090d0'}}>{crystJiggleMult.toFixed(2)}</span></div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={0.5} max={5.0} step={0.1} value={crystJiggleMult}
+                  onChange={e => { const v = +e.target.value; setCrystJiggleMultState(v); setCrystJiggleMult(v) }} />
+                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Si-O spring k: <span style={{color:'#a090d0'}}>{sioK.toFixed(3)}</span></div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={0.01} max={0.20} step={0.001} value={sioK}
+                  onChange={e => { const v = +e.target.value; setSioKState(v); setSioK(v) }} />
+                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Na-O spring k: <span style={{color:'#a090d0'}}>{naOK.toFixed(3)}</span></div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={0.005} max={0.10} step={0.001} value={naOK}
+                  onChange={e => { const v = +e.target.value; setNaOKState(v); setNaOK(v) }} />
+                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Break strain: <span style={{color:'#a090d0'}}>{breakStrain.toFixed(3)}</span></div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={0.02} max={0.30} step={0.005} value={breakStrain}
+                  onChange={e => { const v = +e.target.value; setBreakStrainState(v); setBreakStrain(v) }} />
+                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Reform strain: <span style={{color:'#a090d0'}}>{reformStrain.toFixed(3)}</span></div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={-0.15} max={0.0} step={0.01} value={reformStrain}
+                  onChange={e => { const v = +e.target.value; setReformStrainState(v); setReformStrain(v) }} />
+                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Crystal anchor k: <span style={{color:'#a090d0'}}>{crystAnchorK.toFixed(3)}</span></div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={0} max={0.15} step={0.005} value={crystAnchorK}
+                  onChange={e => { const v = +e.target.value; setCrystAnchorKState(v); setCrystAnchorK(v) }} />
+                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Liberate frac: <span style={{color:'#a090d0'}}>{liberateFrac.toFixed(2)}</span> (1.0=all broken)</div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={0.0} max={1.0} step={0.05} value={liberateFrac}
+                  onChange={e => { const v = +e.target.value; setLiberateFracState(v); setLiberateFrac(v) }} />
+                <div style={{fontSize:11, color:'#aaa', marginTop:10, marginBottom:3, letterSpacing:'0.06em'}}>── Na2O ──</div>
+                <div style={{fontSize:11, color:'#888', marginBottom:2}}>Na anchor k: <span style={{color:'#a090d0'}}>{naAnchorK.toFixed(3)}</span></div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={0} max={0.15} step={0.005} value={naAnchorK}
+                  onChange={e => { const v = +e.target.value; setNaAnchorKState(v); setNaAnchorK(v) }} />
+                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Na liberate frac: <span style={{color:'#a090d0'}}>{naLiberateFrac.toFixed(2)}</span></div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={0.0} max={1.0} step={0.05} value={naLiberateFrac}
+                  onChange={e => { const v = +e.target.value; setNaLiberateFracState(v); setNaLiberateFrac(v) }} />
+                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Na break strain: <span style={{color:'#a090d0'}}>{naBreakStrain.toFixed(3)}</span></div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={0.005} max={0.15} step={0.005} value={naBreakStrain}
+                  onChange={e => { const v = +e.target.value; setNaBreakStrainState(v); setNaBreakStrain(v) }} />
+                <div style={{fontSize:11, color:'#aaa', marginTop:10, marginBottom:3, letterSpacing:'0.06em'}}>── Speed ──</div>
+                <div style={{fontSize:11, color:'#888', marginBottom:2}}>Lattice speed ×: <span style={{color:'#a090d0'}}>{latticeSpeedMult.toFixed(2)}</span></div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={0.25} max={3.0} step={0.05} value={latticeSpeedMult}
+                  onChange={e => { const v = +e.target.value; setLatticeSpeedMultState(v); setLatticeSpeedMult(v) }} />
+                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Freed speed ×: <span style={{color:'#a090d0'}}>{freedSpeedMult.toFixed(2)}</span></div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={0.25} max={5.0} step={0.25} value={freedSpeedMult}
+                  onChange={e => { const v = +e.target.value; setFreedSpeedMultState(v); setFreedSpeedMult(v) }} />
+                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Reint bonds N: <span style={{color:'#a090d0'}}>{reintBondN}</span></div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={1} max={6} step={1} value={reintBondN}
+                  onChange={e => { const v = +e.target.value; setReintBondNState(v); setReintBondN(v) }} />
+                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Reint frames M: <span style={{color:'#a090d0'}}>{reintFrameM}</span></div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={5} max={120} step={5} value={reintFrameM}
+                  onChange={e => { const v = +e.target.value; setReintFrameMState(v); setReintFrameM(v) }} />
+                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Visual scale: <span style={{color:'#a090d0'}}>{visualScale.toFixed(1)}×</span></div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={0.5} max={10.0} step={0.25} value={visualScale}
+                  onChange={e => { const v = +e.target.value; setVisualScaleState(v); setVisualScale(v) }} />
                 <label style={{display:'flex', alignItems:'center', gap:4, fontSize:11, color:'rgba(255,255,255,0.42)', cursor:'pointer', marginTop:6, userSelect:'none'}}>
-                  <input type="checkbox" checked={precompute} onChange={e => setPrecompute(e.target.checked)} style={{accentColor:'#8070c0', cursor:'pointer'}} />
-                  Pre-Compute
-                </label>
-                <label style={{display:'flex', alignItems:'center', gap:4, fontSize:11, color:'rgba(255,255,255,0.42)', cursor:'pointer', marginTop:4, userSelect:'none'}}>
                   <input type="checkbox" checked={bondNums} onChange={e => setBondNums(e.target.checked)} style={{accentColor:'#8070c0', cursor:'pointer'}} />
                   Bond #s
                 </label>
+                <div style={{fontSize:11, color:'#aaa', marginTop:10, marginBottom:4, letterSpacing:'0.06em'}}>── Overlay ──</div>
+                <div style={{fontSize:11, color:'#888', marginBottom:4}}>Atom color</div>
+                <div style={{display:'flex', gap:3, flexWrap:'wrap'}}>
+                  {['normal','freed','coordination','attract'].map(m => (
+                    <button key={m} onClick={() => setAtomColorMode(m)}
+                      style={{fontSize:10, padding:'2px 5px', cursor:'pointer', userSelect:'none',
+                        background: atomColorMode===m ? '#6050a0' : '#2a2a3a',
+                        color: atomColorMode===m ? '#fff' : '#aaa',
+                        border: atomColorMode===m ? '1px solid #a090e0' : '1px solid #444',
+                        borderRadius:3}}>
+                      {m}
+                    </button>
+                  ))}
+                </div>
+                <label style={{display:'flex', alignItems:'center', gap:4, fontSize:11, color:'rgba(255,255,255,0.42)', cursor:'pointer', marginTop:6, userSelect:'none'}}>
+                  <input type="checkbox" checked={showBrokenBonds} onChange={e => setShowBrokenBonds(e.target.checked)} style={{accentColor:'#8070c0', cursor:'pointer'}} />
+                  Show broken bonds
+                </label>
+                <label style={{display:'flex', alignItems:'center', gap:4, fontSize:11, color:'rgba(255,255,255,0.42)', cursor:'pointer', marginTop:4, userSelect:'none'}}>
+                  <input type="checkbox" checked={showLiveStats} onChange={e => setShowLiveStats(e.target.checked)} style={{accentColor:'#8070c0', cursor:'pointer'}} />
+                  Live stats HUD
+                </label>
               </>}
               {tab === 'glass' && <>
-                <label style={{display:'flex', alignItems:'center', gap:4, fontSize:11, color:'rgba(255,255,255,0.42)', cursor:'pointer', marginBottom:6, userSelect:'none'}}>
-                  <input type="checkbox" checked={directTempMode} onChange={onDirectTempChange} style={{accentColor:'#4080c0', cursor:'pointer'}} />
-                  Direct temp
-                </label>
                 {[
                   ['Z1 end', zone1End, '°', 100,700, 25, onZone1EndChange],
                   ['Z2 end', zone2End, '°', 400,1100,25, onZone2EndChange],
@@ -1937,19 +1902,20 @@ export default function GlassViewer() {
           {tab === 'melt' && (
             <CompositionView key="melt"
               sio2Pct={p.sio2} na2oPct={p.na2o} caoPct={p.cao}
-              sioR0={sioR0} attractK={attractK} debug={false}
-              bondNums={bondNums} precompute={precompute}
-              meltTemp={meltLocalTemp} simSpeed={simSpeed} coolingMode={coolingMode}
+              sioR0={sioR0} attractK={attractK} attractFalloff={attractFalloff} debug={false}
+              bondNums={bondNums}
+              meltTemp={meltLocalTemp} simSpeed={simSpeed} speedMult={speedMult} coolingMode={coolingMode}
               onTempUpdate={handleTempUpdate} onEnergyUpdate={handleEnergyUpdate}
               onBondCounts={handleBondCounts}
-              showGraphs={showGraphs}
+              graphCanvasRef={graphCanvasRef}
+              cumulativeEnergyRef={meltCumulativeEnergyRef}
+              graphXMaxRef={graphXMaxRef}
               replayFrame={replayFrame} onReplayReady={handleReplayReady}
               darkMode={darkMode} showCharge={showCharge} showField={showField}
+              atomColorMode={atomColorMode} showBrokenBonds={showBrokenBonds} showLiveStats={showLiveStats}
             />
           )}
-          {tab === 'networks' && (
-            <NetworksView sio2Pct={p.sio2} na2oPct={p.na2o} caoPct={p.cao} />
-          )}
+
           {/* Glass canvas — always mounted so RAF never restarts */}
           <div style={{ display: tab==='glass' ? 'flex' : 'none', flexDirection:'column', width:'100%', height:'100%' }}>
             <canvas ref={boxCanvasRef} style={{ flex:1, width:'100%', display:'block' }} />
@@ -1981,29 +1947,6 @@ export default function GlassViewer() {
       </div>
 
       {/* Floating E–T graph */}
-      {showEnergyGraph && (
-        <div style={{
-          position:'fixed', left:graphPos.x, top:graphPos.y,
-          width:graphPos.w, height:graphPos.h,
-          background:'#0e0d1e', border:'1px solid rgba(255,255,255,0.12)',
-          borderRadius:6, boxShadow:'0 4px 24px rgba(0,0,0,0.7)',
-          display:'flex', flexDirection:'column', zIndex:200,
-          resize:'both', overflow:'hidden', minWidth:200, minHeight:160,
-        }}
-          onMouseMove={e => { if (e.target===e.currentTarget) return; const r=e.currentTarget; setGraphPos(p => ({...p, w:r.offsetWidth, h:r.offsetHeight})) }}
-        >
-          <div onMouseDown={onGraphMouseDown} style={{
-            display:'flex', alignItems:'center', justifyContent:'space-between',
-            padding:'4px 8px', background:'#12112a', borderBottom:'1px solid rgba(255,255,255,0.08)',
-            cursor:'grab', userSelect:'none', flexShrink:0,
-          }}>
-            <span style={{fontSize:10, color:'rgba(255,255,255,0.35)', letterSpacing:'0.06em', textTransform:'uppercase'}}>Energy → Temp</span>
-            <button onClick={() => { graphDataRef.current = [] }} style={{background:'none', border:'none', color:'rgba(255,255,255,0.35)', cursor:'pointer', fontSize:10, letterSpacing:'0.06em', textTransform:'uppercase', padding:'0 4px'}}>Reset</button>
-            <button onClick={onToggleEnergyGraph} style={{background:'none', border:'none', color:'rgba(255,255,255,0.35)', cursor:'pointer', fontSize:13, lineHeight:1, padding:'0 2px'}}>×</button>
-          </div>
-          <canvas ref={graphCanvasRef} style={{flex:1, width:'100%', display:'block'}} />
-        </div>
-      )}
 
     </div>
   )

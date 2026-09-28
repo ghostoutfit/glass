@@ -8,7 +8,9 @@ const SUBSTEPS       = 6      // more substeps → fewer tunnelling events at hi
 export const THERMAL_SPEED      = 0.0018  // v_rms = THERMAL_SPEED × √T  (px/substep per √°C); 2× previous 0.0009
 export const ENERGY_UNIT    = THERMAL_SPEED * THERMAL_SPEED * 0.5  // = 1.125e-6; ePerParticle = (sliderVal+273)*ENERGY_UNIT
 const THERMOSTAT_TAU = 0.10   // Berendsen coupling: fraction of (v_target/v_rms − 1) per substep
-const WALL_K         = 1.0    // soft boundary spring
+// Minimum image helpers for toroidal (asteroids) boundary
+const miDx = dx => dx >  SIM_W * 0.5 ? dx - SIM_W : dx < -SIM_W * 0.5 ? dx + SIM_W : dx
+const miDy = dy => dy >  SIM_H * 0.5 ? dy - SIM_H : dy < -SIM_H * 0.5 ? dy + SIM_H : dy
 
 // Opposite-charge pairs: preferred distance, spring constant, cutoff multiplier.
 // Each species sits on its own hex lattice scaled so O midpoints match r0 exactly:
@@ -26,9 +28,9 @@ const PREFERRED = {
   // close-range repulsion.  After any collision the atoms coast to d = r0 where the
   // attractive spring captures them; bonds therefore form wherever particles meet at
   // low enough temperature rather than being blown apart by a spring kick.
-  'O-Si': { r0: 9,  k: 0.42, mult: 1.03, oneSided: true  },
-  'Na-O': { r0: 16, k: 0.20, mult: 1.02, oneSided: false },
-  'Ca-O': { r0: 12, k: 0.28, mult: 1.02, oneSided: false },
+  'O-Si': { r0: 9,  k: 0.061, mult: 1.03, oneSided: true  },
+  'Na-O': { r0: 12, k: 0.042, mult: 1.05, viewMult: 1.30, oneSided: false, freeRepR0: 7, freeRepK: 0.50 },
+  'Ca-O': { r0: 12, k: 0.28, mult: 1.02, oneSided: false, freeRepR0: 8, freeRepK: 0.55 },
 }
 
 // Temperature-dependent Si-O capture range.
@@ -44,9 +46,77 @@ const PREFERRED = {
 // The fade extends to SIO_FADE_HIGH=1100°C so the wide range persists through the
 // working temperature range, with visible bond breaking starting above ~1000°C.
 const SIO_COLD_MULT = 1.15   // T ≤ SIO_FADE_LOW  — wide recapture range
-const SIO_HOT_MULT  = 1.03   // T ≥ SIO_FADE_HIGH — calibrated ~1200°C break
+let _sioHotMult     = 1.07   // T ≥ SIO_FADE_HIGH — wider capture window helps freed Si re-bond
+let _freeAttractSiOMult = 1.0  // scale factor for attract force on freed Si-O pairs
+let _sioExclMult    = 1.4    // XPBD exclusion multiplier for freed Si-O pairs (vs FREE_EXCL=2.0 for all others)
+let _crystJiggleMult = 1.0   // kick multiplier for crystAnchor/naAnchor atoms (vs base kickSigma)
+let _breakStrain     = 0.07  // strain threshold for bond breaking: bond breaks when (d−r₀)/r₀ > _breakStrain
+let _reformStrain    = 0.0   // strain threshold for bond reform: bond reforms when (d−r₀)/r₀ ≤ _reformStrain
+let _crystAnchorK    = 0.06  // crystAnchor spring constant for SiO2 network atoms
+let _liberateFrac    = 0.5   // liberation fraction for SiO2 atoms (1.0 = all broken, 0.5 = majority broken)
+let _naAnchorK       = 0.06  // naAnchor spring constant for Na2O atoms (independent of _crystAnchorK)
+let _naLiberateFrac  = 0.5   // liberation fraction for Na2O atoms
+let _naBreakStrain   = 0.1   // break strain for Na-O bonds (independent of Si-O _breakStrain)
+let _latticeSpeedMult = 1.0  // kick-sigma multiplier for bonded (non-freed) atoms
+let _freedSpeedMult   = 3.5  // kick-sigma multiplier for freed atoms
+let _reintBondN       = 2    // min intact bonds to count toward re-integration
+let _reintFrameM      = 30   // consecutive frames with ≥N bonds before cleared
+const REINT_RAMP_FRAMES = 10  // frames to ramp speed mult from freed→lattice after re-integration
+export const setSioHotMult         = v => { _sioHotMult = v }
+export const setFreeAttractSiOMult  = v => { _freeAttractSiOMult = v }
+export const setSioExclMult        = v => { _sioExclMult = v }
+export const setCrystJiggleMult    = v => { _crystJiggleMult = v }
+export const setBreakStrain        = v => { _breakStrain = v }
+export const setReformStrain       = v => { _reformStrain = v }
+export const setCrystAnchorK       = v => { _crystAnchorK = v }
+export const setLiberateFrac       = v => { _liberateFrac = v }
+export const setNaAnchorK          = v => { _naAnchorK = v }
+export const setNaLiberateFrac     = v => { _naLiberateFrac = v }
+export const setNaBreakStrain      = v => { _naBreakStrain = v }
+export const setLatticeSpeedMult   = v => { _latticeSpeedMult = v }
+export const setFreedSpeedMult     = v => { _freedSpeedMult = v }
+export const setReintBondN         = v => { _reintBondN = v }
+export const setReintFrameM        = v => { _reintFrameM = v }
+export const setSioK               = v => { PREFERRED['O-Si'].k = v }
+export const setNaOK               = v => { PREFERRED['Na-O'].k = v }
+
+// Liberation instrumentation — counts fires per path and records separations at fire time.
+const _libStats = {
+  contactFires: 0,      // times contact liberation set latticeFreed[j]=1
+  strainFires:  0,      // times strain-based loop set latticeFreed[i]=1
+  contactSeps:  [],     // [{liberatorType, dToJ, dLiberatorToOwnBond}] at each contact fire (capped 200)
+}
+export const resetLibStats = () => {
+  _libStats.contactFires = 0
+  _libStats.strainFires  = 0
+  _libStats.contactSeps  = []
+}
+export const getLibStats   = () => ({ ..._libStats, contactSeps: [..._libStats.contactSeps] })
 const SIO_FADE_LOW  = 200    // °C below which full cold mult applies
 const SIO_FADE_HIGH = 1100   // °C above which full hot mult applies
+
+// Latent-heat helpers: adjust a particle's KE when a bond changes state.
+// Returns actual energy removed (may be less than `amount` if atom doesn't have enough).
+function _removeKE(p, amount) {
+  const ke = 0.5 * (p.vx * p.vx + p.vy * p.vy)
+  if (ke < 1e-14) return 0
+  const newKE = Math.max(0, ke - amount)
+  const scale = Math.sqrt(newKE / ke)
+  p.vx *= scale; p.vy *= scale
+  return ke - newKE
+}
+// Inject `amount` KE into particle p, directed outward along (nx, ny).
+// Scales if atom has existing velocity; injects along (nx,ny) if at rest.
+function _addKE(p, amount, nx, ny) {
+  const ke = 0.5 * (p.vx * p.vx + p.vy * p.vy)
+  if (ke < 1e-14) {
+    const v = Math.sqrt(2 * amount)
+    p.vx += nx * v; p.vy += ny * v
+  } else {
+    const scale = Math.sqrt(1 + amount / ke)
+    p.vx *= scale; p.vy *= scale
+  }
+}
 
 // Same-charge pairs — soft-sphere repulsion only (positive ions repel each other; O repels O)
 const REP_K    = 0.28
@@ -63,6 +133,14 @@ const PAIR_TABLE = Array.from({ length: 4 }, () => new Array(4).fill(null))
 PAIR_TABLE[0][1] = PAIR_TABLE[1][0] = PREFERRED['O-Si']
 PAIR_TABLE[2][1] = PAIR_TABLE[1][2] = PREFERRED['Na-O']
 PAIR_TABLE[3][1] = PAIR_TABLE[1][3] = PREFERRED['Ca-O']
+// Like-charge repulsion: same-sign ions push each other away.
+// repOnly:true means force only fires at d < r0 (pure repulsion, never attractive).
+// freeRepR0/freeRepK: extra floor repulsion when both atoms are freed (not in original crystal).
+PAIR_TABLE[0][0] = { r0: 12, k: 0.22, mult: 1, repOnly: true }                                               // Si-Si  (Si⁴⁺)
+PAIR_TABLE[1][1] = { r0:  8, k: 0.32, mult: 1, repOnly: true, freeRepR0: 6, freeRepK: 0.3 }                 // O-O    (O²⁻; extra push when freed)
+PAIR_TABLE[2][2] = { r0:  8, k: 0.45, mult: 1, repOnly: true }                                               // Na-Na  (Na⁺)
+PAIR_TABLE[3][3] = { r0: 10, k: 0.50, mult: 1, repOnly: true }                                               // Ca-Ca  (Ca²⁺)
+PAIR_TABLE[2][3] = PAIR_TABLE[3][2] = { r0:  9, k: 0.38, mult: 1, repOnly: true }                           // Na-Ca
 
 // Lattice anchor: each atom is tethered to its initial position by a gentle spring.
 // Prevents center-of-mass drift/rotation of grain clusters while leaving thermal
@@ -148,7 +226,7 @@ export function initPhysics(cellData) {
   // resolution. In that zone neither hard-sphere nor spring acts, so those atoms
   // float freely forever. Push them just past r0 so the attractive spring grabs them.
   const SIO_R0   = PREFERRED['O-Si'].r0
-  const SIO_RSUM = 4 + 2.5   // Si radius + O radius
+  const SIO_RSUM = 3.2 + 2.3   // Si radius + O radius
   for (let i = 0; i < n; i++) {
     const pi = particles[i]
     if (pi.type !== 'Si' && pi.type !== 'O') continue
@@ -223,22 +301,29 @@ export function buildRigidBondMap(phys) {
       const effMult = (spec === PAIR_TABLE[0][1]) ? sioMult : spec.mult
       const dx = pj.x - pi.x, dy = pj.y - pi.y
       const d  = Math.hypot(dx, dy)
-      if (d < spec.r0 * effMult && (!spec.oneSided || d > spec.r0)) {
+      if (!spec.repOnly && d < spec.r0 * effMult && (!spec.oneSided || d >= spec.r0 * 0.9)) {
         const isSiO = spec === PAIR_TABLE[0][1]
         bonds.push({
           i, j, r0: d,
           broken: false,
-          breakable:  !isSiO,
-          breakStart: isSiO ? 1700 : 650,
-          breakFull:  isSiO ? 2500 : 1130,
+          breakable: true,
+          isSiO,
+          specMult: isSiO ? null : spec.mult,
+          bondDepth: 0.5 * spec.k * (d * (spec.mult - 1)) ** 2,
         })
       }
     }
   }
   phys.rigidBonds = bonds
+  // Count original bond count per atom for the majority-bond liberation threshold.
+  const origCount = new Uint8Array(phys.n)
+  for (const rb of bonds) { origCount[rb.i]++; origCount[rb.j]++ }
+  phys.originalBondCount = origCount
   // Reset latticeFreed: settling steps before this call ran with no rigidBonds, causing
   // all atoms to be spuriously freed (intactCount was 0 for everyone). Clear that now.
-  phys.latticeFreed = new Uint8Array(phys.n)
+  phys.latticeFreed      = new Uint8Array(phys.n)
+  phys.stableBondFrames  = new Int16Array(phys.n)
+  phys.reintRampFrames   = new Int16Array(phys.n)
 }
 
 // Gentle long-range attraction between unsatisfied opposite-charge pairs, active
@@ -248,10 +333,10 @@ export function buildRigidBondMap(phys) {
 //   O   → 2 cations  (bridging O bonds 2 Si; non-bridging bonds 1 Si + 1 modifier)
 //   Na  → 1 O  (monovalent modifier — each Na⁺ breaks one bridge, takes 1 NBO)
 //   Ca  → 2 O  (divalent modifier — each Ca²⁺ claims 2 NBOs)
-// Slow/fast outcome difference comes from crystallize() nudge (slow only), not from
-// the attract itself — amorphous = random collision angles, crystalline = nudged 120°.
+// Slow/fast outcome: slow uses hex-directed Si-O attract → 120° angles → crystalline;
+// fast uses isotropic → random angles → amorphous.
 const ATTRACT_RANGE  = 40
-const COORD_TARGET   = [3, 2, 1, 2]   // Si, O, Na, Ca (typeId order)
+export const COORD_TARGET   = [3, 2, 1, 2]   // Si, O, Na, Ca (typeId order)
 
 // ── Energy diagnostics ────────────────────────────────────────────────────────
 export function computeKE(phys) {
@@ -294,7 +379,7 @@ export function computePE(phys) {
 // coolingFactor: 1.0 = thermostat mode
 // attractK:     subtle pull strength, active only when coolingMode !== null
 // coolingMode:  null | 'fast' | 'slow' | 'fastHeat' | 'slowHeat'
-export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 0, coolingMode = null) {
+export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 0, coolingMode = null, speedMult = 1, attractFalloff = 1) {
   const { particles, n, fx, fy } = phys
 
   // Langevin thermostat targets KE directly — do not subtract PE.
@@ -303,7 +388,7 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
   // first ~273 E units. PE is still computed for the bar graph.
   const peNow       = computePE(phys)
   const keTarget    = Math.max(ENERGY_UNIT * 10, ePerParticle)
-  const vTarget     = Math.sqrt(2 * keTarget)
+  const vTarget     = Math.sqrt(2 * keTarget) * speedMult
   phys.latticeTemp  = keTarget / ENERGY_UNIT - 273
 
   // Derive current kinetic temperature for physics gates (attract modifier threshold)
@@ -317,7 +402,7 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
   // Temperature-dependent Si-O capture range (see SIO_COLD_MULT / SIO_HOT_MULT constants).
   // Computed once per step from measured KE temperature, stored for rebuildBonds.
   const sioMultFrac = Math.max(0, Math.min(1, (derivedTempC - SIO_FADE_LOW) / (SIO_FADE_HIGH - SIO_FADE_LOW)))
-  const sioMult = SIO_COLD_MULT + (SIO_HOT_MULT - SIO_COLD_MULT) * sioMultFrac
+  const sioMult = SIO_COLD_MULT + (_sioHotMult - SIO_COLD_MULT) * sioMultFrac
   phys.sioMult = sioMult
 
   if (!phys.hasBeenMelted && totalEnergy >= ANCHOR_MELT_TEMP) phys.hasBeenMelted = true
@@ -393,9 +478,9 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
       const pi = particles[i]
       for (let j = i + 1; j < n; j++) {
         const pj = particles[j]
-        const dx = pj.x - pi.x
+        const dx = miDx(pj.x - pi.x)
         if (dx > FORCE_CUTOFF || dx < -FORCE_CUTOFF) continue
-        const dy = pj.y - pi.y
+        const dy = miDy(pj.y - pi.y)
         if (dy > FORCE_CUTOFF || dy < -FORCE_CUTOFF) continue
         const d2 = dx * dx + dy * dy
         if (d2 < 0.01) continue
@@ -404,17 +489,41 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
         const spec = PAIR_TABLE[pi.typeId][pj.typeId]
 
         if (spec) {
-          // For one-sided specs (Si-O): spring only when d > r0 (purely attractive).
-          // Hard-sphere collision already handles close approach — no spring kick.
-          // Si-O uses temperature-dependent capture range (sioMult); others use spec.mult.
-          const effMult = (spec === PAIR_TABLE[0][1]) ? sioMult : spec.mult
-          if (d < spec.r0 * effMult && (!spec.oneSided || d > spec.r0)) {
-            const f = spec.k * (d - spec.r0)
+          const isSiOSpec  = spec === PAIR_TABLE[0][1]
+          const isFreedPair = latticeFreed[i] && latticeFreed[j]
+          // Si-O is one-sided (attractive only, d > r0) to avoid spring kicks in the crystal.
+          // For freed pairs, lift this in all phases — liquid or solid — so freed Si-O can
+          // form a stable well at r0=9px, matching Na-O capture behaviour.
+          const effOneSided = spec.oneSided && !(isSiOSpec && isFreedPair)
+          const effMult = isSiOSpec ? sioMult : spec.mult
+          if (d < spec.r0 * effMult && (!effOneSided || d > spec.r0) && (!spec.repOnly || d < spec.r0)) {
+            // Freed-freed: skip the attractive part for non-Si-O pairs while hot so dissolved
+            // Na/Ca ions disperse. Gate on coolingMode so ions can re-bond during cooling.
+            // Si-O is always exempt — freed Si must be able to re-bond with freed O.
+            if (!(isFreedPair && d >= spec.r0 && !isSiOSpec && coolingMode === null)) {
+              const f = spec.k * (d - spec.r0)
+              fx[i] += f * nx;  fy[i] += f * ny
+              fx[j] -= f * nx;  fy[j] -= f * ny
+            }
+          }
+          // Hard short-range floor for freed opposite-charge pairs (Na-O, Ca-O):
+          // prevents tight ionic pairs from forming regardless of temperature.
+          if (spec.freeRepR0 && latticeFreed[i] && latticeFreed[j] && d < spec.freeRepR0) {
+            const f = spec.freeRepK * (d - spec.freeRepR0)  // always repulsive here
+            fx[i] += f * nx;  fy[i] += f * ny
+            fx[j] -= f * nx;  fy[j] -= f * ny
+          }
+          // Long-range attract for freed Si-O — runs always, not gated on coolingMode.
+          // This is the only mechanism that brings freed Si toward freed O in the hot
+          // liquid; the spring only fires once they're already within ~9.6px.
+          if (isSiOSpec && isFreedPair && _freeAttractSiOMult > 0 && d > spec.r0 * effMult && d < ATTRACT_RANGE) {
+            const f = _freeAttractSiOMult * 0.004 * spec.r0 / d
             fx[i] += f * nx;  fy[i] += f * ny
             fx[j] -= f * nx;  fy[j] -= f * ny
           }
         } else {
-          const cutoff = (pi.r + pj.r) * REP_MULT
+          const repM = REP_MULT
+          const cutoff = (pi.r + pj.r) * repM
           if (d < cutoff) {
             const f = -REP_K * (cutoff - d)
             fx[i] += f * nx;  fy[i] += f * ny
@@ -424,15 +533,10 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
       }
     }
 
-    // ── Cooling attraction — mode-specific structure assembly ───────────
-    // Slow cool Si-O: directs O toward the ideal 120° hex slot on Si rather than
-    // Si's center, so the hexagonal network assembles by attraction rather than
-    // waiting for random collisions.  Modifier (Na, Ca) attraction is suppressed
-    // above 250°C so the Si-O network forms first; Na/Ca then claim the non-bridging
-    // O atoms (NBOs) that are left with one free bond after the Si network closes.
-    //
-    // Fast cool Si-O: isotropic — whatever angle O approaches from is where it bonds,
-    // producing random bond angles → mixed ring sizes → amorphous glass.
+    // ── Cooling attraction — coordination-driven assembly ───────────────────
+    // slow: hex-directed Si-O via idealHexAngle → consistent 120° angles → crystalline.
+    // fast: isotropic Si-O → random angles → amorphous.
+    // Na/Ca attract throughout — COORD_TARGET[Na]=1 means each Na stops after one O.
     if (bondCount) {
       for (let i = 0; i < n; i++) {
         if (bondCount[i] >= COORD_TARGET[particles[i].typeId]) continue
@@ -442,21 +546,24 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
           const pj   = particles[j]
           const spec = PAIR_TABLE[pi.typeId][pj.typeId]
           if (!spec) continue
-
-          // Slow cool modifier gate: Na-O and Ca-O attraction only below 250°C
+          // Freed-freed pairs must not attract while hot — they're dissolved ions that
+          // should disperse. During cooling, allow attraction so Na/Ca can re-bond.
+          // Si-O is always allowed — freed Si network requires freed O capture.
           const isSiO = spec === PAIR_TABLE[0][1]
-          if (coolingMode === 'slow' && !isSiO && derivedTempC > 250) continue
+          if (latticeFreed[i] && latticeFreed[j] && !isSiO && coolingMode === null) continue
 
-          const dx = pj.x - pi.x
+
+          const dx = miDx(pj.x - pi.x)
           if (dx > ATTRACT_RANGE || dx < -ATTRACT_RANGE) continue
-          const dy = pj.y - pi.y
+          const dy = miDy(pj.y - pi.y)
           if (dy > ATTRACT_RANGE || dy < -ATTRACT_RANGE) continue
           const d2 = dx * dx + dy * dy
           if (d2 >= ATTRACT_RANGE * ATTRACT_RANGE) continue
           const bondCutSq = (spec.r0 * spec.mult) ** 2
           if (d2 <= bondCutSq) continue   // inside bond range: spring already handles it
           const d = Math.sqrt(d2)
-          const f = attractK * spec.r0 / d
+          const isFreedSiO = isSiO && latticeFreed[i] && latticeFreed[j]
+          const f = attractK * spec.r0 / Math.pow(d, attractFalloff) * (isFreedSiO ? _freeAttractSiOMult : 1)
 
           if (coolingMode === 'slow' && isSiO) {
             // Hex-directed: aim O at the ideal 120° slot on Si, not at Si's center
@@ -503,55 +610,52 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
     // edge atoms (which have bonds on only one side) from drifting freely outward.
     // Interior atoms are already constrained symmetrically by their three bonds;
     // the extra force is negligible for them.
-    const CRYST_ANCHOR_K = 0.06   // soft drift-prevention only — stiff enough to stop long-term creep, loose enough to let atoms jiggle
+    // Freed atoms (latticeFreed=1) are excluded so they can drift once all bonds break.
     for (let i = 0; i < n; i++) {
       if (!crystAnchor[i] || latticeFreed[i]) continue
-      fx[i] -= CRYST_ANCHOR_K * (particles[i].x - particles[i].x0)
-      fy[i] -= CRYST_ANCHOR_K * (particles[i].y - particles[i].y0)
+      fx[i] -= _crystAnchorK * (particles[i].x - particles[i].x0)
+      fy[i] -= _crystAnchorK * (particles[i].y - particles[i].y0)
     }
 
     // Na2O anchor: fades from full at 650°C to zero at 1150°C so structure dissolves
-    // progressively. Also skips atoms whose bonds have already broken (intactCount=0).
+    // progressively. Freed atoms (latticeFreed=1) skip the spring so they can roam.
     if (naAnchorFrac > 0) {
-      const naK  = CRYST_ANCHOR_K * naAnchorFrac
-      const prevIA = phys.intactCount
+      const naK = _naAnchorK * naAnchorFrac
       for (let i = 0; i < n; i++) {
-        if (!naAnchor[i]) continue
-        if (prevIA && prevIA[i] === 0) continue   // freed — let it drift
+        if (!naAnchor[i] || latticeFreed[i]) continue
         fx[i] -= naK * (particles[i].x - particles[i].x0)
         fy[i] -= naK * (particles[i].y - particles[i].y0)
       }
     }
 
-    // ── Soft boundary walls (100px outside visible area) ─────────
-    for (let i = 0; i < n; i++) {
-      const p  = particles[i]
-      const m  = p.r + 2
-      const x0 = m,      x1 = SIM_W - m
-      const y0 = m,      y1 = SIM_H - m
-      if (p.x < x0) fx[i] += WALL_K * (x0 - p.x)
-      if (p.x > x1) fx[i] += WALL_K * (x1 - p.x)
-      if (p.y < y0) fy[i] += WALL_K * (y0 - p.y)
-      if (p.y > y1) fy[i] += WALL_K * (y1 - p.y)
-    }
+    // (walls removed — toroidal wrap applied after integration)
 
     // ── Integrate ───────────────────────────────────────────────
     for (let i = 0; i < n; i++) {
       const p = particles[i]
       p.vx += fx[i];  p.vy += fy[i]
       p.x  += p.vx;   p.y  += p.vy
+      // Toroidal wrap
+      if (p.x <  0)     p.x += SIM_W
+      if (p.x >= SIM_W) p.x -= SIM_W
+      if (p.y <  0)     p.y += SIM_H
+      if (p.y >= SIM_H) p.y -= SIM_H
     }
 
     // ── Rigid bond projection (XPBD-style, unconditionally stable) ──
     // Directly corrects bond lengths rather than applying spring forces.
     // Zeroing the relative velocity along the bond axis prevents energy pump.
-    if (phys.rigidBonds) {
+    // Above 900 °C the network should be freely molten — skip the constraint so
+    // atoms can separate. Below 900 °C bonds re-form as temperature drops.
+    // Distance guard (> 3×r0) prevents rubber-banding original partners that
+    // have drifted far apart during melt back together on cooling.
+    if (phys.rigidBonds && totalEnergy <= 900) {
       for (const rb of phys.rigidBonds) {
         if (rb.broken) continue
         const pi = particles[rb.i], pj = particles[rb.j]
-        const dx = pj.x - pi.x, dy = pj.y - pi.y
+        const dx = miDx(pj.x - pi.x), dy = miDy(pj.y - pi.y)
         const d  = Math.hypot(dx, dy)
-        if (d < 0.01) continue
+        if (d < 0.01 || d > rb.r0 * 3) continue
         const nx   = dx / d,       ny   = dy / d
         const half = (d - rb.r0) * 0.5
         pi.x += nx * half;  pi.y += ny * half
@@ -568,9 +672,9 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
       const pi = particles[i]
       for (let j = i + 1; j < n; j++) {
         const pj = particles[j]
-        const dx = pj.x - pi.x
+        const dx = miDx(pj.x - pi.x)
         if (dx > COLLIDE_CUTOFF || dx < -COLLIDE_CUTOFF) continue
-        const dy   = pj.y - pi.y
+        const dy   = miDy(pj.y - pi.y)
         const minD = pi.r + pj.r
         const d2   = dx * dx + dy * dy
         if (d2 >= minD * minD || d2 < 1e-6) continue
@@ -587,29 +691,73 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
       }
     }
 
+    // ── Freed-ion exclusion zone (XPBD position correction) ──────
+    // Force-based springs can be overpowered at high velocities. Position
+    // correction is unconditionally stable: freed ions are pushed apart
+    // to minD = (r_i + r_j) * FREE_EXCL regardless of velocity or force.
+    // Si-O uses _sioExclMult (default 1.4, tunable via dev slider) so that
+    // freed Si-O can reach r0=9px and settle there (1.4×5.5=7.7px < r0=9px < capture=9.63px).
+    // Values 1.5–1.7 place the floor inside the capture window but above r0, creating a
+    // resonance band that inflates KE to ~3.8× target; values ≥1.8 exceed the capture radius.
+    const FREE_EXCL = 2.0   // exclusion = 2× contact radius (~10-11 px for Na+O)
+    for (let i = 0; i < n; i++) {
+      if (!latticeFreed[i]) continue
+      const pi = particles[i]
+      for (let j = i + 1; j < n; j++) {
+        if (!latticeFreed[j]) continue
+        const pj = particles[j]
+        const dx = miDx(pj.x - pi.x)
+        if (dx > FORCE_CUTOFF || dx < -FORCE_CUTOFF) continue
+        const dy   = miDy(pj.y - pi.y)
+        const isSiOPair = pi.typeId + pj.typeId === 1  // Si(0)+O(1) uniquely sums to 1
+        const minD = (pi.r + pj.r) * (isSiOPair ? _sioExclMult : FREE_EXCL)
+        const d2   = dx * dx + dy * dy
+        if (d2 >= minD * minD || d2 < 1e-6) continue
+        const d    = Math.sqrt(d2)
+        const nx   = dx / d, ny = dy / d
+        const half = (minD - d) * 0.5
+        // Push apart and wrap
+        let ax = pi.x - nx * half, ay = pi.y - ny * half
+        let bx = pj.x + nx * half, by = pj.y + ny * half
+        if (ax <  0) ax += SIM_W; if (ax >= SIM_W) ax -= SIM_W
+        if (ay <  0) ay += SIM_H; if (ay >= SIM_H) ay -= SIM_H
+        if (bx <  0) bx += SIM_W; if (bx >= SIM_W) bx -= SIM_W
+        if (by <  0) by += SIM_H; if (by >= SIM_H) by -= SIM_H
+        pi.x = ax; pi.y = ay; pj.x = bx; pj.y = by
+        // Elastic velocity correction
+        const dvn = (pi.vx - pj.vx) * nx + (pi.vy - pj.vy) * ny
+        if (dvn > 0) {
+          pi.vx -= dvn * nx;  pi.vy -= dvn * ny
+          pj.vx += dvn * nx;  pj.vy += dvn * ny
+        }
+      }
+    }
+
     // ── Thermostat or cooling ────────────────────────────────────
     if (coolingFactor < 1.0 - 1e-6) {
       // Cooling mode: apply per-substep damping (nth root of the per-step factor)
       const sf = Math.pow(coolingFactor, 1 / SUBSTEPS)
       for (let i = 0; i < n; i++) { particles[i].vx *= sf; particles[i].vy *= sf }
     } else {
-      // Langevin thermostat: per-substep damping + Gaussian kick, applied to every bonded atom.
+      // Langevin thermostat: per-substep damping + Gaussian kick, applied to all atoms.
       // The damping factor (DAMP per substep) bleeds off velocity from spring-force oscillations,
       // keeping edge atoms (fewer bond constraints) as tightly held as interior ones.
       // Without damping, edge atoms accumulate velocity between thermostat events and oscillate
       // more than interior atoms — visually appearing "looser."
-      // Freed atoms are KMT — skip thermostat, carry velocity ballistically.
       const DAMP              = 1 - THERMOSTAT_TAU
       const kickSigma         = vTarget * Math.sqrt(THERMOSTAT_TAU)
-      // THERMAL_SPEED=0.0018 vs v2's 0.0015 means crystal atoms get 1.2× bigger base kicks.
-      // Scale CRYST_JIGGLE_MULT down by the same factor (4 × 0.0015/0.0018 ≈ 3.3) so the
-      // crystal-atom steady-state σ_v matches v2 exactly and edge atoms stay as tight as
-      // interior atoms rather than drifting to an asymmetric bond-force equilibrium.
-      const CRYST_JIGGLE_MULT = 3.3
-      const kickSigmaCryst    = kickSigma * CRYST_JIGGLE_MULT
+      // crystAnchor/naAnchor atoms get _crystJiggleMult × larger kicks (default 3.3).
+      // Higher values keep edge atoms as tight as interior ones; lower values bring
+      // measured KE closer to the thermostat target.
+      const kickSigmaCryst    = kickSigma * _crystJiggleMult
       for (let i = 0; i < n; i++) {
-        if (latticeFreed[i]) continue   // freed: KMT
-        const ks = (crystAnchor[i] || naAnchor[i]) ? kickSigmaCryst : kickSigma
+        const isFreed = latticeFreed[i]
+        const rampFrames = phys.reintRampFrames?.[i] ?? 0
+        const kickMult = rampFrames > 0
+          ? _latticeSpeedMult + (rampFrames / REINT_RAMP_FRAMES) * (_freedSpeedMult - _latticeSpeedMult)
+          : (isFreed ? _freedSpeedMult : _latticeSpeedMult)
+        const baseSigma = (crystAnchor[i] || naAnchor[i]) ? kickSigmaCryst : kickSigma
+        const ks = baseSigma * kickMult
         const u1 = Math.random() || 1e-10
         const r  = Math.sqrt(-2 * Math.log(u1)) * ks
         const a  = Math.random() * Math.PI * 2
@@ -630,39 +778,56 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
     }
   }
 
-  // ── Bond breaking / reforming ─────────────────────────────────────────────
-  // Per-step stochastic model: each bond breaks with probability breakFrac*BREAK_RATE
-  // and reforms (if atoms are nearby) with probability (1-breakFrac)*REFORM_RATE.
-  // Equilibrium broken fraction = breakFrac(T) exactly.
-  const BREAK_RATE  = 0.025
-  const REFORM_RATE = 0.025
+  // ── Bond breaking / reforming (strain-based) ─────────────────────────────
+  // Si-O uses _breakStrain (default 0.07 = 4 kT at 1600°C).
+  // Na-O uses _naBreakStrain (default 0.07, independently tunable).
+  // Reform threshold (_reformStrain) is shared — apply independently if needed later.
+  // Hysteresis between break and reform prevents same-frame break/reform cycling
+  // and lets intactCount stay zero long enough to trigger liberation.
+  let breakKERemoved = 0, breakKEReturned = 0
   if (phys.rigidBonds) {
     for (const rb of phys.rigidBonds) {
       if (!rb.breakable) continue
-      const frac = Math.max(0, Math.min(1,
-        (totalEnergy - rb.breakStart) / (rb.breakFull - rb.breakStart)))
+      const dx = miDx(particles[rb.j].x - particles[rb.i].x)
+      const dy = miDy(particles[rb.j].y - particles[rb.i].y)
+      const d  = Math.hypot(dx, dy)
+      const strain = (d - rb.r0) / rb.r0
+      const wasBroken = rb.broken
+      const bsThresh = rb.isSiO ? _breakStrain : _naBreakStrain
       if (!rb.broken) {
-        if (frac > 0 && Math.random() < frac * BREAK_RATE) rb.broken = true
+        if (strain > bsThresh) rb.broken = true
       } else {
-        const dx = particles[rb.j].x - particles[rb.i].x
-        const dy = particles[rb.j].y - particles[rb.i].y
-        const d  = Math.hypot(dx, dy)
-        if (d < rb.r0 * 1.6 && Math.random() < (1 - frac) * REFORM_RATE) rb.broken = false
+        if (strain <= _reformStrain) rb.broken = false
+      }
+      if (rb.broken !== wasBroken) {
+        const half = (rb.bondDepth ?? 0) / 2
+        const nx = d > 1e-6 ? dx / d : 1, ny = d > 1e-6 ? dy / d : 0
+        const pi = particles[rb.i], pj = particles[rb.j]
+        if (rb.broken) {
+          // Bond just broke: drain half-depth from each atom's KE.
+          // If an atom can't pay the full half, clamp to zero (thermostat restores over ~2 steps).
+          breakKERemoved += _removeKE(pi, half)
+          breakKERemoved += _removeKE(pj, half)
+        } else {
+          // Bond just reformed: inject half-depth outward along bond axis (latent heat release).
+          _addKE(pi, half, -nx, -ny)
+          _addKE(pj, half,  nx,  ny)
+          breakKEReturned += rb.bondDepth ?? 0
+        }
       }
     }
   }
+  phys.breakKERemoved  = breakKERemoved
+  phys.breakKEReturned = breakKEReturned
 
-  // Count intact bonds per atom; track Si-O atoms; count broken Na-O bonds for PE display.
+  // Count intact bonds per atom.
   const intactCount  = new Int32Array(n)
   const hasSiOBond   = new Uint8Array(n)
-  let brokenNaO = 0
   if (phys.rigidBonds) {
     for (const rb of phys.rigidBonds) {
       if (!rb.broken) {
         intactCount[rb.i]++; intactCount[rb.j]++
         if (!rb.breakable) { hasSiOBond[rb.i] = 1; hasSiOBond[rb.j] = 1 }
-      } else if (rb.breakable) {
-        brokenNaO++
       }
     }
   }
@@ -674,21 +839,57 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
   // Gate on rigidBonds existing: before buildRigidBondMap all intactCounts are 0 and
   // every atom would be freed spuriously, permanently disabling the crystal anchor spring.
   if (phys.latticeFreed && phys.rigidBonds) {
+    const origCount = phys.originalBondCount
     for (let i = 0; i < n; i++) {
-      if (crystAnchor[i]) continue   // SiO2 atoms are never auto-freed; their intactCount
-      // can be 0 for edge atoms that never formed rigid bonds, not because bonds broke.
-      if (!phys.latticeFreed[i] && intactCount[i] === 0) phys.latticeFreed[i] = 1
+      if (phys.latticeFreed[i]) continue
+      // Below melt temp, skip crystAnchor atoms — edge atoms can have intactCount=0
+      // without their bonds having broken (they just never formed rigid bonds).
+      if (crystAnchor[i] && totalEnergy < 1300) continue
+      // Na2O atoms use _naLiberateFrac; SiO2 atoms use _liberateFrac.
+      const orig = origCount ? origCount[i] : 0
+      const frac = naAnchor[i] ? _naLiberateFrac : _liberateFrac
+      const threshold = Math.floor(orig * (1 - frac))
+      if (intactCount[i] <= threshold) { phys.latticeFreed[i] = 1; _libStats.strainFires++ }
     }
   }
 
-  // Bond-breaking potential energy: each broken Na-O bond represents latent heat
-  // absorbed from the temperature budget.  This raises the displayed PE and causes
-  // T: to lag E: across the 650–1150°C breaking zone.
-  const BOND_BREAK_ENERGY = 1000 * ENERGY_UNIT   // energy cost per broken Na-O bond
-  const bondBreakPE = brokenNaO * BOND_BREAK_ENERGY
-  phys.bondBreakPE  = bondBreakPE
-  // Overwrite latticeTemp to subtract bond-break PE from available thermal energy.
-  phys.latticeTemp  = Math.max(-273, ePerParticle / ENERGY_UNIT - 273 - bondBreakPE / (n * ENERGY_UNIT))
+  // Re-integration: freed atoms that hold ≥N bonds for ≥M consecutive frames are
+  // cleared from latticeFreed, their anchor rebased, and their thermostat speed
+  // ramped down from _freedSpeedMult to _latticeSpeedMult over REINT_RAMP_FRAMES.
+  // Only runs during cooling so hot ions don't accidentally re-integrate mid-melt.
+  if (phys.latticeFreed && phys.rigidBonds && phys.stableBondFrames && coolingMode !== null) {
+    const sbf = phys.stableBondFrames
+    const rrf = phys.reintRampFrames
+    for (let i = 0; i < n; i++) {
+      if (rrf[i] > 0) rrf[i]--
+      if (!phys.latticeFreed[i]) continue
+      if (intactCount[i] >= _reintBondN) {
+        sbf[i]++
+        if (sbf[i] >= _reintFrameM) {
+          phys.latticeFreed[i] = 0
+          sbf[i] = 0
+          rrf[i] = REINT_RAMP_FRAMES
+          const p = particles[i]
+          p.x0 = p.x; p.y0 = p.y
+        }
+      } else {
+        sbf[i] = 0
+      }
+    }
+  }
+
+  // Temperature is now derived from actual KE so latent heat transactions appear directly.
+  // breakKERemoved/Returned track per-step latent heat for diagnostics.
+  phys.bondBreakPE = breakKERemoved - breakKEReturned   // net KE drained this step
+  let keSum2 = 0, keCount2 = 0
+  for (let i = 0; i < n; i++) {
+    if (intactCount[i] > 0) {
+      keSum2 += particles[i].vx * particles[i].vx + particles[i].vy * particles[i].vy; keCount2++
+    }
+  }
+  phys.latticeTemp = Math.max(-273, keCount2 > 0
+    ? (keSum2 * 0.5 / keCount2) / ENERGY_UNIT - 273
+    : ePerParticle / ENERGY_UNIT - 273)
 
   // ── SiO2 lattice liberation by contact ───────────────────────────────────
   // Liberators: freed Na2O atoms, or latticeFreed SiO2 atoms that have drifted > FREED_DRIFT_MIN.
@@ -701,14 +902,35 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
     const pi = particles[i]
     const isFreedNa2O = naAnchor[i] && intactCount[i] === 0
     const isFreedSiO2 = crystAnchor[i] && latticeFreed[i] &&
-      Math.hypot(pi.x - pi.x0, pi.y - pi.y0) > FREED_DRIFT_MIN
+      Math.hypot(miDx(pi.x - pi.x0), miDy(pi.y - pi.y0)) > FREED_DRIFT_MIN
     if (!isFreedNa2O && !isFreedSiO2) continue
+    // Measure liberator's distance to its nearest own-bond partner (for Na2O: its O bond).
+    let dLiberatorBond = -1
+    if (isFreedNa2O && phys.rigidBonds) {
+      let nearest = Infinity
+      for (const rb of phys.rigidBonds) {
+        const partner = rb.i === i ? rb.j : rb.j === i ? rb.i : -1
+        if (partner < 0) continue
+        const pp = particles[partner]
+        const bd = Math.hypot(miDx(pp.x - pi.x), miDy(pp.y - pi.y))
+        if (bd < nearest) nearest = bd
+      }
+      dLiberatorBond = nearest === Infinity ? -1 : +nearest.toFixed(2)
+    }
     for (let j = 0; j < n; j++) {
       if (j === i || !crystAnchor[j] || latticeFreed[j]) continue
       const pj = particles[j]
-      const dx = pj.x - pi.x, dy = pj.y - pi.y
+      const dx = miDx(pj.x - pi.x), dy = miDy(pj.y - pi.y)
       const d2 = dx * dx + dy * dy
       if (d2 < (pi.r + pj.r + 1) ** 2) {
+        _libStats.contactFires++
+        if (_libStats.contactSeps.length < 200) {
+          _libStats.contactSeps.push({
+            liberatorType: isFreedNa2O ? 'Na2O' : 'SiO2',
+            dToJ: +Math.sqrt(d2).toFixed(2),
+            dLiberatorBond,
+          })
+        }
         latticeFreed[j] = 1
         // Kick j away from i
         const d = Math.sqrt(d2) || 1
@@ -731,6 +953,26 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
     }
   }
 
+  // ── Si-O bond severance by modifier ion contact ──────────────────────────
+  // A freed Na⁺ or Ca²⁺ touching a Si or O atom immediately severs that rigid bond.
+  // breakable stays false so the bond can never reform.
+  if (phys.rigidBonds) {
+    for (const rb of phys.rigidBonds) {
+      if (rb.breakable || rb.broken) continue
+      const pi = particles[rb.i], pj = particles[rb.j]
+      for (let k = 0; k < n; k++) {
+        const pk = particles[k]
+        if (pk.typeId !== 2 && pk.typeId !== 3) continue  // Na, Ca only
+        if (intactCount[k] > 0) continue                  // must be a freed ion
+        if (Math.hypot(pk.x - pi.x, pk.y - pi.y) < pi.r + pk.r + 1 ||
+            Math.hypot(pk.x - pj.x, pk.y - pj.y) < pj.r + pk.r + 1) {
+          rb.broken = true
+          break
+        }
+      }
+    }
+  }
+
   // ── Displacement clamp ────────────────────────────────────────────────────
   // Si-O bonded atoms: tight 5px unless freed from lattice by contact, then LOOSE_WANDER.
   // Other bonded atoms (Na-O, Ca-O): loose clamp that grows with temperature so
@@ -742,31 +984,51 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
     if (latticeFreed[i]) continue   // freed SiO2: no positional clamp, rigid bonds constrain it
     const limit = hasSiOBond[i] ? 5 : LOOSE_WANDER
     const p = particles[i]
-    const dx = p.x - p.x0, dy = p.y - p.y0
+    const dx = miDx(p.x - p.x0), dy = miDy(p.y - p.y0)
     const d2 = dx * dx + dy * dy
     if (d2 > limit * limit) {
       const d  = Math.sqrt(d2)
       const nx = dx / d, ny = dy / d
-      p.x = p.x0 + nx * limit
-      p.y = p.y0 + ny * limit
+      let wx = p.x0 + nx * limit, wy = p.y0 + ny * limit
+      if (wx <  0)     wx += SIM_W
+      if (wx >= SIM_W) wx -= SIM_W
+      if (wy <  0)     wy += SIM_H
+      if (wy >= SIM_H) wy -= SIM_H
+      p.x = wx; p.y = wy
       const vout = p.vx * nx + p.vy * ny
       if (vout > 0) { p.vx -= vout * nx; p.vy -= vout * ny }
     }
   }
 
-  // ── Dynamic bond detection for rendering ─────────────────────────────────
+  // ── Bond detection for rendering ─────────────────────────────────────────
+  // All rigid bonds render until atoms separate past the alpha-fade range (40 px).
+  // Broken bonds stay in the list so atoms visibly stretch pink then fade — not snap off.
+  // All rigid pairs are excluded from the dynamic scan to prevent double-counting.
   const bonds = []
+  const rigidPairSet = new Set()
+  if (phys.rigidBonds) {
+    for (const rb of phys.rigidBonds) {
+      rigidPairSet.add(rb.i * n + rb.j)
+      const pi = particles[rb.i], pj = particles[rb.j]
+      const d  = Math.hypot(miDx(pj.x - pi.x), miDy(pj.y - pi.y))
+      if (d >= 40) continue
+      bonds.push({ i: rb.i, j: rb.j, strain: (d - rb.r0) / rb.r0, currentBreakStrain: rb.isSiO ? _breakStrain : _naBreakStrain, broken: rb.broken })
+    }
+  }
+  // Dynamic soft bonds: Na-O / Ca-O pairs not already in rigidBonds
   for (let i = 0; i < n; i++) {
-    const pi   = particles[i]
+    const pi = particles[i]
     for (let j = i + 1; j < n; j++) {
+      if (rigidPairSet.has(i * n + j)) continue
       const pj   = particles[j]
       const spec = PAIR_TABLE[pi.typeId][pj.typeId]
-      if (!spec) continue
-      const effMult = (spec === PAIR_TABLE[0][1]) ? sioMult : spec.mult
-      const dx = pj.x - pi.x
-      if (dx > spec.r0 * effMult || dx < -spec.r0 * effMult) continue
-      const d = Math.hypot(dx, pj.y - pi.y)
-      if (d > spec.r0 * effMult) continue
+      if (!spec || spec.repOnly) continue
+      const effMult    = (spec === PAIR_TABLE[0][1]) ? sioMult : spec.mult
+      const renderMult = spec.viewMult ?? effMult
+      const dx = miDx(pj.x - pi.x)
+      if (dx > spec.r0 * renderMult || dx < -spec.r0 * renderMult) continue
+      const d = Math.hypot(dx, miDy(pj.y - pi.y))
+      if (d > spec.r0 * renderMult) continue
       bonds.push({ i, j, strain: (d - spec.r0) / spec.r0, currentBreakStrain: 0.25 })
     }
   }
@@ -788,7 +1050,7 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
     for (const rb of phys.rigidBonds) {
       const pi = particles[rb.i], pj = particles[rb.j]
       const key = `${pi.type}-${pj.type}`
-      if (!bstats[key]) bstats[key] = { total: 0, broken: 0, breakStart: rb.breakStart, breakFull: rb.breakFull }
+      if (!bstats[key]) bstats[key] = { total: 0, broken: 0 }
       bstats[key].total++
       if (rb.broken) bstats[key].broken++
     }
@@ -796,344 +1058,11 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
   }
 }
 
-// ── Convex hull (Andrew's monotone chain) ─────────────────────────────────────
-function convexHull(pts) {
-  if (pts.length < 3) return pts
-  const cross = (o, a, b) => (a[0]-o[0])*(b[1]-o[1]) - (a[1]-o[1])*(b[0]-o[0])
-  const s = [...pts].sort((a, b) => a[0] !== b[0] ? a[0] - b[0] : a[1] - b[1])
-  const lower = []
-  for (const p of s) {
-    while (lower.length >= 2 && cross(lower[lower.length-2], lower[lower.length-1], p) <= 0)
-      lower.pop()
-    lower.push(p)
-  }
-  const upper = []
-  for (let i = s.length - 1; i >= 0; i--) {
-    while (upper.length >= 2 && cross(upper[upper.length-2], upper[upper.length-1], s[i]) <= 0)
-      upper.pop()
-    upper.push(s[i])
-  }
-  lower.pop(); upper.pop()
-  return [...lower, ...upper]
-}
-
 // ── Runtime parameter updates ────────────────────────────────────────────────
-// Mutates the shared PREFERRED entry so PAIR_TABLE, crystallize(), and the force
+// Mutates the shared PREFERRED entry so PAIR_TABLE and the force
 // loop all pick up the new value immediately without rebuilding the module.
 export function setSiOr0(r0) {
   PREFERRED['O-Si'].r0 = r0
-}
-
-// ── Crystallization nudge ─────────────────────────────────────────────────────
-// For slow cooling: detects Si in near-hexagonal (3-fold, ~120°) bond environments,
-// clusters connected groups through shared O bridges, then teleports O atoms partway
-// toward ideal hex positions for clusters large enough to be crystal seeds.
-// Call every 10-20 RAF frames during slow cool, below the composition threshold.
-export function crystallize(phys, strength, minCluster, angleTol = 25) {
-  const { particles, bonds } = phys
-  if (!bonds || bonds.length === 0) return
-
-  const tolRad = angleTol * (Math.PI / 180)
-  const TWO_PI = 2 * Math.PI
-  const IDEAL  = TWO_PI / 3   // 120°
-
-  // Build Si→[O idx] and O→[Si idx] adjacency from current bond snapshot
-  const siToO = new Map()
-  const oToSi = new Map()
-  for (const { i, j } of bonds) {
-    const ti = particles[i].typeId, tj = particles[j].typeId
-    let si, oi
-    if      (ti === 0 && tj === 1) { si = i; oi = j }
-    else if (ti === 1 && tj === 0) { si = j; oi = i }
-    else continue
-    if (!siToO.has(si)) siToO.set(si, [])
-    siToO.get(si).push(oi)
-    if (!oToSi.has(oi)) oToSi.set(oi, [])
-    oToSi.get(oi).push(si)
-  }
-
-  // Identify Si atoms in hex environment: exactly 3 O bonds, all angle gaps within tolRad of 120°
-  const hexSi = new Map()   // si_idx → best-fit lattice orientation θ
-  for (const [si, oList] of siToO) {
-    if (oList.length !== 3) continue
-    const p = particles[si]
-    const a = oList.map(k => Math.atan2(particles[k].y - p.y, particles[k].x - p.x))
-    a.sort((x, y) => x - y)
-    const g0 = a[1] - a[0], g1 = a[2] - a[1], g2 = TWO_PI - (a[2] - a[0])
-    if (Math.max(Math.abs(g0 - IDEAL), Math.abs(g1 - IDEAL), Math.abs(g2 - IDEAL)) < tolRad) {
-      hexSi.set(si, (a[0] + (a[1] - IDEAL) + (a[2] - 2 * IDEAL)) / 3)
-    }
-  }
-  if (hexSi.size === 0) return
-
-  // BFS: find connected clusters of hex-environment Si (connected through shared O)
-  const visited  = new Set()
-  const clusters = []
-  for (const start of hexSi.keys()) {
-    if (visited.has(start)) continue
-    const cluster = [], queue = [start]
-    visited.add(start)
-    let qi = 0
-    while (qi < queue.length) {
-      const cur = queue[qi++]
-      cluster.push(cur)
-      for (const oi of siToO.get(cur)) {
-        for (const nb of (oToSi.get(oi) ?? [])) {
-          if (!visited.has(nb) && hexSi.has(nb)) { visited.add(nb); queue.push(nb) }
-        }
-      }
-    }
-    clusters.push(cluster)
-  }
-
-  // Teleport O atoms partway toward ideal hex positions for large enough clusters
-  const R0 = PREFERRED['O-Si'].r0   // 9 px — Si-O equilibrium distance
-  for (const cluster of clusters) {
-    if (cluster.length < minCluster) continue
-    for (const si of cluster) {
-      const p = particles[si], θ = hexSi.get(si)
-      const ia = [θ, θ + IDEAL, θ + 2 * IDEAL]
-      for (const oi of siToO.get(si)) {
-        const o      = particles[oi]
-        const actual = Math.atan2(o.y - p.y, o.x - p.x)
-        let best = ia[0], bestD = Infinity
-        for (const a of ia) {
-          let d = actual - a; while (d > Math.PI) d -= TWO_PI; while (d < -Math.PI) d += TWO_PI
-          if (Math.abs(d) < bestD) { bestD = Math.abs(d); best = a }
-        }
-        // Position-only correction; velocity (vx/vy) unchanged so thermostat still governs speed
-        o.x += strength * (p.x + R0 * Math.cos(best) - o.x)
-        o.y += strength * (p.y + R0 * Math.sin(best) - o.y)
-      }
-    }
-  }
-}
-
-// ── Pre-computed cooling targets ─────────────────────────────────────────────
-
-// Greedy nearest-neighbor assignment: each particle gets the closest available
-// site, minimising total travel. All (particle, site) pairs sorted by distance;
-// closest pairs claimed first so no atom crosses the screen unnecessarily.
-function nearestAssign(particles, pIdxs, sites, count) {
-  const take = Math.min(count, pIdxs.length, sites.length)
-  if (take === 0) return new Map()
-  const pairs = []
-  for (let pi = 0; pi < pIdxs.length; pi++) {
-    const p = particles[pIdxs[pi]]
-    for (let si = 0; si < sites.length; si++) {
-      const dx = p.x - sites[si].x, dy = p.y - sites[si].y
-      pairs.push({ pi, si, d2: dx * dx + dy * dy })
-    }
-  }
-  pairs.sort((a, b) => a.d2 - b.d2)
-  const usedP = new Uint8Array(pIdxs.length)
-  const usedS = new Uint8Array(sites.length)
-  const result = new Map()
-  for (const { pi, si } of pairs) {
-    if (result.size >= take) break
-    if (usedP[pi] || usedS[si]) continue
-    usedP[pi] = 1; usedS[si] = 1
-    result.set(pIdxs[pi], sites[si])
-  }
-  return result
-}
-
-// computeAmorphousTargets: builds the amorphous network FROM the current Si
-// positions so Si atoms don't move at all — O migrates to the nearest Si-Si
-// midpoint, ions go perpendicular off nearby bonds.  All motion is local.
-export function computeAmorphousTargets(phys) {
-  const { particles, n } = phys
-
-  const a     = PREFERRED['O-Si'].r0 * 2   // 18px
-  const minSq = (a * 0.68 * 0.99) ** 2
-  const maxSq = (a * 1.90) ** 2
-
-  const byType = [[], [], [], []]
-  for (let i = 0; i < n; i++) byType[particles[i].typeId].push(i)
-  const nNa = byType[2].length
-
-  // Si stays exactly where it is
-  const targets = new Array(n)
-  for (const i of byType[0]) targets[i] = { x: particles[i].x, y: particles[i].y }
-
-  // Bond nearby Si pairs (greedy closest-first, max 3 per Si) to get O sites
-  const siIdxs = byType[0]
-  const cands = []
-  for (let ii = 0; ii < siIdxs.length; ii++) {
-    for (let jj = ii + 1; jj < siIdxs.length; jj++) {
-      const pi = siIdxs[ii], pj = siIdxs[jj]
-      const dx = particles[pj].x - particles[pi].x, dy = particles[pj].y - particles[pi].y
-      const dSq = dx * dx + dy * dy
-      if (dSq > minSq && dSq < maxSq) cands.push({ ii, jj, pi, pj, dSq })
-    }
-  }
-  cands.sort((a, b) => a.dSq - b.dSq)
-
-  const conn = new Array(siIdxs.length).fill(0)
-  const oBondSites = [], ionSites = []
-  for (const { ii, jj, pi, pj } of cands) {
-    if (conn[ii] < 3 && conn[jj] < 3) {
-      conn[ii]++; conn[jj]++
-      const mx = (particles[pi].x + particles[pj].x) / 2
-      const my = (particles[pi].y + particles[pj].y) / 2
-      oBondSites.push({ x: mx, y: my })
-      // Perpendicular ion site off this bond
-      const len = Math.hypot(particles[pj].x - particles[pi].x, particles[pj].y - particles[pi].y)
-      const px = -(particles[pj].y - particles[pi].y) / len
-      const py =  (particles[pj].x - particles[pi].x) / len
-      const flip = Math.random() < 0.5 ? 1 : -1
-      const ix = mx + flip * px * 13, iy = my + flip * py * 13
-      if (ix > 4 && ix < SIM_W - 4 && iy > 4 && iy < SIM_H - 4) ionSites.push({ x: ix, y: iy })
-    }
-  }
-
-  // Assign O, Na, Ca to nearest available site of their type
-  const oMap  = nearestAssign(particles, byType[1], oBondSites,          byType[1].length)
-  const naMap = nearestAssign(particles, byType[2], ionSites,             byType[2].length)
-  const caMap = nearestAssign(particles, byType[3], ionSites.slice(nNa), byType[3].length)
-
-  for (let i = 0; i < n; i++) {
-    if (targets[i]) continue
-    const p = particles[i]
-    targets[i] = oMap.get(i) ?? naMap.get(i) ?? caMap.get(i) ?? { x: p.x, y: p.y }
-  }
-  return targets
-}
-
-// computeSlowCoolTargets: hex crystal lattice with multiple random nucleation
-// seeds so crystal domains form at different locations each time.
-export function computeSlowCoolTargets(phys, sio2Pct, _na2oPct, _caoPct) {
-  const { particles, n } = phys
-  const targets = computeAmorphousTargets(phys)   // amorphous baseline
-
-  const crystalFrac = Math.max(0, Math.pow(Math.max(0, sio2Pct - 50) / 50, 1.5))
-  if (crystalFrac < 0.02) return targets
-
-  const R0  = PREFERRED['O-Si'].r0
-  const a   = R0 * 2
-  const a1x = a * Math.sqrt(3)
-  const a2x = a * Math.sqrt(3) / 2, a2y = a * 1.5
-  const bDx = a * Math.sqrt(3) / 2, bDy = a * 0.5
-  // Anchor the lattice at origin so all domains share the same grid
-  const ni  = Math.ceil(SIM_W / a1x) + 1
-  const nj  = Math.ceil(SIM_H / a2y) + 1
-
-  // Pick nucleation seeds from actual Si particle positions so crystal sites
-  // grow from where atoms already are, minimising travel distances.
-  const siParticles = particles.filter(p => p.typeId === 0)
-  const numSeeds = Math.min(siParticles.length, 2 + Math.floor(Math.random() * 3))
-  const shuffled = [...siParticles].sort(() => Math.random() - 0.5)
-  // Space seeds out: reject candidates too close to already-chosen seeds
-  const seeds = []
-  const minSeedGap = Math.min(SIM_W, SIM_H) * 0.25
-  for (const p of shuffled) {
-    if (seeds.length >= numSeeds) break
-    if (seeds.every(s => Math.hypot(p.x - s.x, p.y - s.y) > minSeedGap))
-      seeds.push({ x: p.x, y: p.y })
-  }
-  if (seeds.length === 0) seeds.push(siParticles[0] ?? { x: SIM_W/2, y: SIM_H/2 })
-  const nearestSeedDist = (x, y) =>
-    seeds.reduce((best, s) => Math.min(best, Math.hypot(x - s.x, y - s.y)), Infinity)
-
-  // Generate full lattice, tag each site with its distance to the nearest seed
-  const siSites = [], naSites = []
-  for (let ii = -ni; ii <= ni; ii++) {
-    for (let jj = -nj; jj <= nj; jj++) {
-      for (const [ddx, ddy] of [[0,0],[bDx,bDy]]) {
-        const x = ii*a1x + jj*a2x + ddx, y = jj*a2y + ddy
-        if (x > 4 && x < SIM_W-4 && y > 4 && y < SIM_H-4)
-          siSites.push({ x, y, d: nearestSeedDist(x, y) })
-      }
-      const rx = ii*a1x + jj*a2x + bDx, ry = jj*a2y - bDy
-      if (rx > 4 && rx < SIM_W-4 && ry > 4 && ry < SIM_H-4)
-        naSites.push({ x: rx, y: ry, d: nearestSeedDist(rx, ry) })
-    }
-  }
-
-  // Keep only the sites closest to seeds (this is what creates distinct domains)
-  siSites.sort((a, b) => a.d - b.d)
-  naSites.sort((a, b) => a.d - b.d)
-
-  const nnSq = (a * 1.05) ** 2
-  const oSites = []
-  // Build O sites from ALL si sites then filter by seed proximity
-  const allSiForO = siSites   // already sorted; O midpoints inherit domain membership
-  for (let i = 0; i < allSiForO.length; i++) {
-    for (let j = i+1; j < allSiForO.length; j++) {
-      const dx = allSiForO[j].x - allSiForO[i].x, dy = allSiForO[j].y - allSiForO[i].y
-      if (dx*dx+dy*dy < nnSq) {
-        const ox = (allSiForO[i].x + allSiForO[j].x)/2, oy = (allSiForO[i].y + allSiForO[j].y)/2
-        oSites.push({ x: ox, y: oy, d: nearestSeedDist(ox, oy) })
-      }
-    }
-  }
-  oSites.sort((a, b) => a.d - b.d)
-
-  const caSites = oSites.filter(o => {
-    for (const s of siSites) if (Math.abs(s.x-o.x)<2 && Math.abs(s.y-o.y-R0)<2) return true
-    return false
-  })
-
-  const byType = [[],[],[],[]]
-  for (let i = 0; i < n; i++) byType[particles[i].typeId].push(i)
-
-  const take = f => Math.round(f * crystalFrac)
-  const siMap = nearestAssign(particles, byType[0], siSites, take(byType[0].length))
-  const oMap  = nearestAssign(particles, byType[1], oSites,  take(byType[1].length))
-  const naMap = nearestAssign(particles, byType[2], naSites, take(byType[2].length))
-  const caMap = nearestAssign(particles, byType[3], caSites.length ? caSites : naSites, take(byType[3].length))
-
-  for (const [pi, site] of [...siMap, ...oMap, ...naMap, ...caMap]) {
-    targets[pi] = { x: site.x, y: site.y }
-  }
-  return targets
-}
-
-// Capture current particle velocities so stepPrecompute can continue each
-// atom's natural trajectory rather than snapping to a random oscillation.
-export function initPrecompute(phys, targets) {
-  const n = phys.n
-  const cvx = new Float32Array(n), cvy = new Float32Array(n)
-  for (let i = 0; i < n; i++) { cvx[i] = phys.particles[i].vx; cvy[i] = phys.particles[i].vy }
-  phys.precompute = { targets, cvx, cvy }
-}
-
-// Each frame: continue the particle's natural velocity (with damping) and add
-// a gentle lerp toward its target.  Si (target = current pos) coasts to a stop
-// naturally while O/ions also drift into the network structure.
-export function stepPrecompute(phys, frame, lerpRate) {
-  const { particles, n } = phys
-  const { targets, cvx, cvy } = phys.precompute
-  const DAMP = 0.97
-
-  for (let i = 0; i < n; i++) {
-    const p = particles[i], t = targets[i]
-    if (!t) continue
-    cvx[i] *= DAMP; cvy[i] *= DAMP
-    p.px = p.x; p.py = p.y
-    p.x += cvx[i] + lerpRate * (t.x - p.x)
-    p.y += cvy[i] + lerpRate * (t.y - p.y)
-    // Keep inside sim bounds
-    p.x = Math.max(p.r, Math.min(SIM_W - p.r, p.x))
-    p.y = Math.max(p.r, Math.min(SIM_H - p.r, p.y))
-  }
-
-  // Rebuild bonds for rendering
-  const bonds = []
-  for (let i = 0; i < n; i++) {
-    const pi = particles[i]
-    for (let j = i+1; j < n; j++) {
-      const pj = particles[j]
-      const spec = PAIR_TABLE[pi.typeId][pj.typeId]
-      if (!spec) continue
-      const dx = pj.x - pi.x
-      if (Math.abs(dx) > spec.r0 * spec.mult) continue
-      const d = Math.hypot(dx, pj.y - pi.y)
-      if (d > spec.r0 * spec.mult) continue
-      bonds.push({ i, j, strain: (d - spec.r0) / spec.r0, currentBreakStrain: 0.25 })
-    }
-  }
-  phys.bonds = bonds
 }
 
 // Rebuild phys.bonds from current particle positions — used by replay to
@@ -1158,167 +1087,3 @@ export function rebuildBonds(phys) {
   phys.bonds = bonds
 }
 
-// ── Canvas rendering ──────────────────────────────────────────────────────────
-
-const COLOR_STOPS = [
-  [0.00, 172, 167, 160],
-  [0.12, 255, 180, 230],
-  [0.28, 255,  40, 180],
-  [0.80, 160,   0, 255],
-  [1.00,   0, 200, 255],
-]
-
-function strainColor(strain, breakStrain) {
-  const t = Math.min(1, Math.abs(strain) / Math.max(breakStrain, 0.001))
-  for (let k = 0; k < COLOR_STOPS.length - 1; k++) {
-    const [t0, r0, g0, b0] = COLOR_STOPS[k]
-    const [t1, r1, g1, b1] = COLOR_STOPS[k + 1]
-    if (t <= t1) {
-      const u = (t - t0) / (t1 - t0)
-      return `rgb(${Math.round(r0 + (r1 - r0) * u)},${Math.round(g0 + (g1 - g0) * u)},${Math.round(b0 + (b1 - b0) * u)})`
-    }
-  }
-  return 'rgb(0,200,255)'
-}
-
-function fillLens(ctx, ax, ay, bx, by, bondRound) {
-  const len = Math.hypot(bx - ax, by - ay)
-  if (len < 0.5) return
-  const ux = (bx - ax) / len, uy = (by - ay) / len
-  const px = -uy, py = ux
-  const mx = (ax + bx) / 2, my = (ay + by) / 2
-  const halfL = Math.min(len * 0.40, 7)
-  const r  = Math.min(bondRound, halfL * 0.65)
-  const cp = halfL * 0.45
-  ctx.beginPath()
-  ctx.moveTo(mx - halfL * ux, my - halfL * uy)
-  ctx.bezierCurveTo(
-    mx - cp * ux + r * px, my - cp * uy + r * py,
-    mx + cp * ux + r * px, my + cp * uy + r * py,
-    mx + halfL * ux, my + halfL * uy,
-  )
-  ctx.bezierCurveTo(
-    mx + cp * ux - r * px, my + cp * uy - r * py,
-    mx - cp * ux - r * px, my - cp * uy - r * py,
-    mx - halfL * ux, my - halfL * uy,
-  )
-  ctx.closePath()
-}
-
-const ATOM_COLOR = { Si: '#d4a020', O: '#cc3a3a', Ca: '#4a96be', Na: '#4aaa60' }
-
-export function drawPhysics(canvas, phys, svgW, svgH, lerpT = 1, debug = false, bondNums = false) {
-  if (!canvas || !phys) return
-  const dpr = window.devicePixelRatio || 1
-  const W   = canvas.clientWidth
-  const H   = canvas.clientHeight
-  if (!W || !H) return
-  const cw = Math.round(W * dpr), ch = Math.round(H * dpr)
-  if (canvas.width !== cw || canvas.height !== ch) { canvas.width = cw; canvas.height = ch }
-
-  const ctx   = canvas.getContext('2d')
-  const scale = Math.min(W / svgW, H / svgH) * dpr
-  const offX  = (W * dpr - svgW * scale) / 2
-  const offY  = (H * dpr - svgH * scale) / 2
-
-  // Clear full canvas first (covers letterbox areas)
-  ctx.save()
-  ctx.setTransform(1, 0, 0, 1, 0, 0)
-  ctx.fillStyle = '#1a1a1a'
-  ctx.fillRect(0, 0, cw, ch)
-  ctx.restore()
-
-  ctx.setTransform(scale, 0, 0, scale, offX, offY)
-  ctx.beginPath()
-  ctx.rect(0, 0, SIM_W, SIM_H)
-  ctx.clip()
-  ctx.fillStyle = '#1a1a1a'
-  ctx.fillRect(0, 0, SIM_W, SIM_H)
-
-  const { particles, bonds, chunks } = phys
-
-  // ── Chunk outline traces ──
-  if (chunks) {
-    for (const chunk of chunks) {
-      if (!chunk.pIdxs.length) continue
-      const pts = chunk.pIdxs.map(i => {
-        const p = particles[i]
-        return lerpT < 1
-          ? [p.px + (p.x - p.px) * lerpT, p.py + (p.y - p.py) * lerpT]
-          : [p.x, p.y]
-      })
-      let cx = 0, cy = 0
-      for (const [x, y] of pts) { cx += x; cy += y }
-      cx /= pts.length; cy /= pts.length
-      const currSpread = pts.reduce((s, [x, y]) => s + Math.hypot(x - cx, y - cy), 0) / pts.length
-      const spreadRatio = currSpread / chunk.origSpread
-      const alpha = Math.max(0, 1 - (spreadRatio - 1.0) / 0.30)
-      if (alpha < 0.01) continue
-      const hull = convexHull(pts)
-      if (hull.length < 2) continue
-      ctx.beginPath()
-      ctx.moveTo(hull[0][0], hull[0][1])
-      for (let i = 1; i < hull.length; i++) ctx.lineTo(hull[i][0], hull[i][1])
-      ctx.closePath()
-      ctx.globalAlpha = alpha * 0.18; ctx.fillStyle = chunk.bg; ctx.fill()
-      ctx.globalAlpha = alpha * 0.80; ctx.strokeStyle = chunk.bdr; ctx.lineWidth = 1.5; ctx.stroke()
-    }
-    ctx.globalAlpha = 1
-  }
-
-  // ── Bonds — lens shapes colored by strain ──
-  ctx.globalAlpha = 0.60
-  for (const bond of bonds) {
-    const pi = particles[bond.i], pj = particles[bond.j]
-    const x1 = lerpT < 1 ? pi.px + (pi.x - pi.px) * lerpT : pi.x
-    const y1 = lerpT < 1 ? pi.py + (pi.y - pi.py) * lerpT : pi.y
-    const x2 = lerpT < 1 ? pj.px + (pj.x - pj.px) * lerpT : pj.x
-    const y2 = lerpT < 1 ? pj.py + (pj.y - pj.py) * lerpT : pj.y
-    ctx.fillStyle = strainColor(bond.strain, bond.currentBreakStrain)
-    fillLens(ctx, x1, y1, x2, y2, 1.4)
-    ctx.fill()
-    ctx.strokeStyle = '#111'; ctx.lineWidth = 0.6; ctx.stroke()
-  }
-  ctx.globalAlpha = 1
-
-  // ── Atoms ──
-  ctx.globalAlpha = 0.88
-  for (const p of particles) {
-    const rx = lerpT < 1 ? p.px + (p.x - p.px) * lerpT : p.x
-    const ry = lerpT < 1 ? p.py + (p.y - p.py) * lerpT : p.y
-    ctx.fillStyle = ATOM_COLOR[p.type] ?? '#fff'
-    ctx.beginPath(); ctx.arc(rx, ry, p.r, 0, Math.PI * 2); ctx.fill()
-  }
-  ctx.globalAlpha = 1
-
-  // ── Debug overlay ─────────────────────────────────────────────────────────
-  if (bondNums) {
-    const n = particles.length
-    const bondCnt = new Int32Array(n)
-    for (const { i, j } of bonds) { bondCnt[i]++; bondCnt[j]++ }
-
-    if (bondNums) {
-      // Bond-count label on every atom (outlined for readability on any background)
-      ctx.textAlign    = 'center'
-      ctx.textBaseline = 'middle'
-      ctx.font         = '6px monospace'
-      for (let i = 0; i < n; i++) {
-        const p  = particles[i]
-        const rx = lerpT < 1 ? p.px + (p.x - p.px) * lerpT : p.x
-        const ry = lerpT < 1 ? p.py + (p.y - p.py) * lerpT : p.y
-        const cnt = bondCnt[i]
-        const tgt = COORD_TARGET[p.typeId] ?? 2
-        const col = cnt >= tgt ? '#00ff66' : cnt > 0 ? '#ffcc00' : '#ff4444'
-        ctx.lineWidth   = 2.5
-        ctx.strokeStyle = '#000'
-        ctx.globalAlpha = 0.9
-        ctx.strokeText(String(cnt), rx, ry)
-        ctx.fillStyle   = col
-        ctx.globalAlpha = 1
-        ctx.fillText(String(cnt), rx, ry)
-      }
-    }
-  }
-
-  ctx.setTransform(1, 0, 0, 1, 0, 0)
-}

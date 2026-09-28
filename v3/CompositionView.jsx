@@ -1,9 +1,10 @@
 import { useMemo, useRef, useEffect } from 'react'
-import { initPhysics, stepPhysics, crystallize, setSiOr0,
-         computeAmorphousTargets, computeSlowCoolTargets, initPrecompute, stepPrecompute,
+import { initPhysics, stepPhysics, setSiOr0,
          rebuildBonds, computeKE, computeBondedKE, computePE, ENERGY_UNIT, THERMAL_SPEED,
-         buildRigidBondMap } from './meltPhysics.js'
-import { drawScene } from './renderer.js'
+         buildRigidBondMap, setSioExclMult, setBreakStrain, setReformStrain, setCrystAnchorK, setLiberateFrac, setSioK, setNaOK,
+         setNaAnchorK, setNaLiberateFrac, setNaBreakStrain, setLatticeSpeedMult, setFreedSpeedMult,
+         resetLibStats, getLibStats } from './meltPhysics.js'
+import { drawScene, setVisualScale, findAtomNear, getVisualScale, getLastHudLines } from './renderer.js'
 
 const VW      = 600
 const VH_GRID = 350
@@ -14,53 +15,15 @@ const CELL_W  = VW / COLS       // 120
 const CELL_H  = VH_GRID / ROWS  // 87.5
 
 // SI_A is derived from sioR0 at call time (SI_A = 2 * sioR0)
-const NA_A = 32   // Na-O bond: O at midpoints = 16px = r0_NaO
+const NA_A = 24   // Na-O bond: O at midpoints = 12px = r0_NaO
 const CA_A = 24   // Ca-O bond: O at midpoints = 12px = r0_CaO
 
-const GRAIN_MARGIN = 2
+const GRAIN_MARGIN = 5
 
 // Cooling durations in RAF frames (≈60 fps)
 const FAST_COOL_FRAMES = 270   // ~4.5 s wall-clock
-const SLOW_COOL_FRAMES = 1080  // ~18 s wall-clock
-const CRYST_INTERVAL   = 10    // frames between crystallization checks during slow cool
+const SLOW_COOL_FRAMES = 1440  // ~24 s wall-clock
 
-// Composition-dependent crystallization parameters.
-// threshold: °C below which the check starts
-// minCluster: minimum connected hex-environment Si atoms to trigger nudge
-// strength: fraction of displacement corrected per check (0 → 1)
-// angleTol: degrees tolerance on each 120° gap in the Si-O ring
-function countBonds(phys) {
-  if (!phys?.rigidBonds || !phys?.particles) return null
-  const r = { sio: { intact: 0, total: 0 }, nao: { intact: 0, total: 0 }, cao: { intact: 0, total: 0 } }
-  for (const b of phys.rigidBonds) {
-    const ti = phys.particles[b.i].typeId, tj = phys.particles[b.j].typeId
-    let cat
-    if (!b.breakable)              cat = 'sio'
-    else if (ti === 2 || tj === 2) cat = 'nao'
-    else if (ti === 3 || tj === 3) cat = 'cao'
-    else continue
-    r[cat].total++
-    if (!b.broken) r[cat].intact++
-  }
-  return r
-}
-
-function getCrystParams(sio2Pct, na2oPct, caoPct) {
-  const add = na2oPct + caoPct
-  if (add <= 5) {
-    // Pure SiO₂ — hex rings form readily across large domains
-    return { threshold: 500, minCluster: 4, strength: 0.14, angleTol: 25 }
-  } else if (na2oPct >= 25 && caoPct <= 5) {
-    // High Na₂O — Na disrupts network; fewer, smaller crystal domains
-    return { threshold: 400, minCluster: 5, strength: 0.07, angleTol: 20 }
-  } else if (add >= 40) {
-    // Too many additives — ionic clusters nucleate easily; relaxed threshold
-    return { threshold: 450, minCluster: 3, strength: 0.16, angleTol: 30 }
-  } else {
-    // Soda-lime / moderate mixed — mixed ion sizes prevent sustained alignment
-    return { threshold: 300, minCluster: 7, strength: 0.04, angleTol: 15 }
-  }
-}
 
 const C = {
   Si: '#d4a020', O: '#cc3a3a', Ca: '#4a96be', Na: '#4aaa60',
@@ -143,7 +106,7 @@ function buildHexLayer(a, chunkFilter, types, cationType, catRadius) {
       const ox = (cats[i].x + cats[j].x) / 2, oy = (cats[i].y + cats[j].y) / 2
       const col = Math.min(COLS - 1, Math.max(0, Math.floor(ox / CELL_W)))
       const row = Math.min(ROWS - 1, Math.max(0, Math.floor(oy / CELL_H)))
-      oAtoms.push({ x: ox, y: oy, type: 'O', r: 2.5, chunkIdx: row * COLS + col })
+      oAtoms.push({ x: ox, y: oy, type: 'O', r: 2.3, chunkIdx: row * COLS + col })
     }
   }
   return { cats, oAtoms }
@@ -185,7 +148,7 @@ function buildSquareLayer(a, chunkFilter, types, cationType, catRadius) {
       const ox = (cats[i].x + cats[j].x) / 2, oy = (cats[i].y + cats[j].y) / 2
       const col = Math.min(COLS - 1, Math.max(0, Math.floor(ox / CELL_W)))
       const row = Math.min(ROWS - 1, Math.max(0, Math.floor(oy / CELL_H)))
-      oAtoms.push({ x: ox, y: oy, type: 'O', r: 2.5, chunkIdx: row * COLS + col })
+      oAtoms.push({ x: ox, y: oy, type: 'O', r: 2.3, chunkIdx: row * COLS + col })
     }
   }
   return { cats, oAtoms }
@@ -193,9 +156,9 @@ function buildSquareLayer(a, chunkFilter, types, cationType, catRadius) {
 
 function buildAllAtoms(types, sioR0) {
   const siA = 2 * sioR0   // Si-Si spacing so O midpoints land at exactly sioR0 from Si
-  const si  = buildHexLayer(siA,  'SiO2', types, 'Si', 3.5)
-  const na  = buildSquareLayer(NA_A, 'Na2O', types, 'Na', 4)
-  const ca  = buildSquareLayer(CA_A, 'CaO',  types, 'Ca', 5)
+  const si  = buildHexLayer(siA,  'SiO2', types, 'Si', 3.2)
+  const na  = buildSquareLayer(NA_A, 'Na2O', types, 'Na', 3.6)
+  const ca  = buildSquareLayer(CA_A, 'CaO',  types, 'Ca', 4.5)
   return [...si.cats, ...na.cats, ...ca.cats, ...si.oAtoms, ...na.oAtoms, ...ca.oAtoms]
 }
 
@@ -211,12 +174,18 @@ function setupCanvas(canvas) {
   return { ctx, w, h }
 }
 
-function drawTEGraph(canvas, hist) {
+function fmtE(v) {
+  return v >= 1000 ? `${(v / 1000).toFixed(v % 1000 === 0 ? 0 : 1)}k` : String(v)
+}
+
+function drawTEGraph(canvas, hist, xMax = 5000) {
   const s = setupCanvas(canvas)
   if (!s) return
   const { ctx, w, h } = s
   const pL = 34, pR = 8, pT = 6, pB = 18
   const pw = w - pL - pR, ph = h - pT - pB
+
+  const tMax = 2000
 
   ctx.clearRect(0, 0, w, h)
   ctx.fillStyle = 'rgba(8,6,4,0.82)'
@@ -231,12 +200,12 @@ function drawTEGraph(canvas, hist) {
 
   // Axis labels
   ctx.fillStyle = '#555'; ctx.font = '9px monospace'; ctx.textAlign = 'right'; ctx.textBaseline = 'middle'
-  ctx.fillText('2000', pL - 2, pT)
+  ctx.fillText(fmtE(tMax), pL - 2, pT)
   ctx.fillText('0', pL - 2, pT + ph)
   ctx.textAlign = 'center'; ctx.textBaseline = 'top'
   ctx.fillText('0', pL, pT + ph + 2)
-  ctx.fillText('2000', pL + pw, pT + ph + 2)
-  ctx.fillText('Energy →', pL + pw / 2, pT + ph + 2)
+  ctx.fillText(fmtE(xMax), pL + pw, pT + ph + 2)
+  ctx.fillText('← drag to scale →', pL + pw / 2, pT + ph + 2)
   ctx.save(); ctx.translate(9, pT + ph / 2); ctx.rotate(-Math.PI / 2)
   ctx.fillText('Temp °C', 0, 0)
   ctx.restore()
@@ -249,7 +218,7 @@ function drawTEGraph(canvas, hist) {
   ]
   ctx.font = '8px monospace'; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom'
   for (const z of zones) {
-    const zy = pT + ph - (z.t / 2000) * ph
+    const zy = pT + ph - (z.t / tMax) * ph
     if (zy < pT || zy > pT + ph) continue
     ctx.strokeStyle = z.color; ctx.lineWidth = 1; ctx.setLineDash([3, 3])
     ctx.beginPath(); ctx.moveTo(pL, zy); ctx.lineTo(pL + pw, zy); ctx.stroke()
@@ -264,16 +233,16 @@ function drawTEGraph(canvas, hist) {
   ctx.strokeStyle = '#c07040'; ctx.lineWidth = 1.5; ctx.lineJoin = 'round'
   ctx.beginPath()
   for (let i = 0; i < n; i++) {
-    const x = pL + (hist[i].e / 2000) * pw
-    const y = pT + ph - (Math.max(0, hist[i].t) / 2000) * ph
+    const x = pL + (hist[i].e / xMax) * pw
+    const y = pT + ph - (Math.max(0, hist[i].t) / tMax) * ph
     i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)
   }
   ctx.stroke()
 
   // Current point dot
   const last = hist[n - 1]
-  const lx = pL + (last.e / 2000) * pw
-  const ly = pT + ph - (Math.max(0, last.t) / 2000) * ph
+  const lx = pL + (last.e / xMax) * pw
+  const ly = pT + ph - (Math.max(0, last.t) / tMax) * ph
   ctx.fillStyle = '#ffaa60'; ctx.beginPath(); ctx.arc(lx, ly, 3, 0, Math.PI * 2); ctx.fill()
 }
 
@@ -329,7 +298,21 @@ function LegendDot({ cx, cy, r, fill, label }) {
   )
 }
 
-export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, attractK = 0, debug = false, bondNums = false, precompute = false, meltTemp = 700, simSpeed = 1, coolingMode = null, onTempUpdate = null, onEnergyUpdate = null, onBondCounts = null, replayFrame = null, onReplayReady = null, showGraphs = false, darkMode = true, showCharge = false, showField = true }) {
+function countBonds(phys) {
+  const counts = { sio: { intact: 0, total: 0 }, nao: { intact: 0, total: 0 }, cao: { intact: 0, total: 0 } }
+  if (!phys?.rigidBonds || !phys?.particles) return counts
+  const ps = phys.particles
+  for (const rb of phys.rigidBonds) {
+    const ti = ps[rb.i].typeId, tj = ps[rb.j].typeId
+    const key = rb.isSiO ? 'sio' : ((ti === 2 || tj === 2) ? 'nao' : ((ti === 3 || tj === 3) ? 'cao' : null))
+    if (!key) continue
+    counts[key].total++
+    if (!rb.broken) counts[key].intact++
+  }
+  return counts
+}
+
+export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, attractK = 0, attractFalloff = 1, debug = false, bondNums = false, meltTemp = 700, simSpeed = 1, speedMult = 1, coolingMode = null, onTempUpdate = null, onEnergyUpdate = null, onBondCounts = null, replayFrame = null, onReplayReady = null, graphCanvasRef = null, cumulativeEnergyRef = null, graphXMaxRef = null, darkMode = true, showCharge = false, showField = true, atomColorMode = 'normal', showBrokenBonds = false, showLiveStats = false }) {
   const types = useMemo(
     () => buildGrid(sio2Pct, na2oPct, caoPct),
     [sio2Pct, na2oPct, caoPct]
@@ -349,31 +332,40 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
 
   // ── Physics refs ──────────────────────────────────────────────
   const canvasRef           = useRef(null)
-  const graphTERef          = useRef(null)   // T-vs-E history graph canvas
-  const graphBarRef         = useRef(null)   // KE/PE bar chart canvas
+  const graphBarRef         = useRef(null)   // KE/PE bar chart canvas (unused)
   const physRef             = useRef(null)
   const rafRef              = useRef(null)
   const energyValRef        = useRef(meltTemp)
   const speedRef            = useRef(simSpeed)
   const coolingRef          = useRef(coolingMode)
-  const showGraphsRef       = useRef(showGraphs)
+  const graphCanvasRefRef        = useRef(graphCanvasRef)
+  const cumulativeEnergyRefRef   = useRef(cumulativeEnergyRef)
+  const graphXMaxRefRef          = useRef(graphXMaxRef)
   const frameAccRef         = useRef(0)
+  const stepCallCountRef    = useRef(0)   // diagnostic: total stepPhysics calls
+  const diagDoneRef         = useRef(false)  // diagnostic: first-10-calls log emitted
   const smoothTempRef       = useRef(25)  // EMA of derivedTempC for stable readout
   // Cooling/heating state (energy-based)
   const effectiveERef       = useRef((meltTemp + 273) * ENERGY_UNIT)  // ePerParticle during ramp
   const prevCoolingRef      = useRef(null)
   const coolingStartERef    = useRef((meltTemp + 273) * ENERGY_UNIT)
   const coolingFrameRef     = useRef(0)
-  const crystParamsRef      = useRef(getCrystParams(sio2Pct, na2oPct, caoPct))
   const onTempUpdateRef     = useRef(onTempUpdate)
   const onEnergyUpdateRef   = useRef(onEnergyUpdate)
   const attractKRef         = useRef(attractK)
+  const attractFalloffRef   = useRef(attractFalloff)
+  const speedMultRef        = useRef(speedMult)
   const debugRef            = useRef(debug)
   const bondNumsRef         = useRef(bondNums)
-  const precomputeRef       = useRef(precompute)
   const darkModeRef         = useRef(darkMode)
   const showChargeRef       = useRef(showCharge)
   const showFieldRef        = useRef(showField)
+  const atomColorModeRef    = useRef(atomColorMode)
+  const showBrokenBondsRef  = useRef(showBrokenBonds)
+  const showLiveStatsRef    = useRef(showLiveStats)
+  const hoverIdxRef         = useRef(null)
+  const lastHoverIdxRef     = useRef(null)
+  const selectedIdxRef      = useRef(-1)
   const replayFrameRef      = useRef(replayFrame)
   const onReplayReadyRef    = useRef(onReplayReady)
   const replayBufferRef     = useRef([])
@@ -387,16 +379,82 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
   useEffect(() => { onTempUpdateRef.current = onTempUpdate }, [onTempUpdate])
   useEffect(() => { onEnergyUpdateRef.current = onEnergyUpdate }, [onEnergyUpdate])
   useEffect(() => { attractKRef.current = attractK }, [attractK])
+  useEffect(() => { attractFalloffRef.current = attractFalloff }, [attractFalloff])
+  useEffect(() => { speedMultRef.current = speedMult }, [speedMult])
   useEffect(() => { debugRef.current = debug }, [debug])
   useEffect(() => { bondNumsRef.current = bondNums }, [bondNums])
-  useEffect(() => { precomputeRef.current = precompute }, [precompute])
   useEffect(() => { darkModeRef.current = darkMode }, [darkMode])
   useEffect(() => { showChargeRef.current = showCharge }, [showCharge])
   useEffect(() => { showFieldRef.current = showField }, [showField])
+  useEffect(() => { atomColorModeRef.current = atomColorMode }, [atomColorMode])
+  useEffect(() => { showBrokenBondsRef.current = showBrokenBonds }, [showBrokenBonds])
+  useEffect(() => { showLiveStatsRef.current = showLiveStats }, [showLiveStats])
   useEffect(() => { replayFrameRef.current = replayFrame }, [replayFrame])
   useEffect(() => { onReplayReadyRef.current = onReplayReady }, [onReplayReady])
   useEffect(() => { onBondCountsRef.current = onBondCounts }, [onBondCounts])
-  useEffect(() => { showGraphsRef.current = showGraphs }, [showGraphs])
+  useEffect(() => { graphCanvasRefRef.current = graphCanvasRef }, [graphCanvasRef])
+  useEffect(() => { cumulativeEnergyRefRef.current = cumulativeEnergyRef }, [cumulativeEnergyRef])
+  useEffect(() => { graphXMaxRefRef.current = graphXMaxRef }, [graphXMaxRef])
+
+  // Hover highlight: mousemove tracks nearest atom for the white ring in renderer
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const toPhys = e => {
+      const rect  = canvas.getBoundingClientRect()
+      const dpr   = window.devicePixelRatio || 1
+      const W     = canvas.clientWidth, H = canvas.clientHeight
+      const scale = Math.min(W / 600, H / 350) * dpr
+      const offX  = (W * dpr - 600 * scale) / 2
+      const offY  = (H * dpr - 350 * scale) / 2
+      return [(e.clientX - rect.left) * dpr, (e.clientY - rect.top) * dpr, scale, offX, offY]
+    }
+    const onMove = e => {
+      const phys = physRef.current
+      if (!phys) return
+      const [cx, cy, scale, offX, offY] = toPhys(e)
+      hoverIdxRef.current = findAtomNear(phys, (cx - offX) / scale, (cy - offY) / scale, getVisualScale())
+    }
+    const onClick = e => {
+      const phys = physRef.current
+      if (!phys) return
+      const [cx, cy, scale, offX, offY] = toPhys(e)
+      const idx = findAtomNear(phys, (cx - offX) / scale, (cy - offY) / scale, getVisualScale())
+      if (idx < 0) return
+      selectedIdxRef.current = selectedIdxRef.current === idx ? -1 : idx
+      const p    = phys.particles[idx]
+      const lf   = phys.latticeFreed?.[idx] ?? 0
+      const ic   = phys.intactCount?.[idx]  ?? 0
+      const orig = phys.originalBondCount?.[idx] ?? '?'
+      const spd  = Math.hypot(p.vx, p.vy).toExponential(3)
+      const dist = Math.hypot(p.x - p.x0, p.y - p.y0).toFixed(1)
+      let bc = 0
+      for (const b of (phys.bonds ?? [])) { if (b.i === idx || b.j === idx) bc++ }
+      const tgt  = [3, 2, 1, 2][p.typeId] ?? 2
+      const elig = bc < tgt ? 'attract-eligible' : 'NOT attract-eligible'
+      const rbInfo = (phys.rigidBonds ?? [])
+        .filter(rb => rb.i === idx || rb.j === idx)
+        .map(rb => {
+          const other  = rb.i === idx ? rb.j : rb.i
+          const po     = phys.particles[other]
+          const d      = Math.hypot(p.x - po.x, p.y - po.y).toFixed(1)
+          const bEntry = (phys.bonds ?? []).find(b => (b.i===rb.i && b.j===rb.j) || (b.i===rb.j && b.j===rb.i))
+          const strain = bEntry ? bEntry.strain?.toFixed(3) : '—'
+          return `  → ${po.type}#${other}  d=${d}px  strain=${strain}  broken:${rb.broken}`
+        })
+      console.log(
+        `[click] atom #${idx} ${p.type} (${p.cellType})\n` +
+        `  latticeFreed: ${lf}\n` +
+        `  intactCount: ${ic}  (originalBondCount: ${orig})\n` +
+        `  bondCount(attract): ${bc}  COORD_TARGET: ${tgt}  → ${elig}\n` +
+        `  dist from x0: ${dist}px  speed: ${spd} px/step\n` +
+        `  rigid bonds:\n` + (rbInfo.length ? rbInfo.join('\n') : '  (none)')
+      )
+    }
+    canvas.addEventListener('mousemove', onMove)
+    canvas.addEventListener('click', onClick)
+    return () => { canvas.removeEventListener('mousemove', onMove); canvas.removeEventListener('click', onClick) }
+  }, [])   // eslint-disable-line react-hooks/exhaustive-deps
 
   // Keep the physics module's Si-O r0 in sync with the slider
   useEffect(() => { setSiOr0(sioR0) }, [sioR0])
@@ -411,11 +469,6 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
   useEffect(() => { speedRef.current = simSpeed }, [simSpeed])
   useEffect(() => { coolingRef.current = coolingMode }, [coolingMode])
 
-  // Recompute crystallization params when composition changes
-  useEffect(() => {
-    crystParamsRef.current = getCrystParams(sio2Pct, na2oPct, caoPct)
-  }, [sio2Pct, na2oPct, caoPct])
-
   // Rebuild physics when composition changes
   useEffect(() => {
     physRef.current = initPhysics(cellData)
@@ -425,36 +478,301 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
     const eSettle = 1 * ENERGY_UNIT
     for (let s = 0; s < 5; s++) stepPhysics(physRef.current, eSettle)
     buildRigidBondMap(physRef.current)
+    // Measurement-only bookkeeping arrays — no physics effect
+    const _nb = physRef.current.rigidBonds.length
+    physRef.current.everBroken      = new Uint8Array(_nb)
+    physRef.current.wasIntact       = new Uint8Array(_nb).fill(1)
+    physRef.current.currentIntact   = new Int32Array(_nb)
+    physRef.current.lifetimeTotal   = new Float64Array(_nb)
+    physRef.current.lifetimeBreaks  = new Int32Array(_nb)
+    physRef.current.totalEnergyAdded = 0
+    physRef.current.cumulativeKE    = 0
+    // Per-cation intra-grain bond index list — for whole-unit (per-Si/Na/Ca) tracking.
+    // A bond is intra-unit when both atoms share chunkIdx; inter-unit when they don't.
+    const _pArr2 = physRef.current.particles
+    const _rb2   = physRef.current.rigidBonds
+    const _unitBonds = new Array(physRef.current.n).fill(null)
+    for (let _bi = 0; _bi < _rb2.length; _bi++) {
+      const { i: _i, j: _j } = _rb2[_bi]
+      const _pi = _pArr2[_i], _pj = _pArr2[_j]
+      if (_pi.typeId !== 1 && _pj.typeId === 1 && _pi.chunkIdx === _pj.chunkIdx) {
+        if (!_unitBonds[_i]) _unitBonds[_i] = []
+        _unitBonds[_i].push(_bi)
+      }
+      if (_pj.typeId !== 1 && _pi.typeId === 1 && _pi.chunkIdx === _pj.chunkIdx) {
+        if (!_unitBonds[_j]) _unitBonds[_j] = []
+        _unitBonds[_j].push(_bi)
+      }
+    }
+    physRef.current.unitBonds = _unitBonds
     // Warm particles to the current target so the visual doesn't start cold
     const eWarm = (energyValRef.current + 273) * ENERGY_UNIT
     for (let s = 0; s < 20; s++) stepPhysics(physRef.current, eWarm)
     smoothTempRef.current = energyValRef.current  // seed EMA at known target (25°C)
     frameAccRef.current = 0
+    histRef.current = []
 
+    window.bondAudit = () => {
+      const phys = physRef.current
+      if (!phys) return console.log('no physics state')
+      const p = phys.particles, lf = phys.latticeFreed
+      const rows = phys.bonds
+        .filter(b => lf?.[b.i] && lf?.[b.j])
+        .map(b => {
+          const r0s = Math.hypot(p[b.j].x0 - p[b.i].x0, p[b.j].y0 - p[b.i].y0)
+          const actualD = Math.hypot(p[b.j].x - p[b.i].x, p[b.j].y - p[b.i].y)
+          // Both atoms are freed (filter above guarantees this), so renderer uses bond.strain
+          // directly — the r0s path is bypassed by the iFreed && jFreed guard in renderer.js.
+          return {
+            pair: `${p[b.i].type}-${p[b.j].type}`,
+            r0s_orig: Math.round(r0s),
+            actualD: Math.round(actualD),
+            bondStrain: b.strain?.toFixed(3),
+            renderedStrain: b.strain?.toFixed(3),
+          }
+        })
+        .sort((a, b) => b.r0s_orig - a.r0s_orig)
+      console.log(`── freed-pair bonds (${rows.length}) ──`)
+      console.table(rows.slice(0, 20))
+      console.log('renderedStrain = bondStrain for all rows (both-freed guard active in renderer)')
+    }
+    window.setMeltTemp    = (tempC) => { energyValRef.current = tempC }
+    window.setSioExclMult = (v)    => setSioExclMult(v)
+    window.setBreakStrain  = (v)   => setBreakStrain(v)
+    window.setReformStrain = (v)   => setReformStrain(v)
+    window.setCrystAnchorK = (v)   => setCrystAnchorK(v)
+    window.setLiberateFrac = (v)   => setLiberateFrac(v)
+    window.setSioK         = (v)   => setSioK(v)
+    window.setNaOK         = (v)   => setNaOK(v)
+    window.getDisplacementStats = () => {
+      const phys = physRef.current
+      if (!phys?.particles) return null
+      const { particles, n } = phys
+      let sum = 0, max = 0, over9 = 0
+      for (let i = 0; i < n; i++) {
+        const p = particles[i]
+        const d = Math.hypot(p.x - p.x0, p.y - p.y0)
+        sum += d
+        if (d > max) max = d
+        if (d > 9) over9++
+      }
+      return { mean: +(sum / n).toFixed(3), max: +max.toFixed(3), over9pct: +(over9 / n * 100).toFixed(1) }
+    }
+    window.getFreedStats = () => {
+      const phys = physRef.current
+      if (!phys?.particles || !phys?.latticeFreed) return null
+      const { particles, n, latticeFreed } = phys
+      let sioTotal = 0, sioFreed = 0, naTotal = 0, naFreed = 0
+      for (let i = 0; i < n; i++) {
+        const ct = particles[i].cellType
+        if (ct === 'SiO2') { sioTotal++; if (latticeFreed[i]) sioFreed++ }
+        else if (ct === 'Na2O') { naTotal++; if (latticeFreed[i]) naFreed++ }
+      }
+      return {
+        sioFreedPct: sioTotal ? +(sioFreed / sioTotal * 100).toFixed(1) : 0,
+        naFreedPct:  naTotal  ? +(naFreed  / naTotal  * 100).toFixed(1) : 0,
+        sioFreed, sioTotal, naFreed, naTotal,
+      }
+    }
+    window.getBreakStats = () => {
+      const phys = physRef.current
+      if (!phys?.particles) return null
+      const totalKE = computeKE(phys)   // total KE of all atoms
+      return {
+        breakKERemoved:  phys.breakKERemoved  ?? 0,
+        breakKEReturned: phys.breakKEReturned ?? 0,
+        netDrain:        (phys.breakKERemoved ?? 0) - (phys.breakKEReturned ?? 0),
+        totalKE,
+        // gross fraction of total KE drained per step by bond breaking (before reforms)
+        breakPEoverKE: totalKE > 0 ? (phys.breakKERemoved ?? 0) / totalKE : 0,
+        latticeTemp: phys.latticeTemp ?? null,
+      }
+    }
+    window.setNaAnchorK         = v => setNaAnchorK(v)
+    window.setNaLiberateFrac    = v => setNaLiberateFrac(v)
+    window.setNaBreakStrain     = v => setNaBreakStrain(v)
+    window.setLatticeSpeedMult  = v => setLatticeSpeedMult(v)
+    window.setFreedSpeedMult    = v => setFreedSpeedMult(v)
+    window.resetLibStats   = () => resetLibStats()
+    window.getLibStats     = () => getLibStats()
+    window.getStrainStats = () => {
+      const phys = physRef.current
+      if (!phys?.rigidBonds) return null
+      const { particles, rigidBonds } = phys
+      const strains = []
+      for (const rb of rigidBonds) {
+        if (rb.broken) continue
+        const pi = particles[rb.i], pj = particles[rb.j]
+        const d = Math.hypot(pj.x - pi.x, pj.y - pi.y)
+        strains.push((d - rb.r0) / rb.r0)
+      }
+      if (!strains.length) return { n: 0 }
+      strains.sort((a, b) => a - b)
+      const mean = strains.reduce((s, v) => s + v, 0) / strains.length
+      const p95  = strains[Math.floor(strains.length * 0.95)]
+      const p99  = strains[Math.floor(strains.length * 0.99)]
+      const max  = strains[strains.length - 1]
+      return { n: strains.length, mean: +mean.toFixed(4), p95: +p95.toFixed(4), p99: +p99.toFixed(4), max: +max.toFixed(4) }
+    }
+    window.resetLifetimes = () => {
+      const phys = physRef.current
+      if (!phys?.lifetimeTotal) return
+      phys.lifetimeTotal.fill(0)
+      phys.lifetimeBreaks.fill(0)
+      phys.currentIntact.fill(0)
+      const rb = phys.rigidBonds
+      if (rb) for (let i = 0; i < rb.length; i++) phys.wasIntact[i] = rb[i].broken ? 0 : 1
+    }
+    window.getKERatio = () => {
+      const phys = physRef.current
+      if (!phys) return null
+      const n = phys.n
+      const ke = computeKE(phys)
+      const d  = phys.dbg || {}
+      if (d.totalEnergy == null) return null
+      const targetKE = (d.totalEnergy + 273) * ENERGY_UNIT * n
+      return { ke, targetKE, ratio: ke / targetKE, tempC: Math.round(ke / (n * ENERGY_UNIT) - 273) }
+    }
+    window.getSioStats = () => {
+      const phys = physRef.current
+      if (!phys || !phys.rigidBonds) return null
+      const { particles, rigidBonds, latticeFreed, n } = phys
+      const isBonded = new Uint8Array(n)
+      for (const b of (phys.bonds ?? [])) { if (!b.broken) { isBonded[b.i] = 1; isBonded[b.j] = 1 } }
+      const idxs = []
+      for (let i = 0; i < n; i++) if (particles[i].cellType === 'SiO2') idxs.push(i)
+      if (!idxs.length) return null
+      const nBonded = idxs.filter(i => isBonded[i]).length
+      let ltTotal = 0, ltBreaks = 0
+      for (let bi = 0; bi < rigidBonds.length; bi++) {
+        if (particles[rigidBonds[bi].i].cellType === 'SiO2') {
+          ltTotal  += phys.lifetimeTotal?.[bi]  ?? 0
+          ltBreaks += phys.lifetimeBreaks?.[bi] ?? 0
+        }
+      }
+      return {
+        bondedPct:  Math.round(nBonded / idxs.length * 100),
+        meanLifeFr: ltBreaks > 0 ? Math.round(ltTotal / ltBreaks) : null,
+      }
+    }
     window.meltDebug = () => {
       const phys = physRef.current
       if (!phys) return console.log('no physics state')
+      const { particles, rigidBonds, latticeFreed, chunks } = phys
+      const n = phys.n
       const d = phys.dbg || {}
-      console.log('── melt debug ──────────────────────────────')
+
+      // ── System ─────────────────────────────────────────────────────────
+      const ke              = computeKE(phys)
+      const { ke: bonKE }  = computeBondedKE(phys)
+      const bpe   = phys.bondBreakPE  ?? 0
+      const cumKE = phys.cumulativeKE ?? 0
+      const totE  = phys.totalEnergyAdded ?? 0
+      const targetKE = d.totalEnergy != null ? (d.totalEnergy + 273) * ENERGY_UNIT * n : null
+      const keRatio  = targetKE ? (ke / targetKE).toFixed(4) : '—'
+      console.log('── system ──────────────────────────────────────────────')
       console.table({
-        totalEnergy:   d.totalEnergy   ?? '?',
-        derivedTempC:  d.derivedTempC  ?? '?',
-        hasBeenMelted: d.hasBeenMelted ?? '?',
-        anchorStr:     d.anchorStr     ?? '?',
-        wanderLimit:   d.wanderLimit   ?? '?',
+        'tempC (target)':   d.totalEnergy ?? Math.round(ke / (n * ENERGY_UNIT) - 273),
+        'tempC (total KE)': Math.round(ke / (n * ENERGY_UNIT) - 273),
+        'KE/target ratio':  keRatio,
+        KE:               ke.toExponential(3),
+        bondedKE:         bonKE.toExponential(3),
+        'KE/bondedKE':    bonKE > 0 ? (ke / bonKE).toFixed(3) : '—',
+        bondBreakPE:      bpe.toExponential(3),
+        cumulativeKE:     cumKE.toExponential(3),
+        'breakPE/cumKE':  cumKE > 0 ? (bpe / cumKE).toFixed(4) : '—',
+        totalEnergyAdded: totE.toExponential(3),
+        hasBeenMelted:    d.hasBeenMelted ?? '?',
+        anchorStr:        d.anchorStr     ?? '?',
       })
+
+      if (!rigidBonds || !phys.everBroken) {
+        console.log('bond bookkeeping not yet initialized')
+        return
+      }
+
+      // Atoms with at least one live bond (rigid or dynamic, not broken)
+      const isBonded = new Uint8Array(n)
+      for (const b of (phys.bonds ?? [])) { if (!b.broken) { isBonded[b.i] = 1; isBonded[b.j] = 1 } }
+
+      // Intra-unit bond: both atoms share chunkIdx in original rigid bond map
+      const isIntraUnit = new Uint8Array(rigidBonds.length)
+      for (let bi = 0; bi < rigidBonds.length; bi++) {
+        const { i, j } = rigidBonds[bi]
+        if (particles[i].chunkIdx === particles[j].chunkIdx) isIntraUnit[bi] = 1
+      }
+
+      // ── Per-species stats ───────────────────────────────────────────────
+      // whole% = cation atoms (Si/Na/Ca) with no ever-broken intra-grain bonds / total cations
+      const CATION_TYPE = { SiO2: 0, Na2O: 2, CaO: 3 }
+      console.log('── per species ─────────────────────────────────────────')
+      const specRows = {}
+      for (const species of ['SiO2', 'Na2O', 'CaO']) {
+        const specAtomIdxs = []
+        for (let i = 0; i < n; i++) if (particles[i].cellType === species) specAtomIdxs.push(i)
+        if (!specAtomIdxs.length) continue
+
+        const cationTid = CATION_TYPE[species]
+        const cationIdxs = specAtomIdxs.filter(i => particles[i].typeId === cationTid)
+        const nAtoms      = specAtomIdxs.length
+        const nCations    = cationIdxs.length
+        const nBonded     = specAtomIdxs.filter(i => isBonded[i]).length
+        const nLiberated  = specAtomIdxs.filter(i => latticeFreed?.[i]).length
+        const nWhole   = cationIdxs.filter(i => {
+          const ub = phys.unitBonds?.[i]
+          return !ub?.length || ub.every(bi => !phys.everBroken[bi])
+        }).length
+
+        let ltTotal = 0, ltBreaks = 0
+        for (let bi = 0; bi < rigidBonds.length; bi++) {
+          const pi = particles[rigidBonds[bi].i]
+          if (pi.cellType === species) {
+            ltTotal  += phys.lifetimeTotal[bi]
+            ltBreaks += phys.lifetimeBreaks[bi]
+          }
+        }
+
+        specRows[species] = {
+          atoms:        nAtoms,
+          'bonded%':    Math.round(nBonded / nAtoms * 100) + '%',
+          'free%':      Math.round((nAtoms - nBonded) / nAtoms * 100) + '%',
+          'liberated%': Math.round(nLiberated / nAtoms * 100) + '%',
+          cations:      nCations,
+          'whole%':   nCations > 0 ? Math.round(nWhole / nCations * 100) + '%' : '—',
+          meanLifeFr: ltBreaks > 0 ? Math.round(ltTotal / ltBreaks) : '∞',
+        }
+      }
+      console.table(specRows)
+
+      // ── Bond break stats (intra-unit vs inter-unit) ─────────────────────
       if (d.bonds) {
         const rows = {}
         for (const [key, s] of Object.entries(d.bonds)) {
           rows[key] = {
-            total: s.total,
-            broken: s.broken,
+            total: s.total, broken: s.broken,
             'broken%': Math.round(s.broken / s.total * 100),
-            breakStart: s.breakStart,
-            breakFull: s.breakFull,
           }
         }
+        console.log('── bond break stats ────────────────────────────────────')
         console.table(rows)
+
+        // Intra vs inter breakdown from phys.bonds (all live bonds, broken excluded).
+        // intra = both atoms share chunkIdx (same original grain).
+        // inter = atoms from different grains — only possible for dynamic bonds formed in the melt.
+        const intra = { total: 0 }
+        const inter = { total: 0 }
+        for (const b of (phys.bonds ?? [])) {
+          if (b.broken) continue
+          const ci = particles[b.i].chunkIdx, cj = particles[b.j].chunkIdx
+          if (ci === cj) intra.total++
+          else           inter.total++
+        }
+        const bondTotal = intra.total + inter.total
+        console.log('── intra-grain vs inter-grain (live bonds, phys.bonds) ──')
+        console.table({
+          'intra-grain': { ...intra, '%': bondTotal ? Math.round(intra.total / bondTotal * 100) : '—' },
+          'inter-grain': { ...inter, '%': bondTotal ? Math.round(inter.total / bondTotal * 100) : '—' },
+        })
       }
     }
   }, [cellData])  // eslint-disable-line react-hooks/exhaustive-deps
@@ -473,15 +791,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
           coolingFrameRef.current   = 0
           replayBufferRef.current   = []
           replayNotifiedRef.current = false
-          histRef.current = []  // clear T-vs-E history on new ramp
-          if (precomputeRef.current && physRef.current && (cm === 'fast' || cm === 'slow')) {
-            const targets = cm === 'slow'
-              ? computeSlowCoolTargets(physRef.current, sio2Pct)
-              : computeAmorphousTargets(physRef.current)
-            initPrecompute(physRef.current, targets)
-          }
         } else {
-          if (physRef.current) delete physRef.current.precompute
           if (!replayNotifiedRef.current && replayBufferRef.current.length > 0) {
             replayNotifiedRef.current = true
             onReplayReadyRef.current?.(replayBufferRef.current.length)
@@ -532,73 +842,87 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
             ps[i].py = snap[i * 2 + 1]; ps[i].y = snap[i * 2 + 1]
           }
           rebuildBonds(phys)
-          drawScene(canvasRef.current, phys, { ts, bondNums: bondNumsRef.current, darkMode: darkModeRef.current, showCharge: showChargeRef.current, showField: showFieldRef.current })
+          drawScene(canvasRef.current, phys, { ts, bondNums: bondNumsRef.current, darkMode: darkModeRef.current, showCharge: showChargeRef.current, showField: showFieldRef.current, atomColorMode: atomColorModeRef.current, showBrokenBonds: showBrokenBondsRef.current, showLiveStats: showLiveStatsRef.current, targetTempC: Math.round(ePerParticle / ENERGY_UNIT - 273), hoverIdx: hoverIdxRef.current, selectedIdx: selectedIdxRef.current })
           rafRef.current = requestAnimationFrame(frame)
           return
         }
 
-        const usePrecompute = precomputeRef.current && !!phys.precompute && (cm === 'fast' || cm === 'slow')
+        const speed = speedRef.current
 
-        if (usePrecompute) {
-          const lerpRate = cm === 'fast' ? 0.04 : 0.02
-          stepPrecompute(phys, coolingFrameRef.current, lerpRate)
-          drawScene(canvasRef.current, phys, { ts, bondNums: bondNumsRef.current, darkMode: darkModeRef.current, showCharge: showChargeRef.current, showField: showFieldRef.current })
+        if (speed >= 1) {
+          const steps = Math.floor(speed)
+          for (let s = 0; s < steps; s++) {
+            for (const p of phys.particles) { p.px = p.x; p.py = p.y }
+            stepPhysics(phys, ePerParticle, 1.0, attractKRef.current, cm, speedMultRef.current, attractFalloffRef.current)
+            stepCallCountRef.current++
+            if (!diagDoneRef.current && stepCallCountRef.current <= 10) {
+              const meanSpd = phys.particles.reduce((s, p) => s + Math.hypot(p.vx, p.vy), 0) / phys.n
+              console.log(`[diag] stepPhysics call #${stepCallCountRef.current}: coolingFactor=1.0 speedMult=${speedMultRef.current.toFixed(3)} ePerParticle=${ePerParticle.toExponential(3)} meanSpeed=${meanSpd.toExponential(3)} cm=${cm}`)
+              if (stepCallCountRef.current === 10) diagDoneRef.current = true
+            }
+          }
+          frameAccRef.current = 0
         } else {
-          const speed = speedRef.current
-
-          if (speed >= 1) {
-            const steps = Math.floor(speed)
-            for (let s = 0; s < steps; s++) {
-              for (const p of phys.particles) { p.px = p.x; p.py = p.y }
-              stepPhysics(phys, ePerParticle, 1.0, attractKRef.current, cm)
-            }
-            frameAccRef.current = 0
-          } else {
-            frameAccRef.current += speed
-            if (frameAccRef.current >= 1) {
-              frameAccRef.current -= 1
-              for (const p of phys.particles) { p.px = p.x; p.py = p.y }
-              stepPhysics(phys, ePerParticle, 1.0, attractKRef.current, cm)
+          frameAccRef.current += speed
+          if (frameAccRef.current >= 1) {
+            frameAccRef.current -= 1
+            for (const p of phys.particles) { p.px = p.x; p.py = p.y }
+            stepPhysics(phys, ePerParticle, 1.0, attractKRef.current, cm, speedMultRef.current, attractFalloffRef.current)
+            stepCallCountRef.current++
+            if (!diagDoneRef.current && stepCallCountRef.current <= 10) {
+              const meanSpd = phys.particles.reduce((s, p) => s + Math.hypot(p.vx, p.vy), 0) / phys.n
+              console.log(`[diag] stepPhysics call #${stepCallCountRef.current}: coolingFactor=1.0 speedMult=${speedMultRef.current.toFixed(3)} ePerParticle=${ePerParticle.toExponential(3)} meanSpeed=${meanSpd.toExponential(3)} cm=${cm}`)
+              if (stepCallCountRef.current === 10) diagDoneRef.current = true
             }
           }
-
-          // Crystallization nudge (slow cool only, temperature-gated via derived T inside stepPhysics)
-          if (cm === 'slow') {
-            const cp = crystParamsRef.current
-            // Derive temp from current KE for the crystallize gate
-            const ke = computeKE(phys)
-            const derivedT = ke / (phys.n * ENERGY_UNIT) - 273
-            if (derivedT < cp.threshold && coolingFrameRef.current % CRYST_INTERVAL === 0) {
-              crystallize(phys, cp.strength, cp.minCluster, cp.angleTol)
-            }
-          }
-
-          drawScene(canvasRef.current, phys, { ts, bondNums: bondNumsRef.current, darkMode: darkModeRef.current, showCharge: showChargeRef.current, showField: showFieldRef.current })
         }
+
+        drawScene(canvasRef.current, phys, { ts, bondNums: bondNumsRef.current, darkMode: darkModeRef.current, showCharge: showChargeRef.current, showField: showFieldRef.current, atomColorMode: atomColorModeRef.current, showBrokenBonds: showBrokenBondsRef.current, showLiveStats: showLiveStatsRef.current, targetTempC: Math.round(ePerParticle / ENERGY_UNIT - 273), hoverIdx: hoverIdxRef.current, selectedIdx: selectedIdxRef.current })
 
         // ── KE / PE diagnostics + graph history ──────────────────────
         const ke = computeKE(phys)
         const pe = computePE(phys) + (phys.bondBreakPE ?? 0)
         // latticeTemp = keTarget/ENERGY_UNIT-273: thermostat's intended temperature,
         // free of wander-clamp KE corruption. Drops below totalEnergy when PE rises.
-        const rawTempC = Math.max(0, phys.latticeTemp ?? (ePerParticle / ENERGY_UNIT - 273))
+        const rawTempC = Math.max(0, computeKE(phys) / (phys.n * ENERGY_UNIT) - 273)
         smoothTempRef.current = smoothTempRef.current * 0.92 + rawTempC * 0.08
         const derivedTempC = Math.round(smoothTempRef.current)
         onEnergyUpdateRef.current?.(ke, pe, derivedTempC)
+        // ── Per-frame measurement bookkeeping (no physics effect) ─────────
+        if (phys.wasIntact) {
+          const rb = phys.rigidBonds
+          for (let _i = 0; _i < rb.length; _i++) {
+            if (!rb[_i].broken) {
+              phys.currentIntact[_i]++
+              phys.wasIntact[_i] = 1
+            } else {
+              phys.everBroken[_i] = 1
+              if (phys.wasIntact[_i]) {
+                phys.lifetimeTotal[_i]  += phys.currentIntact[_i]
+                phys.lifetimeBreaks[_i]++
+                phys.currentIntact[_i]   = 0
+                phys.wasIntact[_i]       = 0
+              }
+            }
+          }
+          phys.totalEnergyAdded += ePerParticle * phys.n
+          phys.cumulativeKE     += ke
+        }
 
         // Record into ring buffer (every 3 frames to avoid redundancy)
         histFrameRef.current++
         if (histFrameRef.current >= 3) {
           histFrameRef.current = 0
-          // X = energy above initial state (25°C baseline), so page-load dot is at far left (0)
-          const sliderEquiv = Math.max(0, Math.min(2000, ePerParticle / ENERGY_UNIT - 298))
-          histRef.current.push({ e: sliderEquiv, t: Math.max(-273, derivedTempC) })
+          const xVal = Math.max(0, cumulativeEnergyRefRef.current?.current ?? 0)
+          const targetTempC = Math.max(0, Math.round(ePerParticle / ENERGY_UNIT - 273))
+          histRef.current.push({ e: xVal, t: targetTempC })
         }
 
-        // ── Draw energy graphs ────────────────────────────────────────
-        if (showGraphsRef.current) {
-          drawTEGraph(graphTERef.current, histRef.current)
-          drawBarGraph(graphBarRef.current, ke, pe, phys.n)
+        // ── Draw energy graph into sidebar canvas when provided ───────
+        const extCanvas = graphCanvasRefRef.current?.current
+        if (extCanvas) {
+          const xMax = graphXMaxRefRef.current?.current ?? 5000
+          drawTEGraph(extCanvas, histRef.current, xMax)
         }
 
         // ── Record replay snapshot ────────────────────────────────────
@@ -634,14 +958,17 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
       {/* Main sim area — canvas fills 100%, graph overlaid at bottom edge when active */}
       <div style={{ position: 'relative', flex: 1, minHeight: 0 }}>
         <canvas ref={canvasRef} style={{ display: 'block', width: '100%', height: '100%' }} />
-        {showGraphs && (
-          <canvas ref={graphTERef}
+        {showLiveStats && (
+          <button
+            onClick={() => navigator.clipboard?.writeText(getLastHudLines().join('\n'))}
             style={{
-              position: 'absolute', bottom: 0, left: 0,
-              width: '100%', height: '34%',
-              pointerEvents: 'none',
+              position: 'absolute', top: 6, right: 6,
+              background: 'rgba(0,0,0,0.65)', color: '#aaa',
+              border: '1px solid #555', borderRadius: 3,
+              fontSize: 10, padding: '2px 6px', cursor: 'pointer',
+              fontFamily: 'monospace', userSelect: 'none',
             }}
-          />
+          >copy</button>
         )}
       </div>
     </div>

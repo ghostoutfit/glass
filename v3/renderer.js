@@ -17,10 +17,19 @@
 //   phys    — glass meltPhysics state object
 //   options — { ts, visualScale, bondRound, showField, bondNums }
 
+import { COORD_TARGET, ENERGY_UNIT } from './meltPhysics.js'
+
 export const VW = 600
 export const VH = 350
 
-const VISUAL_SCALE = 1   // 1:1 with physics — glass thermal motion is already visible at scale
+// Minimum image for renderer (matches physics miDx/miDy)
+const riDx = dx => dx >  VW * 0.5 ? dx - VW : dx < -VW * 0.5 ? dx + VW : dx
+const riDy = dy => dy >  VH * 0.5 ? dy - VH : dy < -VH * 0.5 ? dy + VH : dy
+const GHOST_ZONE = 25  // px from edge at which ghost copies are drawn
+
+let _visualScale = 3.3   // amplify lattice-atom displacement from x0; freed atoms unaffected
+export const setVisualScale = v => { _visualScale = v }
+export const getVisualScale = () => _visualScale
 
 export const C = {
   Si:  '#d4a020',   // gold  — network former
@@ -30,30 +39,29 @@ export const C = {
 }
 
 const CHARGE_POS = '62,127,214'   // blue halo  — Si, Ca
-const CHARGE_NEG = '231,131,42'   // orange halo — O, Na
-const CHARGE_TYPES = { Si: CHARGE_POS, Ca: CHARGE_POS, O: CHARGE_NEG, Na: CHARGE_NEG }
+const CHARGE_NEG = '231,131,42'   // orange halo — O
+const CHARGE_TYPES = { Si: CHARGE_POS, Ca: CHARGE_POS, Na: CHARGE_POS, O: CHARGE_NEG }
 
-const COORD_TARGET = [3, 2, 1, 2]   // Si, O, Na, Ca (typeId order) — used for bondNums debug
 
-// Bond strain ramp: warm grey → violet → magenta → hot pink (matches concrete v4)
+// Bond strain ramp: warm grey → violet → magenta → hot pink
 const COLOR_STOPS = [
   [0.00, 200, 196, 188],
-  [0.20, 195,  90, 255],
-  [0.55, 240,  30, 225],
+  [0.15, 195,  90, 255],
+  [0.40, 240,  30, 225],
   [1.00, 255,  70, 185],
 ]
 
-function strainColor(strain, breakStrain) {
-  const t = Math.min(1, Math.abs(strain) / Math.max(breakStrain * 0.45, 0.001))
+function strainColorRGB(strain, breakStrain) {
+  const t = Math.min(1, Math.abs(strain) / Math.max(breakStrain * 0.50, 0.001))
   for (let k = 0; k < COLOR_STOPS.length - 1; k++) {
     const [t0, r0, g0, b0] = COLOR_STOPS[k]
     const [t1, r1, g1, b1] = COLOR_STOPS[k + 1]
     if (t <= t1) {
       const u = (t - t0) / (t1 - t0)
-      return `rgb(${Math.round(r0+(r1-r0)*u)},${Math.round(g0+(g1-g0)*u)},${Math.round(b0+(b1-b0)*u)})`
+      return [Math.round(r0+(r1-r0)*u), Math.round(g0+(g1-g0)*u), Math.round(b0+(b1-b0)*u)]
     }
   }
-  return 'rgb(0,200,255)'
+  return [0, 200, 255]
 }
 
 // Tapered lens shape centered on bond midpoint — always tapers to points at each atom
@@ -63,7 +71,7 @@ function fillLens(ctx, ax, ay, bx, by, bondRound) {
   const ux = (bx - ax) / len, uy = (by - ay) / len
   const px = -uy, py = ux
   const mx = (ax + bx) / 2, my = (ay + by) / 2
-  const halfL = Math.min(len * 0.40, 7)
+  const halfL = len * 0.40
   const r  = Math.min(bondRound, halfL * 0.65)
   const cp = halfL * 0.45
   ctx.beginPath()
@@ -88,11 +96,44 @@ function canvasJitter(_idx, _t) { return { jx: 0, jy: 0 } }
 // Fade bond lenses when atoms are far apart (stretched/breaking) to prevent ghost smears
 function bondCurDistAlpha(dx, dy) {
   const d  = Math.hypot(dx, dy)
-  const lo = 25   // normal bond range (max r0 in glass is 16px)
-  const hi = 40
+  const lo = 14   // fade starts just past max intact bond length (~12px Na-O)
+  const hi = 25   // fully gone once atoms are clearly separated
   if (d <= lo) return 1
   if (d >= hi) return 0
   return 1 - (d - lo) / (hi - lo)
+}
+
+// Builds a rounded, inflated convex hull path.
+// inflate: pixels to expand each vertex outward from centroid
+// cornerR: pixel radius of rounded corners
+function roundedHullPath(ctx, pts, inflate, cornerR) {
+  if (pts.length < 2) return
+  let cx = 0, cy = 0
+  for (const [x, y] of pts) { cx += x; cy += y }
+  cx /= pts.length; cy /= pts.length
+
+  const ip = pts.map(([x, y]) => {
+    const dx = x - cx, dy = y - cy
+    const d = Math.hypot(dx, dy) || 1
+    return [x + (dx / d) * inflate, y + (dy / d) * inflate]
+  })
+
+  const n = ip.length
+  ctx.beginPath()
+  for (let i = 0; i < n; i++) {
+    const a  = ip[(i - 1 + n) % n]
+    const b  = ip[i]
+    const c  = ip[(i + 1) % n]
+    const dba = Math.hypot(a[0] - b[0], a[1] - b[1]) || 1
+    const dbc = Math.hypot(c[0] - b[0], c[1] - b[1]) || 1
+    const r  = Math.min(cornerR, dba * 0.45, dbc * 0.45)
+    const ux = (a[0] - b[0]) / dba, uy = (a[1] - b[1]) / dba
+    const p1 = [b[0] + ux * r, b[1] + uy * r]
+    if (i === 0) ctx.moveTo(p1[0], p1[1])
+    else         ctx.lineTo(p1[0], p1[1])
+    ctx.arcTo(b[0], b[1], c[0], c[1], r)
+  }
+  ctx.closePath()
 }
 
 // Andrew's monotone chain convex hull
@@ -140,13 +181,19 @@ function getLayer(cache, canvas) {
 //   chunks[]         — grain groups with pIdxs/origSpread/bg/bdr  (optional)
 //   latticeFreed     — Uint8Array: freed[i]=1 means particle i left the lattice (optional)
 export function drawScene(canvas, phys, {
-  ts          = 0,
-  visualScale = VISUAL_SCALE,
-  bondRound   = 1.6,
-  showField   = true,
-  showCharge  = false,
-  darkMode    = true,
-  bondNums    = false,
+  ts              = 0,
+  visualScale     = _visualScale,
+  bondRound       = 4,
+  showField       = true,
+  showCharge      = false,
+  darkMode        = true,
+  bondNums        = false,
+  atomColorMode   = 'normal',   // 'normal' | 'freed' | 'coordination' | 'attract'
+  showBrokenBonds = false,
+  showLiveStats   = false,
+  targetTempC     = null,
+  hoverIdx        = null,
+  selectedIdx     = -1,
 } = {}) {
   if (!canvas || !phys) return
 
@@ -189,37 +236,52 @@ export function drawScene(canvas, phys, {
   const vx = (p, i) => latticeFreed?.[i] ? p.x : p.x0 + (p.x - p.x0) * visualScale
   const vy = (p, i) => latticeFreed?.[i] ? p.y : p.y0 + (p.y - p.y0) * visualScale
 
+  // Overlay bond count — mirrors attract loop exactly: count ALL phys.bonds (including broken)
+  let overlayBondCount = null
+  if (atomColorMode === 'attract' && bonds?.length) {
+    overlayBondCount = new Int32Array(particles.length)
+    for (const { i, j } of bonds) { overlayBondCount[i]++; overlayBondCount[j]++ }
+  }
+
   // ── Chunk outlines (grain group silhouettes) ──
-  // Drawn to an offscreen layer, blurred, then composited. The blur gives a
-  // soft glow behind the atoms. Outlines fade as chunks disperse.
+  // Hull drawn from rest positions (x0/y0) so thermal jitter never wobbles the shape.
+  // Hides when _chunkBondFrac of internal bonds have broken (tune: window._chunkBondFrac).
   if (chunks?.length) {
+    const BOND_FRAC = window._chunkBondFrac ?? 0.40
+
+    const particleChunkIdx = new Map()
+    chunks.forEach((chunk, ci) => { for (const idx of chunk.pIdxs) particleChunkIdx.set(idx, ci) })
+    const chunkBondTotal  = new Int32Array(chunks.length)
+    const chunkBondBroken = new Int32Array(chunks.length)
+    const rigidBonds = phys.rigidBonds
+    if (rigidBonds?.length) {
+      for (const rb of rigidBonds) {
+        const ci = particleChunkIdx.get(rb.i)
+        const cj = particleChunkIdx.get(rb.j)
+        if (ci !== undefined && ci === cj) {
+          chunkBondTotal[ci]++
+          if (rb.broken) chunkBondBroken[ci]++
+        }
+      }
+    }
+
     const cl   = getLayer(chunkLayerCache, canvas)
     const cctx = cl.getContext('2d')
     cctx.clearRect(0, 0, cl.width, cl.height)
     const tr = ctx.getTransform()
     cctx.setTransform(tr.a, tr.b, tr.c, tr.d, tr.e, tr.f)
 
-    for (const chunk of chunks) {
-      if (!chunk.pIdxs.length) continue
-      // Measure dissolution using real physics positions (not amplified)
-      const realPts = chunk.pIdxs.map(i => [particles[i].x, particles[i].y])
-      let cx = 0, cy = 0
-      for (const [x, y] of realPts) { cx += x; cy += y }
-      cx /= realPts.length; cy /= realPts.length
-      const currSpread = realPts.reduce((s, [x, y]) => s + Math.hypot(x - cx, y - cy), 0) / realPts.length
-      const alpha = Math.max(0, 1 - (currSpread / chunk.origSpread - 1.0) / 0.30)
-      if (alpha < 0.01) continue
-      // Draw hull around visual (amplified) positions so it matches atom placement on screen
-      const visPts = chunk.pIdxs.map(i => [vx(particles[i], i), vy(particles[i], i)])
-      const hull = convexHull(visPts)
-      if (hull.length < 2) continue
-      cctx.beginPath()
-      cctx.moveTo(hull[0][0], hull[0][1])
-      for (let k = 1; k < hull.length; k++) cctx.lineTo(hull[k][0], hull[k][1])
-      cctx.closePath()
-      cctx.globalAlpha = alpha * 0.18; cctx.fillStyle   = chunk.bg;  cctx.fill()
-      cctx.globalAlpha = alpha * 0.80; cctx.strokeStyle = chunk.bdr; cctx.lineWidth = 1.5; cctx.stroke()
-    }
+    chunks.forEach((chunk, ci) => {
+      if (!chunk.pIdxs.length) return
+      if (chunkBondTotal[ci] > 0 && chunkBondBroken[ci] / chunkBondTotal[ci] >= BOND_FRAC) return
+      const freedCount = chunk.pIdxs.reduce((s, i) => s + (latticeFreed?.[i] ? 1 : 0), 0)
+      if (chunk.pIdxs.length > 0 && freedCount / chunk.pIdxs.length >= 0.25) return
+      const restPts = chunk.pIdxs.map(i => [particles[i].x0, particles[i].y0])
+      const hull = convexHull(restPts)
+      if (hull.length < 2) return
+      roundedHullPath(cctx, hull, 7, 6)
+      cctx.globalAlpha = 0.85; cctx.strokeStyle = chunk.bdr; cctx.lineWidth = 2.5; cctx.stroke()
+    })
     cctx.globalAlpha = 1
 
     ctx.save()
@@ -230,30 +292,7 @@ export function drawScene(canvas, phys, {
     ctx.restore()
   }
 
-  // ── Charge halos — matches concrete v4: fixed 8px radius, solid at center ──
-  if (showCharge && particles?.length) {
-    for (let i = 0; i < particles.length; i++) {
-      const p   = particles[i]
-      const px  = vx(p, i)
-      const py  = vy(p, i)
-      const rgb = CHARGE_TYPES[p.type]
-      if (!rgb) continue
-      const cr  = 8
-      const g   = ctx.createRadialGradient(px, py, 0, px, py, cr)
-      g.addColorStop(0,     `rgba(${rgb},1.0)`)
-      g.addColorStop(1/cr,  `rgba(${rgb},1.0)`)
-      g.addColorStop(1,     `rgba(${rgb},0)`)
-      ctx.fillStyle   = g
-      ctx.globalAlpha = 1
-      ctx.beginPath()
-      ctx.arc(px, py, cr, 0, Math.PI * 2)
-      ctx.fill()
-    }
-  }
-
-  // ── Bond strain field (blurred lens shapes) ──
-  // All intact pair bonds drawn as strain-colored lenses on an offscreen layer,
-  // blurred once, then composited. One filter pass instead of per-bond blur.
+  // ── Bond strain field (blurred lens shapes, drawn under atoms) ──
   if (showField && bonds?.length) {
     const fl   = getLayer(fieldLayerCache, canvas)
     const fctx = fl.getContext('2d')
@@ -263,41 +302,146 @@ export function drawScene(canvas, phys, {
 
     for (let b = 0; b < bonds.length; b++) {
       const bond = bonds[b]
-      if (bond.broken) continue
+      if (showBrokenBonds && bond.broken) continue   // drawn separately below
       const pi = particles[bond.i], pj = particles[bond.j]
-      const da = bondCurDistAlpha(pj.x - pi.x, pj.y - pi.y)
+      // Use minimum image for all distance/direction calculations (toroidal wrap)
+      const rawDx = pj.x - pi.x, rawDy = pj.y - pi.y
+      const da = bondCurDistAlpha(riDx(rawDx), riDy(rawDy))
       if (da <= 0) continue
-      fctx.globalAlpha = 0.75 * da
-      fctx.fillStyle   = strainColor(bond.strain ?? 0, bond.currentBreakStrain ?? 0.03)
-      fillLens(fctx, vx(pi, bond.i), vy(pi, bond.i), vx(pj, bond.j), vy(pj, bond.j), bondRound)
+      fctx.globalAlpha = da
+      const iFreed = latticeFreed?.[bond.i], jFreed = latticeFreed?.[bond.j]
+      const pix = iFreed ? pi.x : (pi.x + pi.x0) * 0.5
+      const piy = iFreed ? pi.y : (pi.y + pi.y0) * 0.5
+      const pjx_raw = jFreed ? pj.x : (pj.x + pj.x0) * 0.5
+      const pjy_raw = jFreed ? pj.y : (pj.y + pj.y0) * 0.5
+      const sdx = riDx(pjx_raw - pix), sdy = riDy(pjy_raw - piy)
+      // r0s path: midpoint-averaged distance vs. original lattice separation.
+      // Correct for lattice-lattice pairs and mixed (one freed) rigid bonds — r0s ≈ spec.r0
+      // for original neighbors and the midpoint averaging suppresses thermal jitter.
+      // Wrong for both-freed dynamic bonds formed in the melt: those atoms were never
+      // original neighbors so r0s can be 50-500 px, giving deeply negative strain → pink.
+      // Guard: only bypass r0s when BOTH atoms are freed (the only case where r0s is meaningless).
+      const smoothStrain = (iFreed && jFreed)
+        ? (bond.strain ?? 0)
+        : (() => { const r0s = Math.hypot(pj.x0 - pi.x0, pj.y0 - pi.y0); return r0s > 0.5 ? (Math.hypot(sdx, sdy) - r0s) / r0s : (bond.strain ?? 0) })()
+      const [cr, cg, cb] = strainColorRGB(smoothStrain, bond.currentBreakStrain ?? 0.25)
+      fctx.fillStyle = `rgb(${cr},${cg},${cb})`
+      // Adjust pj to the minimum-image position relative to pi for lens drawing
+      const pix_v = vx(pi, bond.i), piy_v = vy(pi, bond.i)
+      const pjx_v = pix_v + riDx(vx(pj, bond.j) - pix_v)
+      const pjy_v = piy_v + riDy(vy(pj, bond.j) - piy_v)
+      fillLens(fctx, pix_v, piy_v, pjx_v, pjy_v, bondRound)
       fctx.fill()
     }
 
     ctx.save()
     ctx.setTransform(1, 0, 0, 1, 0, 0)
-    ctx.filter = 'blur(3px)'
+    ctx.filter = 'blur(2px)'
+    ctx.globalCompositeOperation = 'screen'
     ctx.drawImage(fl, 0, 0)
+    ctx.globalCompositeOperation = 'source-over'
     ctx.filter = 'none'
     ctx.restore()
   }
 
+  // ── Broken bond overlay (dashed lines, drawn in physics coords) ──
+  if (showBrokenBonds && bonds?.length) {
+    ctx.save()
+    ctx.lineWidth = 0.8
+    ctx.setLineDash([2, 3])
+    for (const bond of bonds) {
+      if (!bond.broken) continue
+      const pi = particles[bond.i], pj = particles[bond.j]
+      const da = bondCurDistAlpha(riDx(pj.x - pi.x), riDy(pj.y - pi.y))
+      if (da <= 0) continue
+      const pix_v = vx(pi, bond.i), piy_v = vy(pi, bond.i)
+      const pjx_v = pix_v + riDx(vx(pj, bond.j) - pix_v)
+      const pjy_v = piy_v + riDy(vy(pj, bond.j) - piy_v)
+      ctx.globalAlpha = da * 0.45
+      ctx.strokeStyle = '#88aaee'
+      ctx.beginPath()
+      ctx.moveTo(pix_v, piy_v)
+      ctx.lineTo(pjx_v, pjy_v)
+      ctx.stroke()
+    }
+    ctx.setLineDash([])
+    ctx.globalAlpha = 1
+    ctx.restore()
+  }
+
   // ── Atoms ──
-  // Draw at visual (amplified) position + per-particle Lissajous jitter.
+  // Draw at visual position + per-particle Lissajous jitter.
+  // Ghost copies near edges create the toroidal (asteroids) wrap effect.
   ctx.lineWidth = 0.5
   for (let i = 0; i < particles.length; i++) {
     const p = particles[i]
     const { jx, jy } = canvasJitter(i, t)
     const px = vx(p, i) + jx
     const py = vy(p, i) + jy
+    const gx = px < GHOST_ZONE ? VW : px > VW - GHOST_ZONE ? -VW : 0
+    const gy = py < GHOST_ZONE ? VH : py > VH - GHOST_ZONE ? -VH : 0
 
-    ctx.beginPath()
-    ctx.arc(px, py, p.r, 0, Math.PI * 2)
-    ctx.fillStyle   = C[p.type] ?? '#ffffff'
-    ctx.globalAlpha = 0.88
-    ctx.fill()
+    ctx.fillStyle   = overlayAtomColor(p, i, atomColorMode, latticeFreed, phys.intactCount, overlayBondCount)
     ctx.strokeStyle = darkMode ? 'rgba(255,255,255,0.40)' : 'rgba(0,0,0,0.25)'
+    ctx.globalAlpha = 0.88
+    const drawAtom = (ax, ay) => {
+      ctx.beginPath(); ctx.arc(ax, ay, p.r, 0, Math.PI * 2)
+      ctx.fill(); ctx.globalAlpha = 1; ctx.stroke(); ctx.globalAlpha = 0.88
+    }
+    drawAtom(px, py)
+    if (gx) drawAtom(px + gx, py)
+    if (gy) drawAtom(px, py + gy)
+    if (gx && gy) drawAtom(px + gx, py + gy)
     ctx.globalAlpha = 1
+  }
+
+  // ── Selected atom highlight (gold ring) ──
+  if (selectedIdx >= 0 && selectedIdx < particles.length) {
+    const p  = particles[selectedIdx]
+    const px = vx(p, selectedIdx), py = vy(p, selectedIdx)
+    ctx.save()
+    ctx.strokeStyle = '#ffd700'
+    ctx.lineWidth   = 2
+    ctx.globalAlpha = 1
+    ctx.beginPath()
+    ctx.arc(px, py, p.r + 4, 0, Math.PI * 2)
     ctx.stroke()
+    ctx.restore()
+  }
+
+  // ── Hover highlight (white ring) ──
+  if (hoverIdx !== null && hoverIdx >= 0 && hoverIdx < particles.length) {
+    const p  = particles[hoverIdx]
+    const px = vx(p, hoverIdx), py = vy(p, hoverIdx)
+    ctx.save()
+    ctx.strokeStyle = '#ffffff'
+    ctx.lineWidth   = 1.5
+    ctx.globalAlpha = 0.9
+    ctx.beginPath()
+    ctx.arc(px, py, p.r + 3, 0, Math.PI * 2)
+    ctx.stroke()
+    ctx.restore()
+  }
+
+  // ── Charge halos — drawn over atoms; fixed 8px radius, solid at center ──
+  if (showCharge && particles?.length) {
+    for (let i = 0; i < particles.length; i++) {
+      const p   = particles[i]
+      const px  = vx(p, i)
+      const py  = vy(p, i)
+      const rgb = CHARGE_TYPES[p.type]
+      if (!rgb) continue
+      const cr  = 8
+      const g   = ctx.createRadialGradient(px, py, 0, px, py, cr)
+      g.addColorStop(0,     `rgba(${rgb},0.6)`)
+      g.addColorStop(1/cr,  `rgba(${rgb},0.6)`)
+      g.addColorStop(1,     `rgba(${rgb},0)`)
+      ctx.fillStyle   = g
+      ctx.globalAlpha = 1
+      ctx.beginPath()
+      ctx.arc(px, py, cr, 0, Math.PI * 2)
+      ctx.fill()
+    }
   }
 
   // ── Debug: bond-count labels on each atom ──
@@ -328,4 +472,134 @@ export function drawScene(canvas, phys, {
 
   ctx.restore()
   ctx.setTransform(1, 0, 0, 1, 0, 0)
+  if (showLiveStats) drawLiveStats(ctx, phys, targetTempC, selectedIdx)
+}
+
+// ── Atom color modes ──────────────────────────────────────────────────────────
+function overlayAtomColor(p, i, mode, lf, intactCount, overlayBondCount) {
+  if (mode === 'freed') {
+    return lf?.[i] ? '#00ffcc' : '#667788'
+  }
+  if (mode === 'coordination') {
+    const ic  = intactCount?.[i] ?? 0
+    const tgt = COORD_TARGET[p.typeId] ?? 2
+    if (ic === 0)    return '#ff4444'   // no intact bonds
+    if (ic > tgt)    return '#ff8800'   // over-coordinated
+    if (ic >= tgt)   return '#44ff66'   // satisfied
+    return '#ffcc00'                    // under-coordinated
+  }
+  if (mode === 'attract') {
+    const bc  = overlayBondCount?.[i] ?? 0
+    const tgt = COORD_TARGET[p.typeId] ?? 2
+    return bc < tgt ? '#ff44ff' : '#555555'
+  }
+  return C[p.type] ?? '#ffffff'
+}
+
+// ── Live stats HUD ────────────────────────────────────────────────────────────
+let _lastHudLines = []
+export const getLastHudLines = () => _lastHudLines
+
+function drawLiveStats(ctx, phys, targetTempC, selectedIdx = -1) {
+  if (!phys?.particles) return
+  const ps = phys.particles
+  const n  = phys.n ?? ps.length
+
+  let keSum = 0, speedSum = 0
+  for (let i = 0; i < n; i++) {
+    const p = ps[i]
+    keSum    += (p.vx * p.vx + p.vy * p.vy) * 0.5
+    speedSum += Math.hypot(p.vx, p.vy)
+  }
+  const measuredTempC = Math.round(keSum / n / ENERGY_UNIT - 273)
+  const meanSpeed     = (speedSum / n).toExponential(2)
+
+  let liveSiO = 0, liveNaO = 0, liveCaO = 0, brokenRigid = 0
+  for (const rb of (phys.rigidBonds ?? [])) {
+    if (rb.broken) { brokenRigid++; continue }
+    const ti = ps[rb.i].typeId, tj = ps[rb.j].typeId
+    if      ((ti === 0) !== (tj === 0) && (ti <= 1) && (tj <= 1)) liveSiO++
+    else if ((ti === 2 && tj === 1) || (ti === 1 && tj === 2))    liveNaO++
+    else if ((ti === 3 && tj === 1) || (ti === 1 && tj === 3))    liveCaO++
+  }
+
+  const lf = phys.latticeFreed
+  const ic = phys.intactCount
+  let sio2T = 0, sio2F = 0, na2oT = 0, na2oF = 0
+  let siSum = 0, siN = 0
+  for (let i = 0; i < n; i++) {
+    const p = ps[i]
+    if (p.cellType === 'SiO2') { sio2T++; if (lf?.[i]) sio2F++ }
+    else if (p.cellType === 'Na2O') { na2oT++; if (lf?.[i]) na2oF++ }
+    if (p.typeId === 0) { siSum += (ic?.[i] ?? 0); siN++ }
+  }
+  const meanSiCoord = siN ? (siSum / siN).toFixed(1) : '—'
+
+  const bondStr = [`Si-O ${liveSiO}`, liveNaO && `Na-O ${liveNaO}`, liveCaO && `Ca-O ${liveCaO}`]
+    .filter(Boolean).join(' / ')
+
+  // Per-bond live readout for selected atom
+  const selBondLines = []
+  if (selectedIdx >= 0 && selectedIdx < n) {
+    const sp = ps[selectedIdx]
+    selBondLines.push(`  ► #${selectedIdx} ${sp.type} (${phys.latticeFreed?.[selectedIdx] ? 'freed' : 'lattice'})`)
+    const myRigid = (phys.rigidBonds ?? []).filter(rb => rb.i === selectedIdx || rb.j === selectedIdx)
+    for (const rb of myRigid) {
+      const oi  = rb.i === selectedIdx ? rb.j : rb.i
+      const po  = ps[oi]
+      const d   = Math.hypot(sp.x - po.x, sp.y - po.y).toFixed(1)
+      const bEntry = (phys.bonds ?? []).find(b => (b.i===rb.i&&b.j===rb.j)||(b.i===rb.j&&b.j===rb.i))
+      const s   = bEntry ? (bEntry.strain >= 0 ? '+' : '') + bEntry.strain.toFixed(3) : '—'
+      const state = rb.broken ? 'BRK' : 'ok '
+      selBondLines.push(`    ${po.type}#${oi} ${d.padStart(5)}px ${state} s=${s}`)
+    }
+    if (myRigid.length === 0) selBondLines.push('    (no rigid bonds)')
+  }
+
+  const lines = [
+    targetTempC !== null ? `T tgt  ${targetTempC}°C`      : null,
+    `T meas ${measuredTempC}°C`,
+    `bonds  ${bondStr}`,
+    ...selBondLines,
+    `broken ${brokenRigid} rigid`,
+    `coord  Si ${meanSiCoord}/3`,
+    sio2T ? `freed  SiO₂ ${Math.round(sio2F / sio2T * 100)}%` : null,
+    na2oT ? `freed  Na₂O ${Math.round(na2oF / na2oT * 100)}%` : null,
+    `spd    ${meanSpeed} px/step`,
+  ].filter(Boolean)
+
+  _lastHudLines = lines
+
+  ctx.save()
+  const pad = 6, lineH = 14
+  const boxW = 196, boxH = lines.length * lineH + pad * 2
+  ctx.fillStyle = 'rgba(0,0,0,0.72)'
+  ctx.fillRect(4, 4, boxW, boxH)
+  ctx.fillStyle = '#cccccc'
+  ctx.font = '10.5px monospace'
+  ctx.textAlign    = 'left'
+  ctx.textBaseline = 'top'
+  for (let i = 0; i < lines.length; i++) {
+    ctx.fillText(lines[i], 4 + pad, 4 + pad + i * lineH)
+  }
+  ctx.restore()
+}
+
+// ── Hover: find nearest atom in visual coordinates ────────────────────────────
+// physX/physY are in the same coordinate space as vx()/vy() (visual physics coords).
+// Returns atom index, or -1 if none within threshold.
+export function findAtomNear(phys, physX, physY, vs) {
+  if (!phys?.particles) return -1
+  const { particles } = phys
+  const lf = phys.latticeFreed
+  const vxf = (p, i) => lf?.[i] ? p.x : p.x0 + (p.x - p.x0) * vs
+  const vyf = (p, i) => lf?.[i] ? p.y : p.y0 + (p.y - p.y0) * vs
+  let best = -1, bestD2 = Infinity
+  for (let i = 0; i < particles.length; i++) {
+    const p = particles[i]
+    const dx = physX - vxf(p, i), dy = physY - vyf(p, i)
+    const d2 = dx * dx + dy * dy
+    if (d2 < bestD2) { bestD2 = d2; best = i }
+  }
+  return bestD2 < 400 ? best : -1   // threshold: 20px in visual coords
 }

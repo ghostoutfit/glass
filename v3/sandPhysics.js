@@ -39,7 +39,6 @@ function rebuildGrid(grains, HS) {
   _gridH.fill(-1)
   for (let i = 0; i < grains.length; i++) {
     const g  = grains[i]
-    if (g.type === 'na-sub' || g.type === 'na-ctr') continue  // springs handle blobs
     const cx = Math.min(_gridW - 1, Math.max(0, (g.x + HS) / CELL | 0))
     const cy = Math.min(_gridW - 1, Math.max(0, (g.y + HS) / CELL | 0))
     const k  = cy * _gridW + cx
