@@ -215,8 +215,39 @@ function fmtE(v) {
   return v >= 1000 ? `${(v / 1000).toFixed(v % 1000 === 0 ? 0 : 1)}k` : String(v)
 }
 
-const GRAPH_E_MIN = 0, GRAPH_E_MAX = 4e-3   // x-axis: cumulative energy added, per-particle units
-function drawTEGraph(canvas, hist, darkMode = true) {
+// x-axis = thermal energy CONTENT at temperature T: ∫₀ᵀ hc(T)·dT, in per-particle units.
+// Mirrors meltHeatCapacity in GlassViewer (ramp 500→750 to a Na₂O-scaled plateau).
+const HC_LO = 500, HC_HI = 750
+function heatCap(T, na2oPct, plateau) {
+  const amp = (plateau - 1) * Math.min(1, na2oPct / 30)
+  if (amp <= 0 || T <= HC_LO) return 1
+  const t = Math.min(1, (T - HC_LO) / (HC_HI - HC_LO))
+  return 1 + amp * t * t * (3 - 2 * t)
+}
+function energyContent(T, na2oPct, plateau) {   // per-particle units
+  let c = 0
+  for (let x = 5; x <= T; x += 5) c += heatCap(x, na2oPct, plateau) * 5
+  return c * ENERGY_UNIT
+}
+// Inverse: temperature whose content equals `target`. Lets ramps interpolate linearly in
+// ENERGY (content) instead of temperature, so the kJ readout changes at a constant rate
+// through the latent-heat plateau — independent of temperature or bonds breaking.
+function tempForContent(target, na2oPct, plateau) {
+  if (target <= 0) return 0
+  let c = 0
+  for (let x = 5; x <= 2000; x += 5) { c += heatCap(x, na2oPct, plateau) * 5 * ENERGY_UNIT; if (c >= target) return x }
+  return 2000
+}
+// Ramp ePerParticle so that energy CONTENT moves linearly from the start temp to endTemp.
+function rampEnergyLinearInContent(startE, endTemp, t, na2oPct, plateau) {
+  const Tstart = startE / ENERGY_UNIT - 273
+  const cStart = energyContent(Math.max(0, Tstart), na2oPct, plateau)
+  const cEnd   = energyContent(endTemp, na2oPct, plateau)
+  const T = tempForContent(cStart * (1 - t) + cEnd * t, na2oPct, plateau)
+  return (T + 273) * ENERGY_UNIT
+}
+const GRAPH_E_MIN = 0
+function drawTEGraph(canvas, hist, darkMode = true, eMax = 4e-3) {
   const s = setupCanvas(canvas)
   if (!s) return
   const { ctx, w, h } = s
@@ -224,11 +255,11 @@ function drawTEGraph(canvas, hist, darkMode = true) {
   const pw = w - pL - pR, ph = h - pT - pB
 
   const tMax = 1800
-  const ink     = darkMode ? '#ffffff' : '#111111'   // high-contrast text, both modes
+  const ink     = darkMode ? '#999' : '#666'   // matches sidebar 'Energy in fields' label
   const axisCol = darkMode ? '#888' : '#999'
 
   ctx.clearRect(0, 0, w, h)
-  ctx.fillStyle = darkMode ? 'rgba(8,6,4,0.82)' : 'rgba(250,248,245,0.92)'
+  ctx.fillStyle = darkMode ? 'rgba(8,6,4,0.82)' : 'rgba(224,219,210,0.95)'   // off-white, matches viz-panel
   ctx.fillRect(0, 0, w, h)
 
   // Axes
@@ -239,7 +270,7 @@ function drawTEGraph(canvas, hist, darkMode = true) {
   ctx.stroke()
 
   // Axis labels (2× size, high contrast)
-  ctx.fillStyle = ink; ctx.font = 'bold 18px monospace'; ctx.textAlign = 'right'; ctx.textBaseline = 'middle'
+  ctx.fillStyle = ink; ctx.font = "bold 14px Lexend, system-ui, sans-serif"; ctx.textAlign = 'right'; ctx.textBaseline = 'middle'
   ctx.fillText(String(tMax), pL - 4, pT + 2)
   ctx.fillText('0', pL - 4, pT + ph)
   ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'
@@ -255,7 +286,7 @@ function drawTEGraph(canvas, hist, darkMode = true) {
   ctx.strokeStyle = darkMode ? '#ff9050' : '#c04000'; ctx.lineWidth = 2.5; ctx.lineJoin = 'round'
   ctx.beginPath()
   for (let i = 0; i < n; i++) {
-    const x = pL + Math.max(0, Math.min(1, (hist[i].e - GRAPH_E_MIN) / (GRAPH_E_MAX - GRAPH_E_MIN))) * pw
+    const x = pL + Math.max(0, Math.min(1, (hist[i].e - GRAPH_E_MIN) / (eMax - GRAPH_E_MIN))) * pw
     const y = pT + ph - (Math.max(0, hist[i].t) / tMax) * ph
     i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)
   }
@@ -263,7 +294,7 @@ function drawTEGraph(canvas, hist, darkMode = true) {
 
   // Current point dot
   const last = hist[n - 1]
-  const lx = pL + Math.max(0, Math.min(1, (last.e - GRAPH_E_MIN) / (GRAPH_E_MAX - GRAPH_E_MIN))) * pw
+  const lx = pL + Math.max(0, Math.min(1, (last.e - GRAPH_E_MIN) / (eMax - GRAPH_E_MIN))) * pw
   const ly = pT + ph - (Math.max(0, last.t) / tMax) * ph
   ctx.fillStyle = darkMode ? '#ffcc80' : '#e05500'; ctx.beginPath(); ctx.arc(lx, ly, 4, 0, Math.PI * 2); ctx.fill()
 }
@@ -334,7 +365,7 @@ function countBonds(phys) {
   return counts
 }
 
-export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, attractK = 0, attractFalloff = 1, debug = false, bondNums = false, meltTemp = 700, simSpeed = 1, speedMult = 1, coolingMode = null, onTempUpdate = null, onEnergyUpdate = null, onBondCounts = null, replayFrame = null, onReplayReady = null, graphCanvasRef = null, cumulativeEnergyRef = null, graphXMaxRef = null, darkMode = true, showCharge = false, showField = true, atomColorMode = 'normal', showBrokenBonds = false, showLiveStats = false, useEmaStrain = true }) {
+export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, attractK = 0, attractFalloff = 1, debug = false, bondNums = false, meltTemp = 50, simSpeed = 1, speedMult = 1, coolingMode = null, onTempUpdate = null, onEnergyUpdate = null, onBondCounts = null, replayFrame = null, onReplayReady = null, graphCanvasRef = null, cumulativeEnergyRef = null, graphXMaxRef = null, darkMode = true, showCharge = false, showField = true, atomColorMode = 'normal', showBrokenBonds = false, showLiveStats = false, useEmaStrain = true, hcPlateau = 4 }) {
   const types = useMemo(
     () => buildGrid(sio2Pct, na2oPct, caoPct),
     [sio2Pct, na2oPct, caoPct]
@@ -362,6 +393,8 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
   const coolingRef          = useRef(coolingMode)
   const graphCanvasRefRef        = useRef(graphCanvasRef)
   const cumulativeEnergyRefRef   = useRef(cumulativeEnergyRef)
+  const na2oPctRef               = useRef(na2oPct)
+  const hcPlateauRef             = useRef(4)
   const graphXMaxRefRef          = useRef(graphXMaxRef)
   const frameAccRef         = useRef(0)
   const stepCallCountRef    = useRef(0)   // diagnostic: total stepPhysics calls
@@ -417,6 +450,8 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
   useEffect(() => { onBondCountsRef.current = onBondCounts }, [onBondCounts])
   useEffect(() => { graphCanvasRefRef.current = graphCanvasRef }, [graphCanvasRef])
   useEffect(() => { cumulativeEnergyRefRef.current = cumulativeEnergyRef }, [cumulativeEnergyRef])
+  useEffect(() => { na2oPctRef.current = na2oPct }, [na2oPct])
+  useEffect(() => { hcPlateauRef.current = hcPlateau }, [hcPlateau])
   useEffect(() => { graphXMaxRefRef.current = graphXMaxRef }, [graphXMaxRef])
 
   // Hover highlight: mousemove tracks nearest atom for the white ring in renderer
@@ -838,17 +873,13 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
         coolingFrameRef.current++
         const dur = cm === 'fast' ? FAST_COOL_FRAMES : SLOW_COOL_FRAMES
         const t   = Math.min(1, coolingFrameRef.current / dur)
-        ePerParticle = coolingStartERef.current * (1 - t) + E_COOL_END * t
+        ePerParticle = rampEnergyLinearInContent(coolingStartERef.current, 200, t, na2oPctRef.current, hcPlateauRef.current)
         effectiveERef.current = ePerParticle
-        // Drain cumulative energy so the graph dot retraces leftward. Slow cool drains at the
-        // fast-heat rate (~baseRate 200/s ≈ 3.33/frame); fast cool drains at double.
-        const ce = cumulativeEnergyRefRef.current
-        if (ce) ce.current = Math.max(0, ce.current - (cm === 'fast' ? 6.67 : 3.33))
       } else if (cm === 'fastHeat' || cm === 'slowHeat') {
         coolingFrameRef.current++
         const dur = cm === 'fastHeat' ? FAST_COOL_FRAMES : SLOW_COOL_FRAMES
         const t   = Math.min(1, coolingFrameRef.current / dur)
-        ePerParticle = coolingStartERef.current * (1 - t) + E_HEAT_END * t
+        ePerParticle = rampEnergyLinearInContent(coolingStartERef.current, 1500, t, na2oPctRef.current, hcPlateauRef.current)
         effectiveERef.current = ePerParticle
       } else {
         ePerParticle = (energyValRef.current + 273) * ENERGY_UNIT   // energyValRef tracks meltTemp
@@ -945,15 +976,16 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
         histFrameRef.current++
         if (histFrameRef.current >= 3) {
           histFrameRef.current = 0
-          const xVal = Math.max(0, (cumulativeEnergyRefRef.current?.current ?? 0) * ENERGY_UNIT)   // cumulative heat, per-particle units
           const targetTempC = Math.max(0, Math.round(ePerParticle / ENERGY_UNIT - 273))
+          const xVal = energyContent(targetTempC, na2oPctRef.current, hcPlateauRef.current)
           histRef.current.push({ e: xVal, t: targetTempC })
         }
 
         // ── Draw energy graph into sidebar canvas when provided ───────
         const extCanvas = graphCanvasRefRef.current?.current
         if (extCanvas) {
-          drawTEGraph(extCanvas, histRef.current, darkModeRef.current)
+          const eMax = energyContent(1800, na2oPctRef.current, hcPlateauRef.current) * 1.05
+          drawTEGraph(extCanvas, histRef.current, darkModeRef.current, eMax)
         }
 
         // ── Record replay snapshot ────────────────────────────────────

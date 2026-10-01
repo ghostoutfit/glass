@@ -276,7 +276,15 @@ function meltHeatCapacity(tempC, na2oPct, plateau) {
   return 1.0 + amp * t * t * (3 - 2 * t)   // smoothstep
 }
 
+// Energy content = ∫₀ᵀ hc·dT, the quantity plotted on the graph x-axis (NOT temperature).
+// The kJ readout is this × an arbitrary scale, so it moves at the graph's constant x-rate.
+function energyContentKJ(T, na2oPct, plateau) {
+  let c = 0
+  for (let x = 5; x <= T; x += 5) c += meltHeatCapacity(x, na2oPct, plateau) * 5
+  return c
+}
 const COOL_MIN_TEMP = 1500   // Slow/Fast Cool only engage from a full melt
+const ENERGY_KJ_MULT = 0.2   // arbitrary display scale: energy content × this → kJ readout
 
 export default function GlassViewer() {
   const [darkMode,   setDarkMode]   = useState(true)
@@ -286,14 +294,15 @@ export default function GlassViewer() {
   const graphDragRef    = useRef(null)   // { startX, startXMax } while dragging
   const [showCharge, setShowCharge] = useState(false)
   const [showField,  setShowField]  = useState(true)
-  const [showDev,    setShowDev]    = useState(true)
+  const [showDev,    setShowDev]    = useState(false)
 
   const [tab, setTab]             = useState('melt')
   const [presetId, setPresetId]   = useState('soda')
   const [meltEnergyIn,   setMeltEnergyIn]   = useState(0)    // -100..100, snaps to 0
-  const [meltLocalTemp,  setMeltLocalTemp]  = useState(500)  // melt tab's own temperature
-  const [derivedTemp,    setDerivedTemp]    = useState(500)  // KE-measured temperature
-  const [targetE,        setTargetE]        = useState((500 + 273) * 1.62e-6)
+  const [meltLocalTemp,  setMeltLocalTemp]  = useState(50)  // melt tab's own temperature
+  const [gotoTemp,       setGotoTemp]       = useState('')   // typed target temperature for GO
+  const [derivedTemp,    setDerivedTemp]    = useState(50)  // KE-measured temperature
+  const [targetE,        setTargetE]        = useState((50 + 273) * 1.62e-6)
   const [fBroken,        setFBroken]        = useState(0)
   const [maxAvgStrain,   setMaxAvgStrain]   = useState(0)
   const [meanAvgStrain,  setMeanAvgStrain]  = useState(0)
@@ -311,7 +320,7 @@ export default function GlassViewer() {
   const [freeAttractSiOMult, setFreeAttractSiOMultState] = useState(1.0)
   const [sioExclMult, setSioExclMultState]     = useState(1.4)
   const [siSiRepR0,     setSiSiRepR0State]     = useState(15.6)
-  const [naNaRepR0,     setNaNaRepR0State]     = useState(20)
+  const [naNaRepR0,     setNaNaRepR0State]     = useState(35)
   const [sevCooldown,   setSevCooldownState]   = useState(60)
   const [sevPullK,      setSevPullKState]      = useState(0.01)
   const [freedTau,      setFreedTauState]      = useState(0.01)
@@ -340,8 +349,8 @@ export default function GlassViewer() {
   const [bondNums, setBondNums]       = useState(false)
   const [atomColorMode,   setAtomColorMode]   = useState('normal')
   const [showBrokenBonds, setShowBrokenBonds] = useState(false)
-  const [showLiveStats,   setShowLiveStats]   = useState(true)
-  const [showMiniView, setShowMiniView] = useState(true)
+  const [showLiveStats,   setShowLiveStats]   = useState(false)
+  const [showMiniView, setShowMiniView] = useState(false)
   const [bondCounts,        setBondCounts]        = useState(null)
   const [initialBondCounts, setInitialBondCounts] = useState(null)
   const [modeBondCounts,    setModeBondCounts]    = useState(null)
@@ -373,7 +382,7 @@ export default function GlassViewer() {
   const miniCanvasRef = useRef(null)
   const boxSimRef = useRef({
     autoRotate: true, boxState: 'sand', multiRadius: true,
-    sandPaused: false, showMiniView: true,
+    sandPaused: false, showMiniView: false,
     temp: 25, floorMode: false, floorY: 0,
     energyInput: 0,
     zone1End: 400, zone2End: 750,
@@ -413,7 +422,8 @@ export default function GlassViewer() {
   const sharedTempRef = useRef({ temp: 25, lastTs: 0, cumulativeEnergy: 0 })
 
   // Melt tab has its own independent temperature driven by its own energy input
-  const meltTempRef             = useRef({ temp: 500, lastTs: 0, cumulativeEnergy: 0 })
+  const meltTempRef             = useRef({ temp: 50, lastTs: 0, cumulativeEnergy: 0 })
+  const gotoTargetRef           = useRef(null)   // GO target temp; integrator ramps to it then stops
   const meltCumulativeEnergyRef = useRef(0)  // raw energy accumulated (x-axis for T-E graph)
   const meltSimRef  = useRef({
     energyInput: 0,
@@ -477,7 +487,11 @@ export default function GlassViewer() {
           const pr       = PRESETS.find(x => x.id === presetIdRef.current) ?? PRESETS[0]
           const hcFactor = meltHeatCapacity(st.temp, pr.na2o, hcPlateauRef.current)
           st.temp = Math.max(0, Math.min(1800, st.temp + rawDelta / hcFactor))
-          if (++tick % 6 === 0) setMeltLocalTemp(Math.round(st.temp))
+          // GO ramp: stop when the target is reached.
+          const gt = gotoTargetRef.current
+          if (gt != null && ((input > 0 && st.temp >= gt) || (input < 0 && st.temp <= gt))) {
+            st.temp = gt; s.energyInput = 0; gotoTargetRef.current = null; setMeltLocalTemp(gt)
+          } else if (++tick % 6 === 0) setMeltLocalTemp(Math.round(st.temp))
         }
       }
       raf = requestAnimationFrame(integrateMelt)
@@ -491,6 +505,14 @@ export default function GlassViewer() {
     setReplayFrameCount(count); setReplayFrame(null); setReplayPlaying(false)
   }, [])
   const handleTempUpdate   = useCallback(v => { setMeltLocalTemp(v); meltTempRef.current.temp = v }, [])
+  const onGoTemp = useCallback(() => {
+    const v = Math.max(0, Math.min(1800, Math.round(+gotoTemp)))
+    if (!Number.isFinite(v)) return
+    setMeltHeatMode(null); setCoolingMode(null)
+    // Ramp to the target via the heat-capacity integrator (same rate as Fast Heat / cool).
+    gotoTargetRef.current = v
+    meltSimRef.current.energyInput = v > meltTempRef.current.temp ? 100 : v < meltTempRef.current.temp ? -100 : 0
+  }, [gotoTemp])
   const handleEnergyUpdate = useCallback((_ke, _pe, t, e, fb, mas, sfr, met, mxs) => {
     setDerivedTemp(t)
     if (e   !== undefined) setTargetE(e)
@@ -1429,7 +1451,7 @@ export default function GlassViewer() {
     const box = boxSimRef.current.box
     if (box) { box.boxAngle = 0; box.boxAngularVel = 0 }
     meltSimRef.current.energyInput = 0
-    meltTempRef.current.temp = 500
+    meltTempRef.current.temp = 50
     meltCumulativeEnergyRef.current = 0
     setMeltLocalTemp(500)
   }
@@ -1451,60 +1473,46 @@ export default function GlassViewer() {
 
           {/* Scrub slider — pinned at bottom of toolbar, melt tab only */}
           {tab === 'melt' && (
-            <div style={{ position:'absolute', bottom:7, left:50, right:50, display:'flex', alignItems:'center' }}>
-              <ScrubSlider
-                value={replayFrameCount > 0 && replayFrame != null ? replayFrame / Math.max(1, replayFrameCount - 1) : 1}
-                onChange={v => {
-                  if (replayFrameCount > 0) { setReplayPlaying(false); setReplayFrame(Math.round(v * (replayFrameCount - 1))) }
-                }}
-                disabled={replayFrameCount === 0}
-              />
+            <div style={{ position:'absolute', bottom:7, left:50, right:50, display:'flex', alignItems:'center', gap:6 }}>
+              <div style={{ flex:'0 1 90%', minWidth:0, display:'flex', alignItems:'center' }}>
+                <ScrubSlider
+                  value={replayFrameCount > 0 && replayFrame != null ? replayFrame / Math.max(1, replayFrameCount - 1) : 1}
+                  onChange={v => {
+                    if (replayFrameCount > 0) { setReplayPlaying(false); setReplayFrame(Math.round(v * (replayFrameCount - 1))) }
+                  }}
+                  disabled={replayFrameCount === 0}
+                />
+              </div>
             </div>
           )}
-
-          {/* Tab strip */}
-          <div style={{ display:'flex', justifyContent:'center', gap:2, marginBottom:5 }}>
-            <button className={`tab-btn ${tab==='melt'?'active':''}`}  onClick={() => setTab('melt')}>Particles and Fields</button>
-            <button className={`tab-btn ${tab==='glass'?'active':''}`} onClick={() => setTab('glass')}>Bulk Material</button>
-            <label style={{ display:'flex', alignItems:'center', gap:3, fontSize:11, color:'#aaa', cursor:'pointer', marginLeft:2 }}>
-              <input type="checkbox" checked={showMiniView} onChange={e => setShowMiniView(e.target.checked)} style={{ margin:0 }} />
-              mini
-            </label>
-          </div>
 
           {/* Action row */}
           <div style={{ display:'flex', alignItems:'flex-start', gap:4, paddingLeft:6, paddingRight:6 }}>
             {/* Left/center: two-row layout */}
             <div style={{ flex:1, display:'flex', flexDirection:'column', gap:3, minWidth:0 }}>
 
-              {/* Row 1: presets + composition label */}
-              <div style={{ display:'flex', alignItems:'center', gap:4, minWidth:0 }}>
-                <div style={{ display:'flex', gap:3 }}>
-                  {PRESETS.map(preset => (
-                    <button key={preset.id}
-                      className={`preset-btn ${presetId===preset.id?'active':''}`}
-                      onClick={() => switchPreset(preset.id)}
-                    >{preset.label}</button>
-                  ))}
-                </div>
-                <div style={{flex:1}} />
-                <span style={{fontSize:11, color:'rgba(30,45,60,0.50)', fontVariantNumeric:'tabular-nums', whiteSpace:'nowrap'}}>
-                  SiO₂ {p.sio2}% · Na₂O {p.na2o}% · CaO {p.cao}%
-                </span>
-              </div>
-
-              {/* Row 2: all tab-specific controls */}
+              {/* Row: tab-specific controls */}
               <div style={{ display:'flex', alignItems:'center', gap:4, minWidth:0, flexWrap:'wrap' }}>
+                {/* Tab buttons — centered in the row (presets sit at the left via order:-1) */}
+                <div style={{ display:'flex', gap:2, marginLeft:'auto', marginRight:'auto' }}>
+                  <button className={`tab-btn ${tab==='melt'?'active':''}`}  onClick={() => setTab('melt')}>Particles and Fields</button>
+                  <button className={`tab-btn ${tab==='glass'?'active':''}`} onClick={() => setTab('glass')}>Bulk Material</button>
+                </div>
 
                 {/* Melt tab */}
                 {tab === 'melt' && <>
-                  <button className="action-btn replay-btn" style={{padding:'3px 10px', fontSize:12}}
-                    disabled={replayFrameCount === 0}
-                    onClick={() => { setReplayPlaying(false); setReplayFrame(0) }}>🐢 ↺</button>
-                  <button className="action-btn replay-btn" style={{padding:'3px 10px', fontSize:12}}
-                    disabled={replayFrameCount === 0}
-                    onClick={() => { setReplayFrame(0); setReplayPlaying(true) }}>🐇 ↺</button>
-                  <div className="toolbar-divider" />
+                  {/* Presets — centered over the heat/cool cluster on the line below */}
+                  <div style={{ display:'flex', gap:3, order:-1, marginLeft:119 }}>
+                    {PRESETS.map(preset => (
+                      <button key={preset.id}
+                        className={`preset-btn ${presetId===preset.id?'active':''}`}
+                        onClick={() => switchPreset(preset.id)}
+                      >{preset.label}</button>
+                    ))}
+                  </div>
+                  {/* Second line: heat/cool buttons + readouts (flexBasis 100% forces a wrap) */}
+                  <div style={{ flexBasis:'100%', height:10 }} />
+                  {/* Heat/cool buttons, then the readouts right next to them */}
                   <button className={`action-btn test-btn${meltHeatMode==='slow'?' active':''}`}
                     style={{padding:'3px 9px', fontSize:11}} onClick={() => toggleMeltHeat('slow')}>Slow Heat</button>
                   <button className={`action-btn test-btn${meltHeatMode==='fast'?' active':''}`}
@@ -1518,24 +1526,33 @@ export default function GlassViewer() {
                     title={coolingMode !== 'fast' && meltLocalTemp < COOL_MIN_TEMP ? `Heat to ${COOL_MIN_TEMP}°C first` : undefined}
                     style={{padding:'3px 9px', fontSize:11}} onClick={() => startCooling('fast')}>Fast Cool</button>
                   <div className="toolbar-divider" />
+                  <input type="number" min={0} max={1800} value={gotoTemp}
+                    onChange={e => setGotoTemp(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter') onGoTemp() }}
+                    placeholder="°C"
+                    style={{ width:68, padding:'3px 5px', fontSize:12, textAlign:'right', border:'1px solid rgba(100,90,70,0.5)', borderRadius:3, background:'#e8e3da', color:'#2a2620' }} />
+                  <button className="action-btn test-btn" style={{padding:'3px 10px', fontSize:11}} onClick={onGoTemp}>GO</button>
+                  <div className="toolbar-divider" />
+                  <div style={lcdStyle}>
+                    <span style={{visibility:'hidden', display:'block', padding:'3px 6px'}}>9999</span>
+                    <span style={{position:'absolute', inset:0, padding:'3px 6px', color:'rgba(60,60,60,0.15)', textAlign:'right'}}>8888</span>
+                    <span style={{position:'absolute', inset:0, padding:'3px 6px', color:'rgba(60,60,60,0.75)', textAlign:'right'}}>{Math.round(energyContentKJ(meltLocalTemp, p.na2o, hcPlateau) * ENERGY_KJ_MULT)}</span>
+                  </div>
+                  <span style={{fontSize:12, fontWeight:700, color:'rgba(30,45,60,0.70)'}}>kJ</span>
                   <div style={lcdStyle}>
                     <span style={{visibility:'hidden', display:'block', padding:'3px 6px'}}>1800</span>
                     <span style={{position:'absolute', inset:0, padding:'3px 6px', color:'rgba(60,60,60,0.15)', textAlign:'right'}}>1800</span>
                     <span style={{position:'absolute', inset:0, padding:'3px 6px', color:'rgba(60,60,60,0.75)', textAlign:'right'}}>{meltLocalTemp}</span>
                   </div>
                   <span style={{fontSize:12, fontWeight:700, color:'rgba(30,45,60,0.70)'}}>°C</span>
-                  <div style={{display:'flex', alignItems:'center', gap:3}}>
-                    <span style={{color:'rgba(30,45,60,0.55)', fontSize:13}}>−</span>
-                    <input type="range" style={{width:70, accentColor:'#c06040', cursor:'pointer'}}
-                      min={-100} max={100} step={1} value={meltEnergyIn}
-                      onChange={onMeltEnergyChange} onMouseUp={onMeltEnergyRelease} onTouchEnd={onMeltEnergyRelease} />
-                    <span style={{color:'rgba(30,45,60,0.55)', fontSize:13}}>+</span>
-                  </div>
-                  <span style={{fontSize:13, lineHeight:1}}>🐢</span>
-                  <input type="range" style={{width:55, cursor:'pointer', accentColor:'#6a9060'}}
-                    min={0.05} max={0.5} step={0.025} value={simSpeed}
-                    onChange={e => setSimSpeed(+e.target.value)} />
-                  <span style={{fontSize:13, lineHeight:1}}>🐇</span>
+                  <button className="action-btn replay-btn" style={{padding:'2px 9px', fontSize:11, flexShrink:0, marginLeft:6, display:'flex', alignItems:'center', justifyContent:'center'}}
+                    disabled={replayFrameCount === 0}
+                    onClick={() => { setReplayPlaying(false); setReplayFrame(0) }}
+                  ><img src="/glass/Turtle.png" draggable={false} style={{ height: '1.5em', filter: 'brightness(0) invert(1) brightness(0.7) sepia(1) hue-rotate(166deg) brightness(0.95)', marginRight: 3 }} /><span style={{ fontSize: '1.4em', color: '#90c8f0', lineHeight: 1 }}>↺</span></button>
+                  <button className="action-btn replay-btn" style={{padding:'2px 9px', fontSize:11, flexShrink:0, display:'flex', alignItems:'center', justifyContent:'center'}}
+                    disabled={replayFrameCount === 0}
+                    onClick={() => { setReplayFrame(0); setReplayPlaying(true) }}
+                  ><img src="/glass/Rabbit.png" draggable={false} style={{ height: '1.5em', filter: 'brightness(0) invert(1) brightness(0.7) sepia(1) hue-rotate(166deg) brightness(0.95)', marginRight: 3 }} /><span style={{ fontSize: '1.4em', color: '#90c8f0', lineHeight: 1 }}>↺</span></button>
                 </>}
 
                 {/* Glass tab */}
@@ -1627,9 +1644,11 @@ export default function GlassViewer() {
         </div>
 
         {/* Mini blob preview — click to switch to Glass tab */}
-        <div className="blob-box" onClick={() => setTab('glass')} style={{cursor:'pointer', padding:0}}>
-          <canvas ref={miniCanvasRef} style={{ display:'block', width:'100%', height:'100%' }} />
-        </div>
+        {showMiniView && (
+          <div className="blob-box" onClick={() => setTab('glass')} style={{cursor:'pointer', padding:0}}>
+            <canvas ref={miniCanvasRef} style={{ display:'block', width:'100%', height:'100%' }} />
+          </div>
+        )}
       </header>
 
       {/* ── Main area ── */}
@@ -1696,10 +1715,10 @@ export default function GlassViewer() {
                     </>)}
                   </linearGradient>
                 </defs>
-                <text x="0" y="14" style={{ fontSize: '14px', fill: darkMode ? '#999' : '#666', fontFamily: 'system-ui, sans-serif' }}>Energy in fields:</text>
+                <text x="0" y="14" style={{ fontSize: '14px', fill: darkMode ? '#999' : '#666', fontFamily: 'Lexend, system-ui, sans-serif', fontWeight: 700 }}>Energy in fields:</text>
                 <rect x="0" y="18" width="200" height="10" fill="url(#gl-strain-grad)" rx="1" />
-                <text x="0"   y="44" style={{ fontSize: '16px', fill: darkMode ? '#666' : '#888', fontFamily: 'system-ui, sans-serif' }}>Low</text>
-                <text x="200" y="44" style={{ fontSize: '16px', fill: darkMode ? '#666' : '#888', fontFamily: 'system-ui, sans-serif', textAnchor: 'end' }}>High</text>
+                <text x="0"   y="44" style={{ fontSize: '14px', fill: darkMode ? '#999' : '#666', fontFamily: 'Lexend, system-ui, sans-serif', fontWeight: 700 }}>Low</text>
+                <text x="200" y="44" style={{ fontSize: '14px', fill: darkMode ? '#999' : '#666', fontFamily: 'Lexend, system-ui, sans-serif', fontWeight: 700, textAnchor: 'end' }}>High</text>
               </svg>
             )}
 
@@ -1794,6 +1813,10 @@ export default function GlassViewer() {
 
             {showDev && <>
               <div className="viz-section-title">Dev (type "dev" to hide)</div>
+              <label style={{display:'flex', alignItems:'center', gap:6, fontSize:12, color:'#ccc', marginBottom:8, cursor:'pointer'}}>
+                <input type="checkbox" checked={showMiniView} onChange={e => setShowMiniView(e.target.checked)} style={{accentColor:'#88ddaa'}} />
+                Mini photo view
+              </label>
               {tab === 'melt' && <>
                 <div style={{fontFamily:'monospace', fontSize:12, color:'#e0d080', background:'rgba(255,220,80,0.07)', border:'1px solid rgba(255,220,80,0.2)', borderRadius:4, padding:'5px 8px', marginBottom:8}}>
                   <div style={{fontSize:10, color:'#888', marginBottom:2, letterSpacing:'0.05em'}}>TARGET ENERGY (ePerParticle)</div>
@@ -2009,7 +2032,7 @@ export default function GlassViewer() {
               replayFrame={replayFrame} onReplayReady={handleReplayReady}
               darkMode={darkMode} showCharge={showCharge} showField={showField}
               atomColorMode={atomColorMode} showBrokenBonds={showBrokenBonds} showLiveStats={showLiveStats}
-              useEmaStrain={useEmaStrain}
+              useEmaStrain={useEmaStrain} hcPlateau={hcPlateau}
             />
           )}
 

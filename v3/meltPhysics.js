@@ -170,7 +170,7 @@ PAIR_TABLE[3][1] = PAIR_TABLE[1][3] = PREFERRED['Ca-O']
 PAIR_TABLE[0][0] = { r0: 15.6, k: 0.22, mult: 1, repOnly: true }                                             // Si-Si  (Si⁴⁺)
 PAIR_TABLE[1][1] = { r0:  8, k: 0.32, mult: 1, repOnly: true, freeRepR0: 6, freeRepK: 0.3 }                 // O-O    (O²⁻; extra push when freed)
 // Na-Na r0 16 (was 8): spreads Na through the melt instead of clumping; crystal Na-Na = 24px, unaffected.
-PAIR_TABLE[2][2] = { r0: 20, k: 0.45, mult: 1, repOnly: true }                                               // Na-Na  (Na⁺)
+PAIR_TABLE[2][2] = { r0: 35, k: 0.45, mult: 1, repOnly: true }                                               // Na-Na  (Na⁺)
 PAIR_TABLE[3][3] = { r0: 10, k: 0.50, mult: 1, repOnly: true }                                               // Ca-Ca  (Ca²⁺)
 PAIR_TABLE[2][3] = PAIR_TABLE[3][2] = { r0:  9, k: 0.38, mult: 1, repOnly: true }                           // Na-Ca
 
@@ -364,7 +364,7 @@ export function initPhysics(cellData) {
   for (const p of particles) { p.x0 = p.x; p.y0 = p.y; p.px = p.x; p.py = p.y }
 
   // Per-chunk metadata for outline tracing
-  const chunks = cellData.map(({ idx, pts, bg, bdr }) => {
+  const chunks = cellData.map(({ idx, type, pts, bg, bdr }) => {
     const pIdxs = []
     for (let i = 0; i < particles.length; i++) {
       if (particles[i].chunkIdx === idx) pIdxs.push(i)
@@ -377,7 +377,7 @@ export function initPhysics(cellData) {
       origSpread += Math.hypot(particles[i].x0 - origCx, particles[i].y0 - origCy)
     }
     origSpread = pIdxs.length ? origSpread / pIdxs.length : 1
-    return { idx, pts, bg, bdr, origCx, origCy, origSpread: Math.max(origSpread, 4), pIdxs }
+    return { idx, type, pts, bg, bdr, origCx, origCy, origSpread: Math.max(origSpread, 4), pIdxs }
   })
 
   return {
@@ -427,7 +427,7 @@ export function buildRigidBondMap(phys) {
           specMult: isSiO ? null : spec.mult,
           bondDepth: 0.5 * spec.k * (d * (spec.mult - 1)) ** 2,
           breakStrain:      (isSiO ? _breakStrain : _naBreakStrain) * factor,
-          projectionCutoff: isSiO ? sioCut : 650,   // exact (no spread): keeps pure-sand grains rigid up to 1800°C
+          projectionCutoff: isSiO ? sioCut : 650 + 480 * Math.random(),  // Na-O/Ca-O uniform over the 650-1130 melt window → broken% ramps linearly with T; Si-O exact
           avgStrain:        0,
         })
       }
@@ -479,7 +479,7 @@ function promoteBonds(phys, i) {
       specMult: isSiO ? null : spec.mult,
       bondDepth: 0.5 * spec.k * (spec.r0 * (spec.mult - 1)) ** 2,
       breakStrain:      (isSiO ? _breakStrain : _naBreakStrain) * factor,
-      projectionCutoff: isSiO ? sioCut : 650,   // exact (no spread): keeps pure-sand grains rigid up to 1800°C
+      projectionCutoff: isSiO ? sioCut : 650 + 480 * Math.random(),  // Na-O/Ca-O uniform over the 650-1130 melt window → broken% ramps linearly with T; Si-O exact
       avgStrain:        0,
       promoted:         true,
     })

@@ -61,12 +61,21 @@ const COLOR_STOPS = [
   [0.40, 240,  30, 225],
   [1.00, 255,  70, 185],
 ]
+// Light mode composites the field with 'multiply', so colors must be dark to show on the
+// off-white background — the dark warm-grey zero-strain end keeps low-energy bonds visible.
+const COLOR_STOPS_LIGHT = [
+  [0.00,  96,  92,  84],
+  [0.15, 150,  50, 210],
+  [0.40, 200,  20, 170],
+  [1.00, 220,  40, 140],
+]
 
-function strainColorRGB(strain, breakStrain) {
+function strainColorRGB(strain, breakStrain, darkMode = true) {
+  const stops = darkMode ? COLOR_STOPS : COLOR_STOPS_LIGHT
   const t = Math.min(1, Math.abs(strain) / Math.max(breakStrain * 0.50, 0.001))
-  for (let k = 0; k < COLOR_STOPS.length - 1; k++) {
-    const [t0, r0, g0, b0] = COLOR_STOPS[k]
-    const [t1, r1, g1, b1] = COLOR_STOPS[k + 1]
+  for (let k = 0; k < stops.length - 1; k++) {
+    const [t0, r0, g0, b0] = stops[k]
+    const [t1, r1, g1, b1] = stops[k + 1]
     if (t <= t1) {
       const u = (t - t0) / (t1 - t0)
       return [Math.round(r0+(r1-r0)*u), Math.round(g0+(g1-g0)*u), Math.round(b0+(b1-b0)*u)]
@@ -170,6 +179,8 @@ function convexHull(pts) {
 
 // Offscreen layer cache — layers are reused across frames, recreated only on resize
 const fieldLayerCache = new WeakMap()
+// Light-mode grain outlines: saturated to match the atom colors (Si gold, Na green).
+const CHUNK_BDR_LIGHT = { SiO2: '#c88a00', Na2O: '#2f9d4f', CaO: '#7f8a90' }
 const chunkLayerCache = new WeakMap()
 
 function getLayer(cache, canvas) {
@@ -293,11 +304,16 @@ export function drawScene(canvas, phys, {
       const freedCount = chunk.pIdxs.reduce((s, i) => s + (latticeFreed?.[i] ? 1 : 0), 0)
       if ((chunkBondTotal[ci] > 0 && chunkBondBroken[ci] / chunkBondTotal[ci] >= BOND_FRAC) ||
           (chunk.pIdxs.length > 0 && freedCount / chunk.pIdxs.length >= 0.25)) { dissolved[ci] = 1; return }
-      const restPts = chunk.pIdxs.map(i => [particles[i].x0, particles[i].y0])
-      const hull = convexHull(restPts)
+      // Freeze the outline shape on first draw: once captured it never changes, so atom
+      // rearrangement / x0 rebasing can't reshape the grain border. A dissolved grain is gone
+      // forever (above); a surviving one keeps its original outline exactly.
+      if (!chunk._hull) chunk._hull = convexHull(chunk.pIdxs.map(i => [particles[i].x0, particles[i].y0]))
+      const hull = chunk._hull
       if (hull.length < 2) return
       roundedHullPath(cctx, hull, 7, 6)
-      cctx.globalAlpha = 0.85; cctx.strokeStyle = chunk.bdr; cctx.lineWidth = 2.5; cctx.stroke()
+      cctx.globalAlpha = 0.85
+      cctx.strokeStyle = darkMode ? chunk.bdr : CHUNK_BDR_LIGHT[chunk.type] ?? chunk.bdr
+      cctx.lineWidth = 2.5; cctx.stroke()
     })
     cctx.globalAlpha = 1
 
@@ -346,7 +362,7 @@ export function drawScene(canvas, phys, {
       // Thermal fade: the pink shows bond energy, which falls with temperature. Fade to grey
       // across 750→500°C (gray below 500), independent of strain, so a cooled solid is grey.
       const thermPink = Math.max(0, Math.min(1, ((targetTempC ?? 999) - 500) / 250))
-      const [cr, cg, cb] = strainColorRGB(smoothStrain * thermPink, bond.currentBreakStrain ?? 0.25)
+      const [cr, cg, cb] = strainColorRGB(smoothStrain * thermPink, bond.currentBreakStrain ?? 0.25, darkMode)
       fctx.fillStyle = `rgb(${cr},${cg},${cb})`
       // Adjust pj to the minimum-image position relative to pi for lens drawing
       const pix_v = vx(pi, bond.i), piy_v = vy(pi, bond.i)
@@ -359,7 +375,7 @@ export function drawScene(canvas, phys, {
     ctx.save()
     ctx.setTransform(1, 0, 0, 1, 0, 0)
     ctx.filter = 'blur(2px)'
-    ctx.globalCompositeOperation = 'screen'
+    ctx.globalCompositeOperation = darkMode ? 'screen' : 'multiply'
     ctx.drawImage(fl, 0, 0)
     ctx.globalCompositeOperation = 'source-over'
     ctx.filter = 'none'
