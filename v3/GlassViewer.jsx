@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import CompositionView from './CompositionView'
 import { initParticles, stepPhysics, stepFloorPhysics, PARTICLE_R, FIXED_DT, T_RIGID, freezeParticles, syncParticlesToRigidBody, stepRigidBody } from './glassPhysics.js'
-import { setSioHotMult, setFreeAttractSiOMult, setSioExclMult, setCrystJiggleMult, setBreakStrain, setReformStrain, setCrystAnchorK, setLiberateFrac, setSioK, setNaOK, setNaAnchorK, setNaLiberateFrac, setNaBreakStrain, setLatticeSpeedMult, setFreedSpeedMult, setReintBondN, setReintFrameM, setBreakStrainSpread, setSevTriggerDist, setFeedbackGainMult, setSiSiRepR0, setMotifStrength, setMotifAlign } from './meltPhysics.js'
+import { setSioHotMult, setFreeAttractSiOMult, setSioExclMult, setCrystJiggleMult, setBreakStrain, setReformStrain, setCrystAnchorK, setLiberateFrac, setSioK, setNaOK, setNaAnchorK, setNaLiberateFrac, setNaBreakStrain, setLatticeSpeedMult, setFreedSpeedMult, setReintBondN, setReintFrameM, setBreakStrainSpread, setSevTriggerDist, setFeedbackGainMult, setSiSiRepR0, setMotifStrength, setMotifAlign, setBondStiffMult, setFreedTau } from './meltPhysics.js'
 import { setVisualScale } from './renderer.js'
 import { initSandParticles, stepSandPhysics, mergeSodaGrains, mergeSilicateGrains, convertLargeNaGrains, stepNaBlobSprings, checkNaBlobMerges, absorbNearbyGrains, GRAIN_R as SAND_GRAIN_R, NA_BLOB_R_CTR } from './sandPhysics.js'
 import './GlassViewer.css'
@@ -264,11 +264,16 @@ const STICK_ANGLE = 10 * Math.PI / 180
 
 // Heat capacity multiplier — temperature rises slower in the melt zone.
 // Matches the Na-O break zone from the graph markers (650–1130°C).
-function meltHeatCapacity(tempC) {
-  const lo = 650, hi = 1130
-  if (tempC <= lo || tempC >= hi) return 1.0
-  const t = (tempC - lo) / (hi - lo)
-  return 1.0 + 3.5 * Math.sin(Math.PI * t)
+// Effective heat capacity for the melt-tab temperature integrator (slope of T vs energy = 1/hc).
+// Na₂O-bearing mixes step up once as the flux starts melting (~650–750°C) and then stay on a
+// flat plateau — no drop back to 1, which produced a sharp slope kink at 1130°C.
+// Scaled by Na₂O fraction (30% = full plateau); pure SiO₂ stays at 1 (no melting below 1600°C).
+const HC_RAMP_LO = 650, HC_RAMP_HI = 750
+function meltHeatCapacity(tempC, na2oPct, plateau) {
+  const amp = (plateau - 1) * Math.min(1, na2oPct / 30)
+  if (amp <= 0 || tempC <= HC_RAMP_LO) return 1.0
+  const t = Math.min(1, (tempC - HC_RAMP_LO) / (HC_RAMP_HI - HC_RAMP_LO))
+  return 1.0 + amp * t * t * (3 - 2 * t)   // smoothstep
 }
 
 const COOL_MIN_TEMP = 1500   // Slow/Fast Cool only engage from a full melt
@@ -306,6 +311,9 @@ export default function GlassViewer() {
   const [freeAttractSiOMult, setFreeAttractSiOMultState] = useState(1.0)
   const [sioExclMult, setSioExclMultState]     = useState(1.4)
   const [siSiRepR0,     setSiSiRepR0State]     = useState(15.6)
+  const [freedTau,      setFreedTauState]      = useState(0.10)
+  const [bondStiffMult, setBondStiffMultState] = useState(1.0)
+  const [hcPlateau,     setHcPlateau]          = useState(4)
   const [motifStrength, setMotifStrengthState] = useState(0.004)
   const [motifAlign,    setMotifAlignState]    = useState(0.5)
   const [crystJiggleMult, setCrystJiggleMultState] = useState(1.0)
@@ -317,7 +325,7 @@ export default function GlassViewer() {
   const [liberateFrac,  setLiberateFracState]  = useState(0.5)
   const [naAnchorK,     setNaAnchorKState]     = useState(0.06)
   const [naLiberateFrac, setNaLiberateFracState] = useState(0.5)
-  const [naBreakStrain,     setNaBreakStrainState]     = useState(0.04)
+  const [naBreakStrain,     setNaBreakStrainState]     = useState(0.03)
   const [breakStrainSpread, setBreakStrainSpreadState] = useState(0.15)
   const [latticeSpeedMult, setLatticeSpeedMultState] = useState(1.0)
   const [freedSpeedMult,   setFreedSpeedMultState]   = useState(3.5)
@@ -393,6 +401,7 @@ export default function GlassViewer() {
   }, [])
   const glassVisualTypesRef = useRef(null)   // per-particle display color, assigned at init
   const presetIdRef  = useRef(presetId)
+  const hcPlateauRef = useRef(4)
   const glassDkRef   = useRef(darkMode)
 
   // ── Shared temperature — single source of truth for both Glass and Melt tabs ──
@@ -462,7 +471,8 @@ export default function GlassViewer() {
         if (!atFloor && !atCeiling) {
           const rawDelta = (input / 100) * s.baseRate * elapsed
           meltCumulativeEnergyRef.current += rawDelta
-          const hcFactor = meltHeatCapacity(st.temp)
+          const pr       = PRESETS.find(x => x.id === presetIdRef.current) ?? PRESETS[0]
+          const hcFactor = meltHeatCapacity(st.temp, pr.na2o, hcPlateauRef.current)
           st.temp = Math.max(0, Math.min(1800, st.temp + rawDelta / hcFactor))
           if (++tick % 6 === 0) setMeltLocalTemp(Math.round(st.temp))
         }
@@ -1799,10 +1809,6 @@ export default function GlassViewer() {
             {showDev && <>
               <div className="viz-section-title">Dev (type "dev" to hide)</div>
               {tab === 'melt' && <>
-                <label style={{display:'flex', alignItems:'center', gap:6, fontSize:12, color:'#ccc', marginBottom:8, cursor:'pointer'}}>
-                  <input type="checkbox" checked={useEmaStrain} onChange={e => setUseEmaStrain(e.target.checked)} style={{accentColor:'#88ddaa'}} />
-                  EMA strain (α=0.1) — uncheck for instant break
-                </label>
                 <div style={{fontFamily:'monospace', fontSize:12, color:'#e0d080', background:'rgba(255,220,80,0.07)', border:'1px solid rgba(255,220,80,0.2)', borderRadius:4, padding:'5px 8px', marginBottom:8}}>
                   <div style={{fontSize:10, color:'#888', marginBottom:2, letterSpacing:'0.05em'}}>TARGET ENERGY (ePerParticle)</div>
                   <div>{targetE.toExponential(4)}  <span style={{color:'#88ddaa'}}>{(fBroken*100).toFixed(1)}% broken</span></div>
@@ -1811,11 +1817,77 @@ export default function GlassViewer() {
                   <div style={{marginTop:2}}><span style={{fontSize:10, color:'#888'}}>effThresh ×1k: </span><span style={{color:'#ffcc88'}}>{(meanEffThreshold * 1000).toFixed(1)}</span></div>
                   <div style={{marginTop:3}}><span style={{fontSize:10, color:'#888'}}>sev fires/sec: </span><span style={{color:'#ffaa88'}}>{sevFireRate.toFixed(1)}</span></div>
                 </div>
+                <div style={{fontSize:11, color:'#aaa', marginTop:10, marginBottom:3, letterSpacing:'0.06em'}}>── Active: Na₂O breaking ──</div>
+                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Na break strain: <span style={{color:'#a090d0'}}>{naBreakStrain.toFixed(3)}</span></div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={0.005} max={0.15} step={0.005} value={naBreakStrain}
+                  onChange={e => { const v = +e.target.value; setNaBreakStrainState(v); setNaBreakStrain(v) }} />
                 <div style={{fontSize:11, color:'#888', marginBottom:2}}>Feedback gain ×: <span style={{color:'#a090d0'}}>{feedbackGainMult.toFixed(1)}</span></div>
                 <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
                   min={0} max={200} step={1} value={feedbackGainMult}
                   onChange={e => { const v = +e.target.value; setFeedbackGainMultState(v); setFeedbackGainMult(v) }} />
-
+                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Intact bond stiffness ×: <span style={{color:'#a090d0'}}>{bondStiffMult.toFixed(1)}</span> (× pair k, beyond capture)</div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={0} max={5} step={0.1} value={bondStiffMult}
+                  onChange={e => { const v = +e.target.value; setBondStiffMultState(v); setBondStiffMult(v) }} />
+                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Sev trigger dist: <span style={{color:'#a090d0'}}>{sevTriggerDist.toFixed(1)} px</span></div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={5} max={20} step={0.5} value={sevTriggerDist}
+                  onChange={e => { const v = +e.target.value; setSevTriggerDistState(v); setSevTriggerDist(v) }} />
+                <div style={{fontSize:11, color:'#aaa', marginTop:10, marginBottom:3, letterSpacing:'0.06em'}}>── Active: freed travel ──</div>
+                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Freed speed ×: <span style={{color:'#a090d0'}}>{freedSpeedMult.toFixed(2)}</span></div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={0.25} max={5.0} step={0.25} value={freedSpeedMult}
+                  onChange={e => { const v = +e.target.value; setFreedSpeedMultState(v); setFreedSpeedMult(v) }} />
+                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Freed τ (travel): <span style={{color:'#a090d0'}}>{freedTau.toFixed(3)}</span> → straight run ≈ {(1/freedTau).toFixed(0)} substeps</div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={0.005} max={0.2} step={0.005} value={freedTau}
+                  onChange={e => { const v = +e.target.value; setFreedTauState(v); setFreedTau(v) }} />
+                <div style={{fontSize:11, color:'#aaa', marginTop:10, marginBottom:3, letterSpacing:'0.06em'}}>── Active: melt / cooling ──</div>
+                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Melt heat capacity plateau (Na₂O, &gt;750°C): <span style={{color:'#a090d0'}}>{hcPlateau.toFixed(2)}×</span></div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={1} max={8} step={0.1} value={hcPlateau}
+                  onChange={e => { const v = +e.target.value; setHcPlateau(v); hcPlateauRef.current = v }} />
+                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Si-Si repulsion r₀: <span style={{color:'#a090d0'}}>{siSiRepR0.toFixed(1)} px</span> → min Si-O-Si ≈ {Math.round(2 * Math.asin(Math.min(1, siSiRepR0 / (2 * sioR0))) * 180 / Math.PI)}°</div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={10} max={20} step={0.2} value={siSiRepR0}
+                  onChange={e => { const v = +e.target.value; setSiSiRepR0State(v); setSiSiRepR0(v) }} />
+                <div style={{fontSize:11, color:'#888', marginBottom:2}}>Motif strength: <span style={{color:'#a090d0'}}>{motifStrength.toFixed(4)}</span></div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={0} max={0.02} step={0.0005} value={motifStrength}
+                  onChange={e => { const v = +e.target.value; setMotifStrengthState(v); setMotifStrength(v) }} />
+                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Motif align (slow): <span style={{color:'#a090d0'}}>{motifAlign.toFixed(2)}</span></div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={0} max={1} step={0.05} value={motifAlign}
+                  onChange={e => { const v = +e.target.value; setMotifAlignState(v); setMotifAlign(v) }} />
+                <div style={{fontSize:11, color:'#aaa', marginTop:10, marginBottom:4, letterSpacing:'0.06em'}}>── Overlay ──</div>
+                <div style={{fontSize:11, color:'#888', marginBottom:4}}>Atom color</div>
+                <div style={{display:'flex', gap:3, flexWrap:'wrap'}}>
+                  {['normal','freed','coordination','attract'].map(m => (
+                    <button key={m} onClick={() => setAtomColorMode(m)}
+                      style={{fontSize:10, padding:'2px 5px', cursor:'pointer', userSelect:'none',
+                        background: atomColorMode===m ? '#6050a0' : '#2a2a3a',
+                        color: atomColorMode===m ? '#fff' : '#aaa',
+                        border: atomColorMode===m ? '1px solid #a090e0' : '1px solid #444',
+                        borderRadius:3}}>
+                      {m}
+                    </button>
+                  ))}
+                </div>
+                <label style={{display:'flex', alignItems:'center', gap:4, fontSize:11, color:'rgba(255,255,255,0.42)', cursor:'pointer', marginTop:6, userSelect:'none'}}>
+                  <input type="checkbox" checked={showBrokenBonds} onChange={e => setShowBrokenBonds(e.target.checked)} style={{accentColor:'#8070c0', cursor:'pointer'}} />
+                  Show broken bonds
+                </label>
+                <label style={{display:'flex', alignItems:'center', gap:4, fontSize:11, color:'rgba(255,255,255,0.42)', cursor:'pointer', marginTop:4, userSelect:'none'}}>
+                  <input type="checkbox" checked={showLiveStats} onChange={e => setShowLiveStats(e.target.checked)} style={{accentColor:'#8070c0', cursor:'pointer'}} />
+                  Live stats HUD
+                </label>
+                <div style={{borderTop:'1px solid #333', margin:'14px 0 4px'}} />
+                <div style={{fontSize:11, color:'#aaa', marginTop:10, marginBottom:3, letterSpacing:'0.06em'}}>── Other ──</div>
+                <label style={{display:'flex', alignItems:'center', gap:6, fontSize:12, color:'#ccc', marginBottom:8, cursor:'pointer'}}>
+                  <input type="checkbox" checked={useEmaStrain} onChange={e => setUseEmaStrain(e.target.checked)} style={{accentColor:'#88ddaa'}} />
+                  EMA strain (α=0.1) — uncheck for instant break
+                </label>
                 <div style={{fontSize:11, color:'#888', marginBottom:2}}>Si-O r₀: <span style={{color:'#a090d0'}}>{sioR0} px</span></div>
                 <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
                   min={5} max={15} step={0.5} value={sioR0} onChange={e => setSioR0(+e.target.value)} />
@@ -1842,19 +1914,6 @@ export default function GlassViewer() {
                 <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
                   min={1.0} max={2.0} step={0.05} value={sioExclMult}
                   onChange={e => { const v = +e.target.value; setSioExclMultState(v); setSioExclMult(v) }} />
-                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Si-Si repulsion r₀: <span style={{color:'#a090d0'}}>{siSiRepR0.toFixed(1)} px</span> → min Si-O-Si ≈ {Math.round(2 * Math.asin(Math.min(1, siSiRepR0 / (2 * sioR0))) * 180 / Math.PI)}°</div>
-                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
-                  min={10} max={20} step={0.2} value={siSiRepR0}
-                  onChange={e => { const v = +e.target.value; setSiSiRepR0State(v); setSiSiRepR0(v) }} />
-                <div style={{fontSize:11, color:'#aaa', marginTop:10, marginBottom:3, letterSpacing:'0.06em'}}>── Cooling motif ──</div>
-                <div style={{fontSize:11, color:'#888', marginBottom:2}}>Motif strength: <span style={{color:'#a090d0'}}>{motifStrength.toFixed(4)}</span></div>
-                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
-                  min={0} max={0.02} step={0.0005} value={motifStrength}
-                  onChange={e => { const v = +e.target.value; setMotifStrengthState(v); setMotifStrength(v) }} />
-                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Motif align (slow): <span style={{color:'#a090d0'}}>{motifAlign.toFixed(2)}</span></div>
-                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
-                  min={0} max={1} step={0.05} value={motifAlign}
-                  onChange={e => { const v = +e.target.value; setMotifAlignState(v); setMotifAlign(v) }} />
                 <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Crystal jiggle ×: <span style={{color:'#a090d0'}}>{crystJiggleMult.toFixed(2)}</span></div>
                 <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
                   min={0.5} max={5.0} step={0.1} value={crystJiggleMult}
@@ -1883,7 +1942,6 @@ export default function GlassViewer() {
                 <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
                   min={0.0} max={1.0} step={0.05} value={liberateFrac}
                   onChange={e => { const v = +e.target.value; setLiberateFracState(v); setLiberateFrac(v) }} />
-                <div style={{fontSize:11, color:'#aaa', marginTop:10, marginBottom:3, letterSpacing:'0.06em'}}>── Na2O ──</div>
                 <div style={{fontSize:11, color:'#888', marginBottom:2}}>Na anchor k: <span style={{color:'#a090d0'}}>{naAnchorK.toFixed(3)}</span></div>
                 <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
                   min={0} max={0.15} step={0.005} value={naAnchorK}
@@ -1892,27 +1950,14 @@ export default function GlassViewer() {
                 <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
                   min={0.0} max={1.0} step={0.05} value={naLiberateFrac}
                   onChange={e => { const v = +e.target.value; setNaLiberateFracState(v); setNaLiberateFrac(v) }} />
-                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Na break strain: <span style={{color:'#a090d0'}}>{naBreakStrain.toFixed(3)}</span></div>
-                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
-                  min={0.005} max={0.15} step={0.005} value={naBreakStrain}
-                  onChange={e => { const v = +e.target.value; setNaBreakStrainState(v); setNaBreakStrain(v) }} />
                 <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Break strain spread: <span style={{color:'#a090d0'}}>{breakStrainSpread.toFixed(3)}</span></div>
                 <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
                   min={0} max={0.20} step={0.005} value={breakStrainSpread}
                   onChange={e => { const v = +e.target.value; setBreakStrainSpreadState(v); setBreakStrainSpread(v) }} />
-                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Sev trigger dist: <span style={{color:'#a090d0'}}>{sevTriggerDist.toFixed(1)} px</span></div>
-                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
-                  min={5} max={20} step={0.5} value={sevTriggerDist}
-                  onChange={e => { const v = +e.target.value; setSevTriggerDistState(v); setSevTriggerDist(v) }} />
-                <div style={{fontSize:11, color:'#aaa', marginTop:10, marginBottom:3, letterSpacing:'0.06em'}}>── Speed ──</div>
                 <div style={{fontSize:11, color:'#888', marginBottom:2}}>Lattice speed ×: <span style={{color:'#a090d0'}}>{latticeSpeedMult.toFixed(2)}</span></div>
                 <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
                   min={0.25} max={3.0} step={0.05} value={latticeSpeedMult}
                   onChange={e => { const v = +e.target.value; setLatticeSpeedMultState(v); setLatticeSpeedMult(v) }} />
-                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Freed speed ×: <span style={{color:'#a090d0'}}>{freedSpeedMult.toFixed(2)}</span></div>
-                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
-                  min={0.25} max={5.0} step={0.25} value={freedSpeedMult}
-                  onChange={e => { const v = +e.target.value; setFreedSpeedMultState(v); setFreedSpeedMult(v) }} />
                 <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Reint bonds N: <span style={{color:'#a090d0'}}>{reintBondN}</span></div>
                 <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
                   min={1} max={6} step={1} value={reintBondN}
@@ -1928,28 +1973,6 @@ export default function GlassViewer() {
                 <label style={{display:'flex', alignItems:'center', gap:4, fontSize:11, color:'rgba(255,255,255,0.42)', cursor:'pointer', marginTop:6, userSelect:'none'}}>
                   <input type="checkbox" checked={bondNums} onChange={e => setBondNums(e.target.checked)} style={{accentColor:'#8070c0', cursor:'pointer'}} />
                   Bond #s
-                </label>
-                <div style={{fontSize:11, color:'#aaa', marginTop:10, marginBottom:4, letterSpacing:'0.06em'}}>── Overlay ──</div>
-                <div style={{fontSize:11, color:'#888', marginBottom:4}}>Atom color</div>
-                <div style={{display:'flex', gap:3, flexWrap:'wrap'}}>
-                  {['normal','freed','coordination','attract'].map(m => (
-                    <button key={m} onClick={() => setAtomColorMode(m)}
-                      style={{fontSize:10, padding:'2px 5px', cursor:'pointer', userSelect:'none',
-                        background: atomColorMode===m ? '#6050a0' : '#2a2a3a',
-                        color: atomColorMode===m ? '#fff' : '#aaa',
-                        border: atomColorMode===m ? '1px solid #a090e0' : '1px solid #444',
-                        borderRadius:3}}>
-                      {m}
-                    </button>
-                  ))}
-                </div>
-                <label style={{display:'flex', alignItems:'center', gap:4, fontSize:11, color:'rgba(255,255,255,0.42)', cursor:'pointer', marginTop:6, userSelect:'none'}}>
-                  <input type="checkbox" checked={showBrokenBonds} onChange={e => setShowBrokenBonds(e.target.checked)} style={{accentColor:'#8070c0', cursor:'pointer'}} />
-                  Show broken bonds
-                </label>
-                <label style={{display:'flex', alignItems:'center', gap:4, fontSize:11, color:'rgba(255,255,255,0.42)', cursor:'pointer', marginTop:4, userSelect:'none'}}>
-                  <input type="checkbox" checked={showLiveStats} onChange={e => setShowLiveStats(e.target.checked)} style={{accentColor:'#8070c0', cursor:'pointer'}} />
-                  Live stats HUD
                 </label>
               </>}
               {tab === 'glass' && <>

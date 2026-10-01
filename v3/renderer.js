@@ -29,6 +29,17 @@ const GHOST_ZONE = 25  // px from edge at which ghost copies are drawn
 
 let _visualScale = 3.3   // amplify lattice-atom displacement from x0; freed atoms unaffected
 export const setVisualScale = v => { _visualScale = v }
+// Only the first JIGGLE_PX of displacement from x0 is amplified — that's the thermal jiggle the
+// scale exists to show. Real drift (dissolving grains) is drawn 1:1, otherwise an atom drifted
+// 5px drew 16px away and its bonds to freed neighbours looked ~3× too long.
+const JIGGLE_PX = 1.5
+function visOffset(p, scale) {
+  const dx = p.x - p.x0, dy = p.y - p.y0
+  const d  = Math.hypot(dx, dy)
+  if (d < 1e-9) return [0, 0]
+  const k = (d + (scale - 1) * Math.min(d, JIGGLE_PX)) / d
+  return [dx * k, dy * k]
+}
 export const getVisualScale = () => _visualScale
 
 export const C = {
@@ -233,8 +244,8 @@ export function drawScene(canvas, phys, {
   const t = ts / 1000   // seconds for jitter functions
 
   // Visual position: lattice atoms are amplified from x0/y0; freed atoms show at real position
-  const vx = (p, i) => latticeFreed?.[i] ? p.x : p.x0 + (p.x - p.x0) * visualScale
-  const vy = (p, i) => latticeFreed?.[i] ? p.y : p.y0 + (p.y - p.y0) * visualScale
+  const vx = (p, i) => latticeFreed?.[i] ? p.x : p.x0 + visOffset(p, visualScale)[0]
+  const vy = (p, i) => latticeFreed?.[i] ? p.y : p.y0 + visOffset(p, visualScale)[1]
 
   // Overlay bond count — mirrors attract loop exactly: count ALL phys.bonds (including broken)
   let overlayBondCount = null
@@ -302,7 +313,9 @@ export function drawScene(canvas, phys, {
 
     for (let b = 0; b < bonds.length; b++) {
       const bond = bonds[b]
-      if (showBrokenBonds && bond.broken) continue   // drawn separately below
+      // Broken bonds are never drawn as bonds — they'd show as long pink streaks while the
+      // atoms drift apart. The showBrokenBonds overlay (below) draws them when requested.
+      if (bond.broken) continue
       const pi = particles[bond.i], pj = particles[bond.j]
       // Use minimum image for all distance/direction calculations (toroidal wrap)
       const rawDx = pj.x - pi.x, rawDy = pj.y - pi.y
@@ -593,8 +606,8 @@ export function findAtomNear(phys, physX, physY, vs) {
   if (!phys?.particles) return -1
   const { particles } = phys
   const lf = phys.latticeFreed
-  const vxf = (p, i) => lf?.[i] ? p.x : p.x0 + (p.x - p.x0) * vs
-  const vyf = (p, i) => lf?.[i] ? p.y : p.y0 + (p.y - p.y0) * vs
+  const vxf = (p, i) => lf?.[i] ? p.x : p.x0 + visOffset(p, vs)[0]
+  const vyf = (p, i) => lf?.[i] ? p.y : p.y0 + visOffset(p, vs)[1]
   let best = -1, bestD2 = Infinity
   for (let i = 0; i < particles.length; i++) {
     const p = particles[i]

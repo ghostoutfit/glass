@@ -56,7 +56,7 @@ let _crystAnchorK    = 0.06  // crystAnchor spring constant for SiO2 network ato
 let _liberateFrac    = 0.5   // liberation fraction for SiO2 atoms (1.0 = all broken, 0.5 = majority broken)
 let _naAnchorK       = 0.06  // naAnchor spring constant for Na2O atoms (independent of _crystAnchorK)
 let _naLiberateFrac  = 0.5   // liberation fraction for Na2O atoms
-let _naBreakStrain   = 0.04  // break strain for Na-O bonds (independent of Si-O _breakStrain)
+let _naBreakStrain   = 0.03  // break strain for Na-O bonds (independent of Si-O _breakStrain)
 let _breakStrainSpread = 0.15 // per-bond random ± factor drawn at buildRigidBondMap; 0 = uniform
 let _useEmaStrain     = false // true = EMA-smoothed strain for break check; false = instantaneous
 let _sevTriggerDist   = 13   // px — freed modifier ion must be within this distance of a Si or O to sever the Si-O bond
@@ -69,6 +69,8 @@ let _freedSpeedMult   = 3.5  // kick-sigma multiplier for freed atoms
 let _reintBondN       = 2    // min intact bonds to count toward re-integration
 let _reintFrameM      = 30   // consecutive frames with ≥N bonds before cleared
 const REINT_RAMP_FRAMES = 10  // frames to ramp speed mult from freed→lattice after re-integration
+let _freedTau          = 0.10  // Langevin coupling for freed atoms; lower = longer straight runs, same temperature
+let _bondStiffMult     = 1.0   // multiplier on intact rigid-bond restoring spring (above projection cutoff)
 let _motifStrength    = 0.004 // max motif-bias spring k at full cooling ramp (see applyMotifBias)
 let _motifAlign       = 0.5   // slow cool: fraction of the neighbour-orientation offset each Si's slots adopt (0–1)
 export const setSioHotMult         = v => { _sioHotMult = v }
@@ -90,6 +92,8 @@ export const setLatticeSpeedMult   = v => { _latticeSpeedMult = v }
 export const setFreedSpeedMult     = v => { _freedSpeedMult = v }
 export const setReintBondN         = v => { _reintBondN = v }
 export const setReintFrameM        = v => { _reintFrameM = v }
+export const setFreedTau           = v => { _freedTau = v }
+export const setBondStiffMult      = v => { _bondStiffMult = v }
 export const setMotifStrength      = v => { _motifStrength = v }
 export const setMotifAlign         = v => { _motifAlign = v }
 export const setSiSiRepR0          = v => { PAIR_TABLE[0][0].r0 = v }
@@ -714,6 +718,31 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
       }
     }
 
+    // ── Intact rigid-bond restoring spring (above XPBD projection cutoff) ────
+    // The pair spring only acts inside the capture range (r0·mult ≈ +3–7%), so an intact
+    // bond stretched past it had NO restoring force and drifted apart while still "intact".
+    // This spring extends the pair spring (same k × _bondStiffMult) out to any stretch, so an
+    // intact bond is always pulled back toward r0 and only breaks when a fluctuation beats
+    // effThreshold. Inside the capture range the pair spring already supplies 1×k.
+    if (phys.rigidBonds) {
+      for (const rb of phys.rigidBonds) {
+        if (rb.broken || totalEnergy <= rb.projectionCutoff) continue
+        const pi = particles[rb.i], pj = particles[rb.j]
+        const spec = PAIR_TABLE[pi.typeId][pj.typeId]
+        if (!spec) continue
+        const dx = miDx(pj.x - pi.x), dy = miDy(pj.y - pi.y)
+        const d  = Math.hypot(dx, dy)
+        if (d <= rb.r0 || d < 0.01) continue   // stretch only; compression handled by hard-sphere
+        const stiff   = _bondStiffMult
+        const capture = spec.r0 * (spec === PAIR_TABLE[0][1] ? sioMult : spec.mult)
+        const kEff    = d < capture ? spec.k * Math.max(0, stiff - 1) : spec.k * stiff
+        const f = kEff * (d - rb.r0)
+        const nx = dx / d, ny = dy / d
+        fx[rb.i] += f * nx;  fy[rb.i] += f * ny
+        fx[rb.j] -= f * nx;  fy[rb.j] -= f * ny
+      }
+    }
+
     // ── Cooling attraction — coordination-driven assembly ───────────────────
     // slow: hex-directed Si-O via idealHexAngle → consistent 120° angles → crystalline.
     // fast: isotropic Si-O → random angles → amorphous.
@@ -938,19 +967,24 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
       // Higher values keep edge atoms as tight as interior ones; lower values bring
       // measured KE closer to the thermostat target.
       const kickSigmaCryst    = kickSigma * _crystJiggleMult
+      // Freed atoms use their own coupling: v_rms is τ-independent, but the distance an atom
+      // travels before its direction is randomised scales ~1/τ.
+      const DAMP_F            = 1 - _freedTau
+      const kickSigmaF        = vTarget * Math.sqrt(_freedTau)
       for (let i = 0; i < n; i++) {
         const isFreed = latticeFreed[i]
         const rampFrames = phys.reintRampFrames?.[i] ?? 0
         const kickMult = rampFrames > 0
           ? _latticeSpeedMult + (rampFrames / REINT_RAMP_FRAMES) * (freedMultEff - _latticeSpeedMult)
           : (isFreed ? freedMultEff : _latticeSpeedMult)
-        const baseSigma = (crystAnchor[i] || naAnchor[i]) ? kickSigmaCryst : kickSigma
+        const baseSigma = isFreed ? kickSigmaF : (crystAnchor[i] || naAnchor[i]) ? kickSigmaCryst : kickSigma
+        const damp      = isFreed ? DAMP_F : DAMP
         const ks = baseSigma * kickMult
         const u1 = Math.random() || 1e-10
         const r  = Math.sqrt(-2 * Math.log(u1)) * ks
         const a  = Math.random() * Math.PI * 2
-        particles[i].vx = particles[i].vx * DAMP + r * Math.cos(a)
-        particles[i].vy = particles[i].vy * DAMP + r * Math.sin(a)
+        particles[i].vx = particles[i].vx * damp + r * Math.cos(a)
+        particles[i].vy = particles[i].vy * damp + r * Math.sin(a)
       }
     }
     // Speed cap — clamps all particles (including freed KMT bodies) so no particle
