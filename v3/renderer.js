@@ -543,17 +543,18 @@ function drawLiveStats(ctx, phys, targetTempC, selectedIdx = -1) {
   if (selectedIdx >= 0 && selectedIdx < n) {
     const sp = ps[selectedIdx]
     selBondLines.push(`  ► #${selectedIdx} ${sp.type} (${phys.latticeFreed?.[selectedIdx] ? 'freed' : 'lattice'})`)
-    const myRigid = (phys.rigidBonds ?? []).filter(rb => rb.i === selectedIdx || rb.j === selectedIdx)
-    for (const rb of myRigid) {
-      const oi  = rb.i === selectedIdx ? rb.j : rb.i
-      const po  = ps[oi]
-      const d   = Math.hypot(sp.x - po.x, sp.y - po.y).toFixed(1)
-      const bEntry = (phys.bonds ?? []).find(b => (b.i===rb.i&&b.j===rb.j)||(b.i===rb.j&&b.j===rb.i))
-      const s   = bEntry ? (bEntry.strain >= 0 ? '+' : '') + bEntry.strain.toFixed(3) : '—'
-      const state = rb.broken ? 'BRK' : 'ok '
-      selBondLines.push(`    ${po.type}#${oi} ${d.padStart(5)}px ${state} s=${s}`)
+    const myBonds = (phys.bonds ?? []).filter(b => b.i === selectedIdx || b.j === selectedIdx)
+    for (const b of myBonds) {
+      const oi    = b.i === selectedIdx ? b.j : b.i
+      const po    = ps[oi]
+      const d     = Math.hypot(sp.x - po.x, sp.y - po.y).toFixed(1)
+      const rigid = b.currentBreakStrain !== undefined
+      const state = !rigid ? 'soft' : b.broken ? 'BRK ' : 'ok  '
+      const avgs  = rigid && b.avgStrain    != null ? (b.avgStrain    * 1000).toFixed(1) : '—'
+      const thr   = rigid && b.effThreshold != null ? (b.effThreshold * 1000).toFixed(1) : '—'
+      selBondLines.push(`    ${po.type}#${oi} ${d.padStart(5)}px ${state} avgs=${avgs} thr=${thr}`)
     }
-    if (myRigid.length === 0) selBondLines.push('    (no rigid bonds)')
+    if (myBonds.length === 0) selBondLines.push('    (no bonds)')
   }
 
   const lines = [
@@ -561,7 +562,7 @@ function drawLiveStats(ctx, phys, targetTempC, selectedIdx = -1) {
     `T meas ${measuredTempC}°C`,
     `bonds  ${bondStr}`,
     ...selBondLines,
-    `broken ${brokenRigid} rigid`,
+    `broken ${brokenRigid} rigid  (${(((phys.fBroken ?? 0) * 100)).toFixed(1)}%)`,
     `coord  Si ${meanSiCoord}/3`,
     sio2T ? `freed  SiO₂ ${Math.round(sio2F / sio2T * 100)}%` : null,
     na2oT ? `freed  Na₂O ${Math.round(na2oF / na2oT * 100)}%` : null,

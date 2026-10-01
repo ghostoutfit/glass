@@ -56,7 +56,14 @@ let _crystAnchorK    = 0.06  // crystAnchor spring constant for SiO2 network ato
 let _liberateFrac    = 0.5   // liberation fraction for SiO2 atoms (1.0 = all broken, 0.5 = majority broken)
 let _naAnchorK       = 0.06  // naAnchor spring constant for Na2O atoms (independent of _crystAnchorK)
 let _naLiberateFrac  = 0.5   // liberation fraction for Na2O atoms
-let _naBreakStrain   = 0.1   // break strain for Na-O bonds (independent of Si-O _breakStrain)
+let _naBreakStrain   = 0.04  // break strain for Na-O bonds (independent of Si-O _breakStrain)
+let _breakStrainSpread = 0.15 // per-bond random ± factor drawn at buildRigidBondMap; 0 = uniform
+let _useEmaStrain     = false // true = EMA-smoothed strain for break check; false = instantaneous
+let _sevTriggerDist   = 13   // px — freed modifier ion must be within this distance of a Si or O to sever the Si-O bond
+// Feedback loop calibration: GAIN interpolated on sio2Pct between soda (70%) and silica (100%)
+const FEEDBACK_GAIN_SODA   = 0.437  // 70% SiO2 / 30% Na2O: f=0 at 500°C, f=1 at 1322°C
+const FEEDBACK_GAIN_SILICA = 0.112  // 100% SiO2:             f=0 at 1500°C, f=1 at 1920°C
+let _feedbackGainMult = 100         // scalar multiplier on GAIN — dial up/down feedback ramp speed
 let _latticeSpeedMult = 1.0  // kick-sigma multiplier for bonded (non-freed) atoms
 let _freedSpeedMult   = 3.5  // kick-sigma multiplier for freed atoms
 let _reintBondN       = 2    // min intact bonds to count toward re-integration
@@ -73,6 +80,10 @@ export const setLiberateFrac       = v => { _liberateFrac = v }
 export const setNaAnchorK          = v => { _naAnchorK = v }
 export const setNaLiberateFrac     = v => { _naLiberateFrac = v }
 export const setNaBreakStrain      = v => { _naBreakStrain = v }
+export const setBreakStrainSpread  = v => { _breakStrainSpread = v }
+export const setUseEmaStrain       = v => { _useEmaStrain = v }
+export const setSevTriggerDist     = v => { _sevTriggerDist = v }
+export const setFeedbackGainMult   = v => { _feedbackGainMult = v }
 export const setLatticeSpeedMult   = v => { _latticeSpeedMult = v }
 export const setFreedSpeedMult     = v => { _freedSpeedMult = v }
 export const setReintBondN         = v => { _reintBondN = v }
@@ -302,7 +313,8 @@ export function buildRigidBondMap(phys) {
       const dx = pj.x - pi.x, dy = pj.y - pi.y
       const d  = Math.hypot(dx, dy)
       if (!spec.repOnly && d < spec.r0 * effMult && (!spec.oneSided || d >= spec.r0 * 0.9)) {
-        const isSiO = spec === PAIR_TABLE[0][1]
+        const isSiO  = spec === PAIR_TABLE[0][1]
+        const factor = 1 + (Math.random() * 2 - 1) * _breakStrainSpread
         bonds.push({
           i, j, r0: d,
           broken: false,
@@ -310,6 +322,9 @@ export function buildRigidBondMap(phys) {
           isSiO,
           specMult: isSiO ? null : spec.mult,
           bondDepth: 0.5 * spec.k * (d * (spec.mult - 1)) ** 2,
+          breakStrain:      (isSiO ? _breakStrain : _naBreakStrain) * factor,
+          projectionCutoff: (isSiO ? 1700 : 650) * factor,
+          avgStrain:        0,
         })
       }
     }
@@ -645,13 +660,14 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
     // ── Rigid bond projection (XPBD-style, unconditionally stable) ──
     // Directly corrects bond lengths rather than applying spring forces.
     // Zeroing the relative velocity along the bond axis prevents energy pump.
-    // Above 900 °C the network should be freely molten — skip the constraint so
-    // atoms can separate. Below 900 °C bonds re-form as temperature drops.
+    // Si-O: XPBD enforced up to 1700 °C (network former, stays rigid longer).
+    // Na-O / Ca-O: XPBD enforced up to 650 °C (modifiers release earlier).
     // Distance guard (> 3×r0) prevents rubber-banding original partners that
     // have drifted far apart during melt back together on cooling.
-    if (phys.rigidBonds && totalEnergy <= 900) {
+    if (phys.rigidBonds) {
       for (const rb of phys.rigidBonds) {
         if (rb.broken) continue
+        if (totalEnergy > rb.projectionCutoff) continue
         const pi = particles[rb.i], pj = particles[rb.j]
         const dx = miDx(pj.x - pi.x), dy = miDy(pj.y - pi.y)
         const d  = Math.hypot(dx, dy)
@@ -778,13 +794,25 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
     }
   }
 
-  // ── Bond breaking / reforming (strain-based) ─────────────────────────────
-  // Si-O uses _breakStrain (default 0.07 = 4 kT at 1600°C).
-  // Na-O uses _naBreakStrain (default 0.07, independently tunable).
-  // Reform threshold (_reformStrain) is shared — apply independently if needed later.
-  // Hysteresis between break and reform prevents same-frame break/reform cycling
-  // and lets intactCount stay zero long enough to trigger liberation.
+  // ── Bond breaking / reforming (strain-based, with feedback) ─────────────────
+  // Effective threshold = rb.breakStrain × (1 + GAIN × fBroken).
+  // As bonds break, thresholds rise, slowing further breaking until equilibrium.
+  // EMA strain (α=0.1) prevents rare fluctuations from trickling bonds forever.
+  let brokenCount = 0, totalBreakable = 0
+  if (phys.rigidBonds) {
+    for (const rb of phys.rigidBonds) {
+      if (!rb.breakable) continue
+      totalBreakable++
+      if (rb.broken) brokenCount++
+    }
+  }
+  const fBroken    = totalBreakable > 0 ? brokenCount / totalBreakable : 0
+  const sio2Pct    = phys.sio2Pct ?? 70
+  const GAIN       = FEEDBACK_GAIN_SILICA + (FEEDBACK_GAIN_SODA - FEEDBACK_GAIN_SILICA) * Math.max(0, Math.min(1, (100 - sio2Pct) / 30))
+  phys.fBroken     = fBroken   // expose for HUD
+
   let breakKERemoved = 0, breakKEReturned = 0
+  let strainSum = 0, thrSum = 0, strainCount = 0, maxAvgStrain = 0
   if (phys.rigidBonds) {
     for (const rb of phys.rigidBonds) {
       if (!rb.breakable) continue
@@ -792,10 +820,16 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
       const dy = miDy(particles[rb.j].y - particles[rb.i].y)
       const d  = Math.hypot(dx, dy)
       const strain = (d - rb.r0) / rb.r0
-      const wasBroken = rb.broken
-      const bsThresh = rb.isSiO ? _breakStrain : _naBreakStrain
+      rb.avgStrain  = _useEmaStrain ? rb.avgStrain * 0.9 + strain * 0.1 : strain
+      const effThreshold = rb.breakStrain * (1 + GAIN * _feedbackGainMult * fBroken)
+      rb.effThreshold = effThreshold
       if (!rb.broken) {
-        if (strain > bsThresh) rb.broken = true
+        strainSum += rb.avgStrain; thrSum += effThreshold; strainCount++
+        if (rb.avgStrain > maxAvgStrain) maxAvgStrain = rb.avgStrain
+      }
+      const wasBroken = rb.broken
+      if (!rb.broken) {
+        if (rb.avgStrain > effThreshold) rb.broken = true
       } else {
         if (strain <= _reformStrain) rb.broken = false
       }
@@ -819,6 +853,9 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
   }
   phys.breakKERemoved  = breakKERemoved
   phys.breakKEReturned = breakKEReturned
+  phys.maxAvgStrain    = maxAvgStrain
+  phys.meanAvgStrain   = strainCount > 0 ? strainSum / strainCount : 0
+  phys.meanEffThreshold = strainCount > 0 ? thrSum   / strainCount : 0
 
   // Count intact bonds per atom.
   const intactCount  = new Int32Array(n)
@@ -954,24 +991,27 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
   }
 
   // ── Si-O bond severance by modifier ion contact ──────────────────────────
-  // A freed Na⁺ or Ca²⁺ touching a Si or O atom immediately severs that rigid bond.
-  // breakable stays false so the bond can never reform.
+  // A freed Na⁺ or Ca²⁺ within _sevTriggerDist px of either endpoint of an intact Si-O bond severs it.
+  let sevFiresThisStep = 0
   if (phys.rigidBonds) {
     for (const rb of phys.rigidBonds) {
-      if (rb.breakable || rb.broken) continue
+      if (!rb.isSiO || rb.broken) continue
       const pi = particles[rb.i], pj = particles[rb.j]
       for (let k = 0; k < n; k++) {
         const pk = particles[k]
         if (pk.typeId !== 2 && pk.typeId !== 3) continue  // Na, Ca only
         if (intactCount[k] > 0) continue                  // must be a freed ion
-        if (Math.hypot(pk.x - pi.x, pk.y - pi.y) < pi.r + pk.r + 1 ||
-            Math.hypot(pk.x - pj.x, pk.y - pj.y) < pj.r + pk.r + 1) {
+        if (Math.hypot(pk.x - pi.x, pk.y - pi.y) < _sevTriggerDist ||
+            Math.hypot(pk.x - pj.x, pk.y - pj.y) < _sevTriggerDist) {
           rb.broken = true
+          sevFiresThisStep++
           break
         }
       }
     }
   }
+  phys._sevFireEma = (phys._sevFireEma ?? 0) * 0.95 + sevFiresThisStep * 0.05
+  phys.sevFireRate = phys._sevFireEma * 60  // fires/sec assuming ~60 steps/sec
 
   // ── Displacement clamp ────────────────────────────────────────────────────
   // Si-O bonded atoms: tight 5px unless freed from lattice by contact, then LOOSE_WANDER.
@@ -1012,7 +1052,7 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
       const pi = particles[rb.i], pj = particles[rb.j]
       const d  = Math.hypot(miDx(pj.x - pi.x), miDy(pj.y - pi.y))
       if (d >= 40) continue
-      bonds.push({ i: rb.i, j: rb.j, strain: (d - rb.r0) / rb.r0, currentBreakStrain: rb.isSiO ? _breakStrain : _naBreakStrain, broken: rb.broken })
+      bonds.push({ i: rb.i, j: rb.j, strain: (d - rb.r0) / rb.r0, currentBreakStrain: rb.breakStrain, broken: rb.broken, avgStrain: rb.avgStrain, effThreshold: rb.effThreshold })
     }
   }
   // Dynamic soft bonds: Na-O / Ca-O pairs not already in rigidBonds
@@ -1087,3 +1127,28 @@ export function rebuildBonds(phys) {
   phys.bonds = bonds
 }
 
+// ── Calibration helper ────────────────────────────────────────────────────────
+// Call from browser console: measureStrain95()
+// Hold sim at a target temperature, let it settle, then call to read the
+// 95th-percentile strain across intact rigid bonds — use as BASE for that preset.
+export function measureStrain95(phys) {
+  if (!phys?.rigidBonds || !phys?.particles) { console.warn('no phys'); return }
+  const ps = phys.particles
+  const strains = []
+  for (const rb of phys.rigidBonds) {
+    if (!rb.breakable || rb.broken) continue
+    const d = Math.hypot(miDx(ps[rb.j].x - ps[rb.i].x), miDy(ps[rb.j].y - ps[rb.i].y))
+    strains.push(Math.abs((d - rb.r0) / rb.r0))
+  }
+  if (!strains.length) { console.warn('no intact bonds'); return }
+  strains.sort((a, b) => a - b)
+  const idx50 = Math.floor(strains.length * 0.50)
+  const idx95 = Math.floor(strains.length * 0.95)
+  console.table({
+    'intact bonds': { value: strains.length },
+    'p50 strain':   { value: strains[idx50].toFixed(5) },
+    'p95 strain':   { value: strains[idx95].toFixed(5) },
+    'fBroken':      { value: (phys.fBroken ?? 0).toFixed(3) },
+  })
+  return { p50: strains[idx50], p95: strains[idx95] }
+}

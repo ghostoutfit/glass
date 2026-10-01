@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import CompositionView from './CompositionView'
 import { initParticles, stepPhysics, stepFloorPhysics, PARTICLE_R, FIXED_DT, T_RIGID, freezeParticles, syncParticlesToRigidBody, stepRigidBody } from './glassPhysics.js'
-import { setSioHotMult, setFreeAttractSiOMult, setSioExclMult, setCrystJiggleMult, setBreakStrain, setReformStrain, setCrystAnchorK, setLiberateFrac, setSioK, setNaOK, setNaAnchorK, setNaLiberateFrac, setNaBreakStrain, setLatticeSpeedMult, setFreedSpeedMult, setReintBondN, setReintFrameM } from './meltPhysics.js'
+import { setSioHotMult, setFreeAttractSiOMult, setSioExclMult, setCrystJiggleMult, setBreakStrain, setReformStrain, setCrystAnchorK, setLiberateFrac, setSioK, setNaOK, setNaAnchorK, setNaLiberateFrac, setNaBreakStrain, setLatticeSpeedMult, setFreedSpeedMult, setReintBondN, setReintFrameM, setBreakStrainSpread, setSevTriggerDist, setFeedbackGainMult } from './meltPhysics.js'
 import { setVisualScale } from './renderer.js'
 import { initSandParticles, stepSandPhysics, mergeSodaGrains, mergeSilicateGrains, convertLargeNaGrains, stepNaBlobSprings, checkNaBlobMerges, absorbNearbyGrains, GRAIN_R as SAND_GRAIN_R, NA_BLOB_R_CTR } from './sandPhysics.js'
 import './GlassViewer.css'
@@ -286,6 +286,15 @@ export default function GlassViewer() {
   const [meltEnergyIn,   setMeltEnergyIn]   = useState(0)    // -100..100, snaps to 0
   const [meltLocalTemp,  setMeltLocalTemp]  = useState(500)  // melt tab's own temperature
   const [derivedTemp,    setDerivedTemp]    = useState(500)  // KE-measured temperature
+  const [targetE,        setTargetE]        = useState((500 + 273) * 1.62e-6)
+  const [fBroken,        setFBroken]        = useState(0)
+  const [maxAvgStrain,   setMaxAvgStrain]   = useState(0)
+  const [meanAvgStrain,  setMeanAvgStrain]  = useState(0)
+  const [meanEffThreshold, setMeanEffThreshold] = useState(0)
+  const [useEmaStrain,   setUseEmaStrain]   = useState(false)
+  const [sevTriggerDist, setSevTriggerDistState] = useState(13)
+  const [feedbackGainMult, setFeedbackGainMultState] = useState(100)
+  const [sevFireRate,    setSevFireRate]    = useState(0)
   const [simSpeed, setSimSpeed]   = useState(0.5)
   const [sioR0, setSioR0]         = useState(9)
   const [attractK, setAttractK]         = useState(0.10)
@@ -303,7 +312,8 @@ export default function GlassViewer() {
   const [liberateFrac,  setLiberateFracState]  = useState(0.5)
   const [naAnchorK,     setNaAnchorKState]     = useState(0.06)
   const [naLiberateFrac, setNaLiberateFracState] = useState(0.5)
-  const [naBreakStrain, setNaBreakStrainState] = useState(0.1)
+  const [naBreakStrain,     setNaBreakStrainState]     = useState(0.04)
+  const [breakStrainSpread, setBreakStrainSpreadState] = useState(0.15)
   const [latticeSpeedMult, setLatticeSpeedMultState] = useState(1.0)
   const [freedSpeedMult,   setFreedSpeedMultState]   = useState(3.5)
   const [reintBondN,       setReintBondNState]       = useState(2)
@@ -319,6 +329,7 @@ export default function GlassViewer() {
   const [bondCounts,        setBondCounts]        = useState(null)
   const [initialBondCounts, setInitialBondCounts] = useState(null)
   const [modeBondCounts,    setModeBondCounts]    = useState(null)
+  const strainUpdateTimeRef    = useRef(0)
   const initialBondCapturedRef = useRef(false)
   const bondCountsRef          = useRef(null)
   const prevCoolingModeRef     = useRef(null)
@@ -462,7 +473,19 @@ export default function GlassViewer() {
     setReplayFrameCount(count); setReplayFrame(null); setReplayPlaying(false)
   }, [])
   const handleTempUpdate   = useCallback(v => { setMeltLocalTemp(v); meltTempRef.current.temp = v }, [])
-  const handleEnergyUpdate = useCallback((_ke, _pe, t) => setDerivedTemp(t), [])
+  const handleEnergyUpdate = useCallback((_ke, _pe, t, e, fb, mas, sfr, met, mxs) => {
+    setDerivedTemp(t)
+    if (e   !== undefined) setTargetE(e)
+    if (fb  !== undefined) setFBroken(fb)
+    if (sfr !== undefined) setSevFireRate(sfr)
+    if (met !== undefined) setMeanEffThreshold(met)
+    const now = Date.now()
+    if (now - strainUpdateTimeRef.current >= 500) {
+      strainUpdateTimeRef.current = now
+      if (mas !== undefined) setMeanAvgStrain(mas)
+      if (mxs !== undefined) setMaxAvgStrain(mxs)
+    }
+  }, [])
 
   useEffect(() => {
     if (!replayPlaying) { cancelAnimationFrame(replayRafRef.current); return }
@@ -1762,6 +1785,23 @@ export default function GlassViewer() {
             {showDev && <>
               <div className="viz-section-title">Dev (type "dev" to hide)</div>
               {tab === 'melt' && <>
+                <label style={{display:'flex', alignItems:'center', gap:6, fontSize:12, color:'#ccc', marginBottom:8, cursor:'pointer'}}>
+                  <input type="checkbox" checked={useEmaStrain} onChange={e => setUseEmaStrain(e.target.checked)} style={{accentColor:'#88ddaa'}} />
+                  EMA strain (α=0.1) — uncheck for instant break
+                </label>
+                <div style={{fontFamily:'monospace', fontSize:12, color:'#e0d080', background:'rgba(255,220,80,0.07)', border:'1px solid rgba(255,220,80,0.2)', borderRadius:4, padding:'5px 8px', marginBottom:8}}>
+                  <div style={{fontSize:10, color:'#888', marginBottom:2, letterSpacing:'0.05em'}}>TARGET ENERGY (ePerParticle)</div>
+                  <div>{targetE.toExponential(4)}  <span style={{color:'#88ddaa'}}>{(fBroken*100).toFixed(1)}% broken</span></div>
+                  <div style={{marginTop:3}}><span style={{fontSize:10, color:'#888'}}>maxStrain ×1k: </span><span style={{color:'#ff9999'}}>{(maxAvgStrain * 1000).toFixed(1)}</span></div>
+                  <div style={{marginTop:2}}><span style={{fontSize:10, color:'#888'}}>avgStrain ×1k: </span><span style={{color:'#aaddff'}}>{(meanAvgStrain * 1000).toFixed(1)}</span></div>
+                  <div style={{marginTop:2}}><span style={{fontSize:10, color:'#888'}}>effThresh ×1k: </span><span style={{color:'#ffcc88'}}>{(meanEffThreshold * 1000).toFixed(1)}</span></div>
+                  <div style={{marginTop:3}}><span style={{fontSize:10, color:'#888'}}>sev fires/sec: </span><span style={{color:'#ffaa88'}}>{sevFireRate.toFixed(1)}</span></div>
+                </div>
+                <div style={{fontSize:11, color:'#888', marginBottom:2}}>Feedback gain ×: <span style={{color:'#a090d0'}}>{feedbackGainMult.toFixed(1)}</span></div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={0} max={200} step={1} value={feedbackGainMult}
+                  onChange={e => { const v = +e.target.value; setFeedbackGainMultState(v); setFeedbackGainMult(v) }} />
+
                 <div style={{fontSize:11, color:'#888', marginBottom:2}}>Si-O r₀: <span style={{color:'#a090d0'}}>{sioR0} px</span></div>
                 <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
                   min={5} max={15} step={0.5} value={sioR0} onChange={e => setSioR0(+e.target.value)} />
@@ -1829,6 +1869,14 @@ export default function GlassViewer() {
                 <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
                   min={0.005} max={0.15} step={0.005} value={naBreakStrain}
                   onChange={e => { const v = +e.target.value; setNaBreakStrainState(v); setNaBreakStrain(v) }} />
+                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Break strain spread: <span style={{color:'#a090d0'}}>{breakStrainSpread.toFixed(3)}</span></div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={0} max={0.20} step={0.005} value={breakStrainSpread}
+                  onChange={e => { const v = +e.target.value; setBreakStrainSpreadState(v); setBreakStrainSpread(v) }} />
+                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Sev trigger dist: <span style={{color:'#a090d0'}}>{sevTriggerDist.toFixed(1)} px</span></div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={5} max={20} step={0.5} value={sevTriggerDist}
+                  onChange={e => { const v = +e.target.value; setSevTriggerDistState(v); setSevTriggerDist(v) }} />
                 <div style={{fontSize:11, color:'#aaa', marginTop:10, marginBottom:3, letterSpacing:'0.06em'}}>── Speed ──</div>
                 <div style={{fontSize:11, color:'#888', marginBottom:2}}>Lattice speed ×: <span style={{color:'#a090d0'}}>{latticeSpeedMult.toFixed(2)}</span></div>
                 <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
@@ -1913,6 +1961,7 @@ export default function GlassViewer() {
               replayFrame={replayFrame} onReplayReady={handleReplayReady}
               darkMode={darkMode} showCharge={showCharge} showField={showField}
               atomColorMode={atomColorMode} showBrokenBonds={showBrokenBonds} showLiveStats={showLiveStats}
+              useEmaStrain={useEmaStrain}
             />
           )}
 

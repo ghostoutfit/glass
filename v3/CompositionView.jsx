@@ -3,7 +3,7 @@ import { initPhysics, stepPhysics, setSiOr0,
          rebuildBonds, computeKE, computeBondedKE, computePE, ENERGY_UNIT, THERMAL_SPEED,
          buildRigidBondMap, setSioExclMult, setBreakStrain, setReformStrain, setCrystAnchorK, setLiberateFrac, setSioK, setNaOK,
          setNaAnchorK, setNaLiberateFrac, setNaBreakStrain, setLatticeSpeedMult, setFreedSpeedMult,
-         resetLibStats, getLibStats } from './meltPhysics.js'
+         resetLibStats, getLibStats, measureStrain95, setUseEmaStrain } from './meltPhysics.js'
 import { drawScene, setVisualScale, findAtomNear, getVisualScale, getLastHudLines } from './renderer.js'
 
 const VW      = 600
@@ -312,7 +312,7 @@ function countBonds(phys) {
   return counts
 }
 
-export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, attractK = 0, attractFalloff = 1, debug = false, bondNums = false, meltTemp = 700, simSpeed = 1, speedMult = 1, coolingMode = null, onTempUpdate = null, onEnergyUpdate = null, onBondCounts = null, replayFrame = null, onReplayReady = null, graphCanvasRef = null, cumulativeEnergyRef = null, graphXMaxRef = null, darkMode = true, showCharge = false, showField = true, atomColorMode = 'normal', showBrokenBonds = false, showLiveStats = false }) {
+export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, attractK = 0, attractFalloff = 1, debug = false, bondNums = false, meltTemp = 700, simSpeed = 1, speedMult = 1, coolingMode = null, onTempUpdate = null, onEnergyUpdate = null, onBondCounts = null, replayFrame = null, onReplayReady = null, graphCanvasRef = null, cumulativeEnergyRef = null, graphXMaxRef = null, darkMode = true, showCharge = false, showField = true, atomColorMode = 'normal', showBrokenBonds = false, showLiveStats = false, useEmaStrain = true }) {
   const types = useMemo(
     () => buildGrid(sio2Pct, na2oPct, caoPct),
     [sio2Pct, na2oPct, caoPct]
@@ -389,6 +389,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
   useEffect(() => { atomColorModeRef.current = atomColorMode }, [atomColorMode])
   useEffect(() => { showBrokenBondsRef.current = showBrokenBonds }, [showBrokenBonds])
   useEffect(() => { showLiveStatsRef.current = showLiveStats }, [showLiveStats])
+  useEffect(() => { setUseEmaStrain(useEmaStrain) }, [useEmaStrain])
   useEffect(() => { replayFrameRef.current = replayFrame }, [replayFrame])
   useEffect(() => { onReplayReadyRef.current = onReplayReady }, [onReplayReady])
   useEffect(() => { onBondCountsRef.current = onBondCounts }, [onBondCounts])
@@ -432,15 +433,16 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
       for (const b of (phys.bonds ?? [])) { if (b.i === idx || b.j === idx) bc++ }
       const tgt  = [3, 2, 1, 2][p.typeId] ?? 2
       const elig = bc < tgt ? 'attract-eligible' : 'NOT attract-eligible'
-      const rbInfo = (phys.rigidBonds ?? [])
-        .filter(rb => rb.i === idx || rb.j === idx)
-        .map(rb => {
-          const other  = rb.i === idx ? rb.j : rb.i
-          const po     = phys.particles[other]
-          const d      = Math.hypot(p.x - po.x, p.y - po.y).toFixed(1)
-          const bEntry = (phys.bonds ?? []).find(b => (b.i===rb.i && b.j===rb.j) || (b.i===rb.j && b.j===rb.i))
-          const strain = bEntry ? bEntry.strain?.toFixed(3) : '—'
-          return `  → ${po.type}#${other}  d=${d}px  strain=${strain}  broken:${rb.broken}`
+      const bondInfo = (phys.bonds ?? [])
+        .filter(b => b.i === idx || b.j === idx)
+        .map(b => {
+          const other = b.i === idx ? b.j : b.i
+          const po    = phys.particles[other]
+          const d     = Math.hypot(p.x - po.x, p.y - po.y).toFixed(1)
+          const rigid = b.currentBreakStrain !== undefined
+          const state = !rigid ? 'soft' : b.broken ? 'BRK' : 'ok'
+          const strain = rigid && b.strain != null ? b.strain.toFixed(3) : '—'
+          return `  → ${po.type}#${other}  d=${d}px  ${state}  strain=${strain}`
         })
       console.log(
         `[click] atom #${idx} ${p.type} (${p.cellType})\n` +
@@ -448,7 +450,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
         `  intactCount: ${ic}  (originalBondCount: ${orig})\n` +
         `  bondCount(attract): ${bc}  COORD_TARGET: ${tgt}  → ${elig}\n` +
         `  dist from x0: ${dist}px  speed: ${spd} px/step\n` +
-        `  rigid bonds:\n` + (rbInfo.length ? rbInfo.join('\n') : '  (none)')
+        `  bonds (phys.bonds):\n` + (bondInfo.length ? bondInfo.join('\n') : '  (none)')
       )
     }
     canvas.addEventListener('mousemove', onMove)
@@ -472,6 +474,9 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
   // Rebuild physics when composition changes
   useEffect(() => {
     physRef.current = initPhysics(cellData)
+    physRef.current.sio2Pct = sio2Pct
+    window._meltPhys = physRef.current
+    window.measureStrain95 = () => measureStrain95(window._meltPhys)
     // A handful of near-zero-temperature steps let spring forces seat atoms at r0
     // after the dead-zone snap in initPhysics. 5 steps is enough; initPhysics
     // already handles overlap resolution so we don't need many here.
@@ -887,7 +892,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
         const rawTempC = Math.max(0, computeKE(phys) / (phys.n * ENERGY_UNIT) - 273)
         smoothTempRef.current = smoothTempRef.current * 0.92 + rawTempC * 0.08
         const derivedTempC = Math.round(smoothTempRef.current)
-        onEnergyUpdateRef.current?.(ke, pe, derivedTempC)
+        onEnergyUpdateRef.current?.(ke, pe, derivedTempC, effectiveERef.current, phys.fBroken ?? 0, phys.meanAvgStrain ?? 0, phys.sevFireRate ?? 0, phys.meanEffThreshold ?? 0, phys.maxAvgStrain ?? 0)
         // ── Per-frame measurement bookkeeping (no physics effect) ─────────
         if (phys.wasIntact) {
           const rb = phys.rigidBonds
