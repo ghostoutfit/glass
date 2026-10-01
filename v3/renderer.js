@@ -282,11 +282,17 @@ export function drawScene(canvas, phys, {
     const tr = ctx.getTransform()
     cctx.setTransform(tr.a, tr.b, tr.c, tr.d, tr.e, tr.f)
 
+    // Dissolving is permanent: once a grain melts, its border never returns — otherwise
+    // re-integration during cooling (which clears freed flags and reforms bonds) would make
+    // grain borders reappear in the cooled solid.
+    if (!phys.chunkDissolved) phys.chunkDissolved = new Uint8Array(chunks.length)
+    const dissolved = phys.chunkDissolved
     chunks.forEach((chunk, ci) => {
       if (!chunk.pIdxs.length) return
-      if (chunkBondTotal[ci] > 0 && chunkBondBroken[ci] / chunkBondTotal[ci] >= BOND_FRAC) return
+      if (dissolved[ci]) return
       const freedCount = chunk.pIdxs.reduce((s, i) => s + (latticeFreed?.[i] ? 1 : 0), 0)
-      if (chunk.pIdxs.length > 0 && freedCount / chunk.pIdxs.length >= 0.25) return
+      if ((chunkBondTotal[ci] > 0 && chunkBondBroken[ci] / chunkBondTotal[ci] >= BOND_FRAC) ||
+          (chunk.pIdxs.length > 0 && freedCount / chunk.pIdxs.length >= 0.25)) { dissolved[ci] = 1; return }
       const restPts = chunk.pIdxs.map(i => [particles[i].x0, particles[i].y0])
       const hull = convexHull(restPts)
       if (hull.length < 2) return
@@ -337,7 +343,10 @@ export function drawScene(canvas, phys, {
       const smoothStrain = (iFreed && jFreed)
         ? (bond.strain ?? 0)
         : (() => { const r0s = Math.hypot(pj.x0 - pi.x0, pj.y0 - pi.y0); return r0s > 0.5 ? (Math.hypot(sdx, sdy) - r0s) / r0s : (bond.strain ?? 0) })()
-      const [cr, cg, cb] = strainColorRGB(smoothStrain, bond.currentBreakStrain ?? 0.25)
+      // Thermal fade: the pink shows bond energy, which falls with temperature. Fade to grey
+      // across 750→500°C (gray below 500), independent of strain, so a cooled solid is grey.
+      const thermPink = Math.max(0, Math.min(1, ((targetTempC ?? 999) - 500) / 250))
+      const [cr, cg, cb] = strainColorRGB(smoothStrain * thermPink, bond.currentBreakStrain ?? 0.25)
       fctx.fillStyle = `rgb(${cr},${cg},${cb})`
       // Adjust pj to the minimum-image position relative to pi for lens drawing
       const pix_v = vx(pi, bond.i), piy_v = vy(pi, bond.i)

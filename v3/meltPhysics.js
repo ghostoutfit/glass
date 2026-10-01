@@ -50,26 +50,31 @@ let _sioHotMult     = 1.07   // T ≥ SIO_FADE_HIGH — wider capture window hel
 let _freeAttractSiOMult = 1.0  // scale factor for attract force on freed Si-O pairs
 let _sioExclMult    = 1.4    // XPBD exclusion multiplier for freed Si-O pairs (vs FREE_EXCL=2.0 for all others)
 let _crystJiggleMult = 1.0   // kick multiplier for crystAnchor/naAnchor atoms (vs base kickSigma)
-let _breakStrain     = 0.07  // strain threshold for bond breaking: bond breaks when (d−r₀)/r₀ > _breakStrain
+let _breakStrain     = 0.04  // strain threshold for bond breaking: bond breaks when (d−r₀)/r₀ > _breakStrain
 let _reformStrain    = 0.0   // strain threshold for bond reform: bond reforms when (d−r₀)/r₀ ≤ _reformStrain
 let _crystAnchorK    = 0.06  // crystAnchor spring constant for SiO2 network atoms
 let _liberateFrac    = 0.5   // liberation fraction for SiO2 atoms (1.0 = all broken, 0.5 = majority broken)
 let _naAnchorK       = 0.06  // naAnchor spring constant for Na2O atoms (independent of _crystAnchorK)
 let _naLiberateFrac  = 0.5   // liberation fraction for Na2O atoms
-let _naBreakStrain   = 0.03  // break strain for Na-O bonds (independent of Si-O _breakStrain)
+let _naBreakStrain   = 0.02  // break strain for Na-O bonds (independent of Si-O _breakStrain)
 let _breakStrainSpread = 0.15 // per-bond random ± factor drawn at buildRigidBondMap; 0 = uniform
 let _useEmaStrain     = false // true = EMA-smoothed strain for break check; false = instantaneous
 let _sevTriggerDist   = 13   // px — freed modifier ion must be within this distance of a Si or O to sever the Si-O bond
 // Feedback loop calibration: GAIN interpolated on sio2Pct between soda (70%) and silica (100%)
 const FEEDBACK_GAIN_SODA   = 0.437  // 70% SiO2 / 30% Na2O: f=0 at 500°C, f=1 at 1322°C
+// Si-O XPBD projection holds grains rigid up to this temperature. Pure sand (100% SiO₂) is set
+// above the model's reach so it never melts; any modifier content drops it so grains dissolve.
+const sioProjCutoff = sio2Pct => sio2Pct >= 100 ? 1800 : 1300
 const FEEDBACK_GAIN_SILICA = 0.112  // 100% SiO2:             f=0 at 1500°C, f=1 at 1920°C
-let _feedbackGainMult = 100         // scalar multiplier on GAIN — dial up/down feedback ramp speed
+let _feedbackGainMult = 40          // scalar multiplier on GAIN — dial up/down feedback ramp speed
 let _latticeSpeedMult = 1.0  // kick-sigma multiplier for bonded (non-freed) atoms
-let _freedSpeedMult   = 3.5  // kick-sigma multiplier for freed atoms
+let _freedSpeedMult   = 5    // kick-sigma multiplier for freed atoms
 let _reintBondN       = 2    // min intact bonds to count toward re-integration
 let _reintFrameM      = 30   // consecutive frames with ≥N bonds before cleared
 const REINT_RAMP_FRAMES = 10  // frames to ramp speed mult from freed→lattice after re-integration
-let _freedTau          = 0.10  // Langevin coupling for freed atoms; lower = longer straight runs, same temperature
+let _sevCooldown       = 60    // steps a severed Si-O bond can't reform (counts down only once the ion has left)
+let _sevPullK          = 0.01  // ion→O pull strength after severance (0 = off)
+let _freedTau          = 0.01  // Langevin coupling for freed atoms; lower = longer straight runs, same temperature
 let _bondStiffMult     = 1.0   // multiplier on intact rigid-bond restoring spring (above projection cutoff)
 let _motifStrength    = 0.004 // max motif-bias spring k at full cooling ramp (see applyMotifBias)
 let _motifAlign       = 0.5   // slow cool: fraction of the neighbour-orientation offset each Si's slots adopt (0–1)
@@ -92,12 +97,15 @@ export const setLatticeSpeedMult   = v => { _latticeSpeedMult = v }
 export const setFreedSpeedMult     = v => { _freedSpeedMult = v }
 export const setReintBondN         = v => { _reintBondN = v }
 export const setReintFrameM        = v => { _reintFrameM = v }
+export const setSevCooldown        = v => { _sevCooldown = v }
+export const setSevPullK           = v => { _sevPullK = v }
 export const setFreedTau           = v => { _freedTau = v }
 export const setBondStiffMult      = v => { _bondStiffMult = v }
 export const setMotifStrength      = v => { _motifStrength = v }
 export const setMotifAlign         = v => { _motifAlign = v }
 export const setSiSiRepR0          = v => { PAIR_TABLE[0][0].r0 = v }
 export const getSiSiRepR0          = () => PAIR_TABLE[0][0].r0
+export const setNaNaRepR0          = v => { PAIR_TABLE[2][2].r0 = v }
 export const setSioK               = v => { PREFERRED['O-Si'].k = v }
 export const setNaOK               = v => { PREFERRED['Na-O'].k = v }
 
@@ -161,7 +169,8 @@ PAIR_TABLE[3][1] = PAIR_TABLE[1][3] = PREFERRED['Ca-O']
 // than the crystal (Si-Si = 18px there, unaffected). Tunable via setSiSiRepR0 dev slider.
 PAIR_TABLE[0][0] = { r0: 15.6, k: 0.22, mult: 1, repOnly: true }                                             // Si-Si  (Si⁴⁺)
 PAIR_TABLE[1][1] = { r0:  8, k: 0.32, mult: 1, repOnly: true, freeRepR0: 6, freeRepK: 0.3 }                 // O-O    (O²⁻; extra push when freed)
-PAIR_TABLE[2][2] = { r0:  8, k: 0.45, mult: 1, repOnly: true }                                               // Na-Na  (Na⁺)
+// Na-Na r0 16 (was 8): spreads Na through the melt instead of clumping; crystal Na-Na = 24px, unaffected.
+PAIR_TABLE[2][2] = { r0: 20, k: 0.45, mult: 1, repOnly: true }                                               // Na-Na  (Na⁺)
 PAIR_TABLE[3][3] = { r0: 10, k: 0.50, mult: 1, repOnly: true }                                               // Ca-Ca  (Ca²⁺)
 PAIR_TABLE[2][3] = PAIR_TABLE[3][2] = { r0:  9, k: 0.38, mult: 1, repOnly: true }                           // Na-Ca
 
@@ -395,6 +404,7 @@ export function buildRigidBondMap(phys) {
   const ps      = phys.particles
   const n       = phys.n
   const sioMult = phys.sioMult ?? SIO_COLD_MULT
+  const sioCut  = sioProjCutoff(phys.sio2Pct ?? 70)
   const bonds   = []
 
   for (let i = 0; i < n; i++) {
@@ -417,7 +427,7 @@ export function buildRigidBondMap(phys) {
           specMult: isSiO ? null : spec.mult,
           bondDepth: 0.5 * spec.k * (d * (spec.mult - 1)) ** 2,
           breakStrain:      (isSiO ? _breakStrain : _naBreakStrain) * factor,
-          projectionCutoff: (isSiO ? 1700 : 650) * factor,
+          projectionCutoff: isSiO ? sioCut : 650,   // exact (no spread): keeps pure-sand grains rigid up to 1800°C
           avgStrain:        0,
         })
       }
@@ -451,6 +461,7 @@ export const COORD_TARGET   = [3, 2, 1, 2]   // Si, O, Na, Ca (typeId order)
 // so XPBD projection + strain breaking hold the new solid. r0 = spec.r0 (not current d).
 function promoteBonds(phys, i) {
   const { particles, n } = phys
+  const sioCut = sioProjCutoff(phys.sio2Pct ?? 70)
   if (!phys.rigidKeys) phys.rigidKeys = new Set(phys.rigidBonds.map(rb => rb.i * n + rb.j))
   for (const b of (phys.bonds ?? [])) {
     if (b.broken || (b.i !== i && b.j !== i)) continue
@@ -468,7 +479,7 @@ function promoteBonds(phys, i) {
       specMult: isSiO ? null : spec.mult,
       bondDepth: 0.5 * spec.k * (spec.r0 * (spec.mult - 1)) ** 2,
       breakStrain:      (isSiO ? _breakStrain : _naBreakStrain) * factor,
-      projectionCutoff: (isSiO ? 1700 : 650) * factor,
+      projectionCutoff: isSiO ? sioCut : 650,   // exact (no spread): keeps pure-sand grains rigid up to 1800°C
       avgStrain:        0,
       promoted:         true,
     })
@@ -645,6 +656,20 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
   for (let sub = 0; sub < SUBSTEPS; sub++) {
     fx.fill(0); fy.fill(0)
     if (motif) applyMotifForces(particles, motif, motifK, PREFERRED['O-Si'].r0, fx, fy)
+    // Severance pull-off: the ion that severed a Si-O bond drags that bond's O out of the
+    // network (Na⁺/Ca²⁺ grabbing a non-bridging O). Stops once they're at ion-O bond length.
+    if (_sevPullK > 0 && phys.sevPulls?.size) {
+      for (const [o, pull] of phys.sevPulls) {
+        const po = particles[o], pk = particles[pull.ion]
+        const dx = miDx(pk.x - po.x), dy = miDy(pk.y - po.y)
+        const d  = Math.hypot(dx, dy)
+        const spec = PAIR_TABLE[pk.typeId][1]
+        if (!spec || d <= spec.r0 || d > ATTRACT_RANGE) continue
+        const f = _sevPullK, nx = dx / d, ny = dy / d
+        fx[o] += f * nx;  fy[o] += f * ny
+        fx[pull.ion] -= f * nx;  fy[pull.ion] -= f * ny
+      }
+    }
 
     // ── Pairwise interaction forces ──────────────────────────────
     // Fast early-reject on single axis before computing full distance.
@@ -1004,15 +1029,21 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
   // Effective threshold = rb.breakStrain × (1 + GAIN × fBroken).
   // As bonds break, thresholds rise, slowing further breaking until equilibrium.
   // EMA strain (α=0.1) prevents rare fluctuations from trickling bonds forever.
-  let brokenCount = 0, totalBreakable = 0
+  // Feedback fraction is computed PER bond population (Si-O vs Na-O/Ca-O). A single global
+  // fBroken is diluted by the ~550 always-intact Si-O bonds below the projection cutoff, so a
+  // Na-O break barely moves it and the Na-O threshold never rises — bonds creep forever.
+  // Per-type fBroken lets each type's threshold respond to its own broken fraction and halt.
+  let brokeSiO = 0, totSiO = 0, brokeMod = 0, totMod = 0
   if (phys.rigidBonds) {
     for (const rb of phys.rigidBonds) {
       if (!rb.breakable) continue
-      totalBreakable++
-      if (rb.broken) brokenCount++
+      if (rb.isSiO) { totSiO++; if (rb.broken) brokeSiO++ }
+      else          { totMod++; if (rb.broken) brokeMod++ }
     }
   }
-  const fBroken    = totalBreakable > 0 ? brokenCount / totalBreakable : 0
+  const fBrokenSiO = totSiO > 0 ? brokeSiO / totSiO : 0
+  const fBrokenMod = totMod > 0 ? brokeMod / totMod : 0
+  const fBroken    = (brokeSiO + brokeMod) / Math.max(1, totSiO + totMod)   // HUD only
   const sio2Pct    = phys.sio2Pct ?? 70
   const GAIN       = FEEDBACK_GAIN_SILICA + (FEEDBACK_GAIN_SODA - FEEDBACK_GAIN_SILICA) * Math.max(0, Math.min(1, (100 - sio2Pct) / 30))
   phys.fBroken     = fBroken   // expose for HUD
@@ -1027,7 +1058,7 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
       const d  = Math.hypot(dx, dy)
       const strain = (d - rb.r0) / rb.r0
       rb.avgStrain  = _useEmaStrain ? rb.avgStrain * 0.9 + strain * 0.1 : strain
-      const effThreshold = rb.breakStrain * (1 + GAIN * _feedbackGainMult * fBroken)
+      const effThreshold = rb.breakStrain * (1 + GAIN * _feedbackGainMult * (rb.isSiO ? fBrokenSiO : fBrokenMod))
       rb.effThreshold = effThreshold
       if (!rb.broken) {
         strainSum += rb.avgStrain; thrSum += effThreshold; strainCount++
@@ -1037,7 +1068,7 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
       if (!rb.broken) {
         if (rb.avgStrain > effThreshold) rb.broken = true
       } else {
-        if (strain <= _reformStrain) rb.broken = false
+        if (strain <= _reformStrain && !(rb.severFrames > 0)) rb.broken = false
       }
       if (rb.broken !== wasBroken) {
         const half = (rb.bondDepth ?? 0) / 2
@@ -1099,8 +1130,12 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
   // Re-integration: freed atoms that hold ≥N bonds for ≥M consecutive frames are
   // cleared from latticeFreed, their anchor rebased, and their thermostat speed
   // ramped down from _freedSpeedMult to _latticeSpeedMult over REINT_RAMP_FRAMES.
-  // Only runs during cooling so hot ions don't accidentally re-integrate mid-melt.
-  if (phys.latticeFreed && phys.rigidBonds && phys.stableBondFrames && coolingMode !== null) {
+  // Runs during cooling, and at any hold below the Si-O melt cutoff. Without the latter, a hold
+  // ratchets freed-atom count upward forever: every transient full-break frees an atom permanently
+  // (latticeFreed is sticky) with no path back. The ≥N-bonds-for-M-frames test self-regulates —
+  // genuinely molten atoms never hold N bonds that long, so they stay freed above the cutoff.
+  const reintActive = coolingMode !== null || totalEnergy < sioProjCutoff(phys.sio2Pct ?? 70)
+  if (phys.latticeFreed && phys.rigidBonds && phys.stableBondFrames && reintActive) {
     const sbf = phys.stableBondFrames
     const rrf = phys.reintRampFrames
     for (let i = 0; i < n; i++) {
@@ -1211,14 +1246,36 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
         const pk = particles[k]
         if (pk.typeId !== 2 && pk.typeId !== 3) continue  // Na, Ca only
         if (intactCount[k] > 0) continue                  // must be a freed ion
+        // Each freed modifier ion depolymerises only up to its coordination capacity (Na→1 O,
+        // Ca→2). Once it holds that many O (liveCount), it's saturated and severs no more —
+        // otherwise a few lingering ions eat an entire grain, creeping forever at a hold.
+        if (liveCount[k] >= COORD_TARGET[pk.typeId]) continue
         if (Math.hypot(pk.x - pi.x, pk.y - pi.y) < _sevTriggerDist ||
             Math.hypot(pk.x - pj.x, pk.y - pj.y) < _sevTriggerDist) {
           rb.broken = true
+          rb.severFrames = _sevCooldown
+          rb.severIon = k
+          const o = pi.typeId === 1 ? rb.i : rb.j
+          if (!phys.sevPulls) phys.sevPulls = new Map()
+          if (!phys.sevPulls.has(o)) phys.sevPulls.set(o, { ion: k, frames: _sevCooldown })
           sevFiresThisStep++
           break
         }
       }
     }
+    // Cooldown: a severed bond can't reform while its ion is still within trigger distance;
+    // once the ion leaves, it counts down _sevCooldown steps before reform is allowed.
+    for (const rb of phys.rigidBonds) {
+      if (!(rb.severFrames > 0)) continue
+      const pk = particles[rb.severIon]
+      const near = Math.hypot(miDx(pk.x - particles[rb.i].x), miDy(pk.y - particles[rb.i].y)) < _sevTriggerDist ||
+                   Math.hypot(miDx(pk.x - particles[rb.j].x), miDy(pk.y - particles[rb.j].y)) < _sevTriggerDist
+      if (near) rb.severFrames = _sevCooldown
+      else rb.severFrames--
+    }
+  }
+  if (phys.sevPulls) {
+    for (const [o, pull] of phys.sevPulls) if (--pull.frames <= 0) phys.sevPulls.delete(o)
   }
   phys._sevFireEma = (phys._sevFireEma ?? 0) * 0.95 + sevFiresThisStep * 0.05
   phys.sevFireRate = phys._sevFireEma * 60  // fires/sec assuming ~60 steps/sec

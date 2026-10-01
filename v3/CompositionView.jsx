@@ -215,62 +215,47 @@ function fmtE(v) {
   return v >= 1000 ? `${(v / 1000).toFixed(v % 1000 === 0 ? 0 : 1)}k` : String(v)
 }
 
-function drawTEGraph(canvas, hist, xMax = 5000) {
+const GRAPH_E_MIN = 0, GRAPH_E_MAX = 4e-3   // x-axis: cumulative energy added, per-particle units
+function drawTEGraph(canvas, hist, darkMode = true) {
   const s = setupCanvas(canvas)
   if (!s) return
   const { ctx, w, h } = s
-  const pL = 34, pR = 8, pT = 6, pB = 18
+  const pL = 46, pR = 10, pT = 10, pB = 30
   const pw = w - pL - pR, ph = h - pT - pB
 
-  const tMax = 2000
+  const tMax = 1800
+  const ink     = darkMode ? '#ffffff' : '#111111'   // high-contrast text, both modes
+  const axisCol = darkMode ? '#888' : '#999'
 
   ctx.clearRect(0, 0, w, h)
-  ctx.fillStyle = 'rgba(8,6,4,0.82)'
+  ctx.fillStyle = darkMode ? 'rgba(8,6,4,0.82)' : 'rgba(250,248,245,0.92)'
   ctx.fillRect(0, 0, w, h)
 
   // Axes
-  ctx.strokeStyle = '#333'; ctx.lineWidth = 1
+  ctx.strokeStyle = axisCol; ctx.lineWidth = 1
   ctx.beginPath()
   ctx.moveTo(pL, pT); ctx.lineTo(pL, pT + ph)
   ctx.lineTo(pL + pw, pT + ph)
   ctx.stroke()
 
-  // Axis labels
-  ctx.fillStyle = '#555'; ctx.font = '9px monospace'; ctx.textAlign = 'right'; ctx.textBaseline = 'middle'
-  ctx.fillText(fmtE(tMax), pL - 2, pT)
-  ctx.fillText('0', pL - 2, pT + ph)
-  ctx.textAlign = 'center'; ctx.textBaseline = 'top'
-  ctx.fillText('0', pL, pT + ph + 2)
-  ctx.fillText(fmtE(xMax), pL + pw, pT + ph + 2)
-  ctx.fillText('← drag to scale →', pL + pw / 2, pT + ph + 2)
-  ctx.save(); ctx.translate(9, pT + ph / 2); ctx.rotate(-Math.PI / 2)
+  // Axis labels (2× size, high contrast)
+  ctx.fillStyle = ink; ctx.font = 'bold 18px monospace'; ctx.textAlign = 'right'; ctx.textBaseline = 'middle'
+  ctx.fillText(String(tMax), pL - 4, pT + 2)
+  ctx.fillText('0', pL - 4, pT + ph)
+  ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'
+  ctx.fillText('energy added / particle', pL + pw / 2, h - 4)
+  ctx.save(); ctx.translate(14, pT + ph / 2); ctx.rotate(-Math.PI / 2)
+  ctx.textBaseline = 'alphabetic'
   ctx.fillText('Temp °C', 0, 0)
   ctx.restore()
-
-  // Zone markers — horizontal lines at bond-break temperatures on the T (y) axis
-  const zones = [
-    { t: 650,  label: 'Na-O start', color: '#5588aa' },
-    { t: 1130, label: 'Na-O gone',  color: '#4477aa' },
-    { t: 1700, label: 'Si-O start', color: '#aa7755' },
-  ]
-  ctx.font = '8px monospace'; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom'
-  for (const z of zones) {
-    const zy = pT + ph - (z.t / tMax) * ph
-    if (zy < pT || zy > pT + ph) continue
-    ctx.strokeStyle = z.color; ctx.lineWidth = 1; ctx.setLineDash([3, 3])
-    ctx.beginPath(); ctx.moveTo(pL, zy); ctx.lineTo(pL + pw, zy); ctx.stroke()
-    ctx.setLineDash([])
-    ctx.fillStyle = z.color
-    ctx.fillText(z.label, pL + 2, zy - 1)
-  }
 
   const n = hist.length
   if (n < 2) return
 
-  ctx.strokeStyle = '#c07040'; ctx.lineWidth = 1.5; ctx.lineJoin = 'round'
+  ctx.strokeStyle = darkMode ? '#ff9050' : '#c04000'; ctx.lineWidth = 2.5; ctx.lineJoin = 'round'
   ctx.beginPath()
   for (let i = 0; i < n; i++) {
-    const x = pL + (hist[i].e / xMax) * pw
+    const x = pL + Math.max(0, Math.min(1, (hist[i].e - GRAPH_E_MIN) / (GRAPH_E_MAX - GRAPH_E_MIN))) * pw
     const y = pT + ph - (Math.max(0, hist[i].t) / tMax) * ph
     i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)
   }
@@ -278,9 +263,9 @@ function drawTEGraph(canvas, hist, xMax = 5000) {
 
   // Current point dot
   const last = hist[n - 1]
-  const lx = pL + (last.e / xMax) * pw
+  const lx = pL + Math.max(0, Math.min(1, (last.e - GRAPH_E_MIN) / (GRAPH_E_MAX - GRAPH_E_MIN))) * pw
   const ly = pT + ph - (Math.max(0, last.t) / tMax) * ph
-  ctx.fillStyle = '#ffaa60'; ctx.beginPath(); ctx.arc(lx, ly, 3, 0, Math.PI * 2); ctx.fill()
+  ctx.fillStyle = darkMode ? '#ffcc80' : '#e05500'; ctx.beginPath(); ctx.arc(lx, ly, 4, 0, Math.PI * 2); ctx.fill()
 }
 
 function drawBarGraph(canvas, ke, pe, n) {
@@ -855,6 +840,10 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
         const t   = Math.min(1, coolingFrameRef.current / dur)
         ePerParticle = coolingStartERef.current * (1 - t) + E_COOL_END * t
         effectiveERef.current = ePerParticle
+        // Drain cumulative energy so the graph dot retraces leftward. Slow cool drains at the
+        // fast-heat rate (~baseRate 200/s ≈ 3.33/frame); fast cool drains at double.
+        const ce = cumulativeEnergyRefRef.current
+        if (ce) ce.current = Math.max(0, ce.current - (cm === 'fast' ? 6.67 : 3.33))
       } else if (cm === 'fastHeat' || cm === 'slowHeat') {
         coolingFrameRef.current++
         const dur = cm === 'fastHeat' ? FAST_COOL_FRAMES : SLOW_COOL_FRAMES
@@ -956,7 +945,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
         histFrameRef.current++
         if (histFrameRef.current >= 3) {
           histFrameRef.current = 0
-          const xVal = Math.max(0, cumulativeEnergyRefRef.current?.current ?? 0)
+          const xVal = Math.max(0, (cumulativeEnergyRefRef.current?.current ?? 0) * ENERGY_UNIT)   // cumulative heat, per-particle units
           const targetTempC = Math.max(0, Math.round(ePerParticle / ENERGY_UNIT - 273))
           histRef.current.push({ e: xVal, t: targetTempC })
         }
@@ -964,8 +953,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
         // ── Draw energy graph into sidebar canvas when provided ───────
         const extCanvas = graphCanvasRefRef.current?.current
         if (extCanvas) {
-          const xMax = graphXMaxRefRef.current?.current ?? 5000
-          drawTEGraph(extCanvas, histRef.current, xMax)
+          drawTEGraph(extCanvas, histRef.current, darkModeRef.current)
         }
 
         // ── Record replay snapshot ────────────────────────────────────

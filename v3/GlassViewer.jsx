@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import CompositionView from './CompositionView'
 import { initParticles, stepPhysics, stepFloorPhysics, PARTICLE_R, FIXED_DT, T_RIGID, freezeParticles, syncParticlesToRigidBody, stepRigidBody } from './glassPhysics.js'
-import { setSioHotMult, setFreeAttractSiOMult, setSioExclMult, setCrystJiggleMult, setBreakStrain, setReformStrain, setCrystAnchorK, setLiberateFrac, setSioK, setNaOK, setNaAnchorK, setNaLiberateFrac, setNaBreakStrain, setLatticeSpeedMult, setFreedSpeedMult, setReintBondN, setReintFrameM, setBreakStrainSpread, setSevTriggerDist, setFeedbackGainMult, setSiSiRepR0, setMotifStrength, setMotifAlign, setBondStiffMult, setFreedTau } from './meltPhysics.js'
+import { setSioHotMult, setFreeAttractSiOMult, setSioExclMult, setCrystJiggleMult, setBreakStrain, setReformStrain, setCrystAnchorK, setLiberateFrac, setSioK, setNaOK, setNaAnchorK, setNaLiberateFrac, setNaBreakStrain, setLatticeSpeedMult, setFreedSpeedMult, setReintBondN, setReintFrameM, setBreakStrainSpread, setSevTriggerDist, setFeedbackGainMult, setSiSiRepR0, setMotifStrength, setMotifAlign, setBondStiffMult, setFreedTau, setNaNaRepR0, setSevCooldown, setSevPullK } from './meltPhysics.js'
 import { setVisualScale } from './renderer.js'
 import { initSandParticles, stepSandPhysics, mergeSodaGrains, mergeSilicateGrains, convertLargeNaGrains, stepNaBlobSprings, checkNaBlobMerges, absorbNearbyGrains, GRAIN_R as SAND_GRAIN_R, NA_BLOB_R_CTR } from './sandPhysics.js'
 import './GlassViewer.css'
@@ -268,7 +268,7 @@ const STICK_ANGLE = 10 * Math.PI / 180
 // Na₂O-bearing mixes step up once as the flux starts melting (~650–750°C) and then stay on a
 // flat plateau — no drop back to 1, which produced a sharp slope kink at 1130°C.
 // Scaled by Na₂O fraction (30% = full plateau); pure SiO₂ stays at 1 (no melting below 1600°C).
-const HC_RAMP_LO = 650, HC_RAMP_HI = 750
+const HC_RAMP_LO = 500, HC_RAMP_HI = 750
 function meltHeatCapacity(tempC, na2oPct, plateau) {
   const amp = (plateau - 1) * Math.min(1, na2oPct / 30)
   if (amp <= 0 || tempC <= HC_RAMP_LO) return 1.0
@@ -300,7 +300,7 @@ export default function GlassViewer() {
   const [meanEffThreshold, setMeanEffThreshold] = useState(0)
   const [useEmaStrain,   setUseEmaStrain]   = useState(false)
   const [sevTriggerDist, setSevTriggerDistState] = useState(13)
-  const [feedbackGainMult, setFeedbackGainMultState] = useState(100)
+  const [feedbackGainMult, setFeedbackGainMultState] = useState(40)
   const [sevFireRate,    setSevFireRate]    = useState(0)
   const [simSpeed, setSimSpeed]   = useState(0.5)
   const [sioR0, setSioR0]         = useState(9)
@@ -311,7 +311,10 @@ export default function GlassViewer() {
   const [freeAttractSiOMult, setFreeAttractSiOMultState] = useState(1.0)
   const [sioExclMult, setSioExclMultState]     = useState(1.4)
   const [siSiRepR0,     setSiSiRepR0State]     = useState(15.6)
-  const [freedTau,      setFreedTauState]      = useState(0.10)
+  const [naNaRepR0,     setNaNaRepR0State]     = useState(20)
+  const [sevCooldown,   setSevCooldownState]   = useState(60)
+  const [sevPullK,      setSevPullKState]      = useState(0.01)
+  const [freedTau,      setFreedTauState]      = useState(0.01)
   const [bondStiffMult, setBondStiffMultState] = useState(1.0)
   const [hcPlateau,     setHcPlateau]          = useState(4)
   const [motifStrength, setMotifStrengthState] = useState(0.004)
@@ -319,16 +322,16 @@ export default function GlassViewer() {
   const [crystJiggleMult, setCrystJiggleMultState] = useState(1.0)
   const [sioK,        setSioKState]       = useState(0.061)
   const [naOK,        setNaOKState]       = useState(0.042)
-  const [breakStrain, setBreakStrainState] = useState(0.07)
+  const [breakStrain, setBreakStrainState] = useState(0.04)
   const [reformStrain,  setReformStrainState]  = useState(0.0)
   const [crystAnchorK,  setCrystAnchorKState]  = useState(0.06)
   const [liberateFrac,  setLiberateFracState]  = useState(0.5)
   const [naAnchorK,     setNaAnchorKState]     = useState(0.06)
   const [naLiberateFrac, setNaLiberateFracState] = useState(0.5)
-  const [naBreakStrain,     setNaBreakStrainState]     = useState(0.03)
+  const [naBreakStrain,     setNaBreakStrainState]     = useState(0.02)
   const [breakStrainSpread, setBreakStrainSpreadState] = useState(0.15)
   const [latticeSpeedMult, setLatticeSpeedMultState] = useState(1.0)
-  const [freedSpeedMult,   setFreedSpeedMultState]   = useState(3.5)
+  const [freedSpeedMult,   setFreedSpeedMultState]   = useState(5)
   const [reintBondN,       setReintBondNState]       = useState(2)
   const [reintFrameM,      setReintFrameMState]      = useState(30)
   const [visualScale, setVisualScaleState]     = useState(3.3)
@@ -1703,24 +1706,7 @@ export default function GlassViewer() {
             {/* Graph in sidebar */}
             {bondView === 'graph' && (
               <canvas ref={graphCanvasRef}
-                style={{ display:'block', width:'100%', height:200, marginBottom:4, cursor:'ew-resize' }}
-                onMouseDown={e => {
-                  const drag = { startX: e.clientX, startXMax: graphXMaxRef.current }
-                  graphDragRef.current = drag
-                  const onMove = ev => {
-                    const dx = ev.clientX - drag.startX
-                    graphXMaxRef.current = Math.max(500, Math.min(50000,
-                      drag.startXMax * Math.pow(2, dx / 250)))
-                  }
-                  const onUp = () => {
-                    graphDragRef.current = null
-                    window.removeEventListener('mousemove', onMove)
-                    window.removeEventListener('mouseup', onUp)
-                  }
-                  window.addEventListener('mousemove', onMove)
-                  window.addEventListener('mouseup', onUp)
-                  e.preventDefault()
-                }}
+                style={{ display:'block', width:'100%', height:200, marginBottom:4 }}
               />
             )}
 
@@ -1818,6 +1804,10 @@ export default function GlassViewer() {
                   <div style={{marginTop:3}}><span style={{fontSize:10, color:'#888'}}>sev fires/sec: </span><span style={{color:'#ffaa88'}}>{sevFireRate.toFixed(1)}</span></div>
                 </div>
                 <div style={{fontSize:11, color:'#aaa', marginTop:10, marginBottom:3, letterSpacing:'0.06em'}}>── Active: Na₂O breaking ──</div>
+                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Si-O break strain: <span style={{color:'#a090d0'}}>{breakStrain.toFixed(3)}</span></div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={0.02} max={0.30} step={0.005} value={breakStrain}
+                  onChange={e => { const v = +e.target.value; setBreakStrainState(v); setBreakStrain(v) }} />
                 <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Na break strain: <span style={{color:'#a090d0'}}>{naBreakStrain.toFixed(3)}</span></div>
                 <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
                   min={0.005} max={0.15} step={0.005} value={naBreakStrain}
@@ -1834,14 +1824,22 @@ export default function GlassViewer() {
                 <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
                   min={5} max={20} step={0.5} value={sevTriggerDist}
                   onChange={e => { const v = +e.target.value; setSevTriggerDistState(v); setSevTriggerDist(v) }} />
+                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Sev cooldown: <span style={{color:'#a090d0'}}>{sevCooldown} steps</span></div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={0} max={300} step={10} value={sevCooldown}
+                  onChange={e => { const v = +e.target.value; setSevCooldownState(v); setSevCooldown(v) }} />
+                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Sev pull (ion→O): <span style={{color:'#a090d0'}}>{sevPullK.toFixed(3)}</span></div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={0} max={0.05} step={0.001} value={sevPullK}
+                  onChange={e => { const v = +e.target.value; setSevPullKState(v); setSevPullK(v) }} />
                 <div style={{fontSize:11, color:'#aaa', marginTop:10, marginBottom:3, letterSpacing:'0.06em'}}>── Active: freed travel ──</div>
                 <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Freed speed ×: <span style={{color:'#a090d0'}}>{freedSpeedMult.toFixed(2)}</span></div>
                 <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
-                  min={0.25} max={5.0} step={0.25} value={freedSpeedMult}
+                  min={0.25} max={15} step={0.25} value={freedSpeedMult}
                   onChange={e => { const v = +e.target.value; setFreedSpeedMultState(v); setFreedSpeedMult(v) }} />
                 <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Freed τ (travel): <span style={{color:'#a090d0'}}>{freedTau.toFixed(3)}</span> → straight run ≈ {(1/freedTau).toFixed(0)} substeps</div>
                 <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
-                  min={0.005} max={0.2} step={0.005} value={freedTau}
+                  min={0.01} max={0.2} step={0.005} value={freedTau}
                   onChange={e => { const v = +e.target.value; setFreedTauState(v); setFreedTau(v) }} />
                 <div style={{fontSize:11, color:'#aaa', marginTop:10, marginBottom:3, letterSpacing:'0.06em'}}>── Active: melt / cooling ──</div>
                 <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Melt heat capacity plateau (Na₂O, &gt;750°C): <span style={{color:'#a090d0'}}>{hcPlateau.toFixed(2)}×</span></div>
@@ -1852,6 +1850,10 @@ export default function GlassViewer() {
                 <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
                   min={10} max={20} step={0.2} value={siSiRepR0}
                   onChange={e => { const v = +e.target.value; setSiSiRepR0State(v); setSiSiRepR0(v) }} />
+                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Na-Na repulsion r₀: <span style={{color:'#a090d0'}}>{naNaRepR0.toFixed(1)} px</span></div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={6} max={40} step={0.5} value={naNaRepR0}
+                  onChange={e => { const v = +e.target.value; setNaNaRepR0State(v); setNaNaRepR0(v) }} />
                 <div style={{fontSize:11, color:'#888', marginBottom:2}}>Motif strength: <span style={{color:'#a090d0'}}>{motifStrength.toFixed(4)}</span></div>
                 <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
                   min={0} max={0.02} step={0.0005} value={motifStrength}
@@ -1926,10 +1928,6 @@ export default function GlassViewer() {
                 <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
                   min={0.005} max={0.10} step={0.001} value={naOK}
                   onChange={e => { const v = +e.target.value; setNaOKState(v); setNaOK(v) }} />
-                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Break strain: <span style={{color:'#a090d0'}}>{breakStrain.toFixed(3)}</span></div>
-                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
-                  min={0.02} max={0.30} step={0.005} value={breakStrain}
-                  onChange={e => { const v = +e.target.value; setBreakStrainState(v); setBreakStrain(v) }} />
                 <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Reform strain: <span style={{color:'#a090d0'}}>{reformStrain.toFixed(3)}</span></div>
                 <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
                   min={-0.15} max={0.0} step={0.01} value={reformStrain}
