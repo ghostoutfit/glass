@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import CompositionView from './CompositionView'
 import { initParticles, stepPhysics, stepFloorPhysics, PARTICLE_R, FIXED_DT, T_RIGID, freezeParticles, syncParticlesToRigidBody, stepRigidBody } from './glassPhysics.js'
-import { setSioHotMult, setFreeAttractSiOMult, setSioExclMult, setCrystJiggleMult, setBreakStrain, setReformStrain, setCrystAnchorK, setLiberateFrac, setSioK, setNaOK, setNaAnchorK, setNaLiberateFrac, setNaBreakStrain, setLatticeSpeedMult, setFreedSpeedMult, setReintBondN, setReintFrameM, setBreakStrainSpread, setSevTriggerDist, setFeedbackGainMult } from './meltPhysics.js'
+import { setSioHotMult, setFreeAttractSiOMult, setSioExclMult, setCrystJiggleMult, setBreakStrain, setReformStrain, setCrystAnchorK, setLiberateFrac, setSioK, setNaOK, setNaAnchorK, setNaLiberateFrac, setNaBreakStrain, setLatticeSpeedMult, setFreedSpeedMult, setReintBondN, setReintFrameM, setBreakStrainSpread, setSevTriggerDist, setFeedbackGainMult, setSiSiRepR0, setMotifStrength, setMotifAlign } from './meltPhysics.js'
 import { setVisualScale } from './renderer.js'
 import { initSandParticles, stepSandPhysics, mergeSodaGrains, mergeSilicateGrains, convertLargeNaGrains, stepNaBlobSprings, checkNaBlobMerges, absorbNearbyGrains, GRAIN_R as SAND_GRAIN_R, NA_BLOB_R_CTR } from './sandPhysics.js'
 import './GlassViewer.css'
@@ -271,6 +271,8 @@ function meltHeatCapacity(tempC) {
   return 1.0 + 3.5 * Math.sin(Math.PI * t)
 }
 
+const COOL_MIN_TEMP = 1500   // Slow/Fast Cool only engage from a full melt
+
 export default function GlassViewer() {
   const [darkMode,   setDarkMode]   = useState(true)
   const [bondView, setBondView] = useState('graph')  // 'count' | 'graph'
@@ -297,12 +299,15 @@ export default function GlassViewer() {
   const [sevFireRate,    setSevFireRate]    = useState(0)
   const [simSpeed, setSimSpeed]   = useState(0.5)
   const [sioR0, setSioR0]         = useState(9)
-  const [attractK, setAttractK]         = useState(0.10)
+  const [attractK, setAttractK]         = useState(0)   // 0.10 over-densified cooled solid (local density 7–8 vs crystal 4.6)
   const [attractFalloff, setAttractFalloff] = useState(1.0)
   const [speedMult, setSpeedMult]       = useState(1.0)
   const [sioHotMult, setSioHotMultState]       = useState(1.07)
   const [freeAttractSiOMult, setFreeAttractSiOMultState] = useState(1.0)
   const [sioExclMult, setSioExclMultState]     = useState(1.4)
+  const [siSiRepR0,     setSiSiRepR0State]     = useState(15.6)
+  const [motifStrength, setMotifStrengthState] = useState(0.004)
+  const [motifAlign,    setMotifAlignState]    = useState(0.5)
   const [crystJiggleMult, setCrystJiggleMultState] = useState(1.0)
   const [sioK,        setSioKState]       = useState(0.061)
   const [naOK,        setNaOKState]       = useState(0.042)
@@ -510,7 +515,8 @@ export default function GlassViewer() {
     setCoolingMode(m => {
       const next = m === mode ? null : mode
       if (next !== null) window.resetLifetimes?.()
-      meltSimRef.current.energyInput = next === 'fast' ? -100 : next === 'slow' ? -50 : 0
+      // CompositionView's energy ramp is the sole temperature driver; onTempUpdate syncs the LCD.
+      meltSimRef.current.energyInput = 0
       return next
     })
   }, [])
@@ -1491,8 +1497,12 @@ export default function GlassViewer() {
                   <button className={`action-btn test-btn${meltHeatMode==='fast'?' active':''}`}
                     style={{padding:'3px 9px', fontSize:11}} onClick={() => toggleMeltHeat('fast')}>Fast Heat</button>
                   <button className={`action-btn reset-btn${coolingMode==='slow'?' active':''}`}
+                    disabled={coolingMode !== 'slow' && meltLocalTemp < COOL_MIN_TEMP}
+                    title={coolingMode !== 'slow' && meltLocalTemp < COOL_MIN_TEMP ? `Heat to ${COOL_MIN_TEMP}°C first` : undefined}
                     style={{padding:'3px 9px', fontSize:11}} onClick={() => startCooling('slow')}>Slow Cool</button>
                   <button className={`action-btn reset-btn${coolingMode==='fast'?' active':''}`}
+                    disabled={coolingMode !== 'fast' && meltLocalTemp < COOL_MIN_TEMP}
+                    title={coolingMode !== 'fast' && meltLocalTemp < COOL_MIN_TEMP ? `Heat to ${COOL_MIN_TEMP}°C first` : undefined}
                     style={{padding:'3px 9px', fontSize:11}} onClick={() => startCooling('fast')}>Fast Cool</button>
                   <div className="toolbar-divider" />
                   <div style={lcdStyle}>
@@ -1522,8 +1532,12 @@ export default function GlassViewer() {
                   <button className={`action-btn test-btn${meltHeatMode==='fast'?' active':''}`}
                     style={{padding:'3px 9px', fontSize:11}} onClick={() => toggleMeltHeat('fast')}>Fast Heat</button>
                   <button className={`action-btn reset-btn${coolingMode==='slow'?' active':''}`}
+                    disabled={coolingMode !== 'slow' && meltLocalTemp < COOL_MIN_TEMP}
+                    title={coolingMode !== 'slow' && meltLocalTemp < COOL_MIN_TEMP ? `Heat to ${COOL_MIN_TEMP}°C first` : undefined}
                     style={{padding:'3px 9px', fontSize:11}} onClick={() => startCooling('slow')}>Slow Cool</button>
                   <button className={`action-btn reset-btn${coolingMode==='fast'?' active':''}`}
+                    disabled={coolingMode !== 'fast' && meltLocalTemp < COOL_MIN_TEMP}
+                    title={coolingMode !== 'fast' && meltLocalTemp < COOL_MIN_TEMP ? `Heat to ${COOL_MIN_TEMP}°C first` : undefined}
                     style={{padding:'3px 9px', fontSize:11}} onClick={() => startCooling('fast')}>Fast Cool</button>
                   <div style={lcdStyle}>
                     <span style={{visibility:'hidden', display:'block', padding:'3px 6px'}}>1800</span>
@@ -1828,6 +1842,19 @@ export default function GlassViewer() {
                 <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
                   min={1.0} max={2.0} step={0.05} value={sioExclMult}
                   onChange={e => { const v = +e.target.value; setSioExclMultState(v); setSioExclMult(v) }} />
+                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Si-Si repulsion r₀: <span style={{color:'#a090d0'}}>{siSiRepR0.toFixed(1)} px</span> → min Si-O-Si ≈ {Math.round(2 * Math.asin(Math.min(1, siSiRepR0 / (2 * sioR0))) * 180 / Math.PI)}°</div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={10} max={20} step={0.2} value={siSiRepR0}
+                  onChange={e => { const v = +e.target.value; setSiSiRepR0State(v); setSiSiRepR0(v) }} />
+                <div style={{fontSize:11, color:'#aaa', marginTop:10, marginBottom:3, letterSpacing:'0.06em'}}>── Cooling motif ──</div>
+                <div style={{fontSize:11, color:'#888', marginBottom:2}}>Motif strength: <span style={{color:'#a090d0'}}>{motifStrength.toFixed(4)}</span></div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={0} max={0.02} step={0.0005} value={motifStrength}
+                  onChange={e => { const v = +e.target.value; setMotifStrengthState(v); setMotifStrength(v) }} />
+                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Motif align (slow): <span style={{color:'#a090d0'}}>{motifAlign.toFixed(2)}</span></div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={0} max={1} step={0.05} value={motifAlign}
+                  onChange={e => { const v = +e.target.value; setMotifAlignState(v); setMotifAlign(v) }} />
                 <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Crystal jiggle ×: <span style={{color:'#a090d0'}}>{crystJiggleMult.toFixed(2)}</span></div>
                 <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
                   min={0.5} max={5.0} step={0.1} value={crystJiggleMult}

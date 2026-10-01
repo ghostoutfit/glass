@@ -69,6 +69,8 @@ let _freedSpeedMult   = 3.5  // kick-sigma multiplier for freed atoms
 let _reintBondN       = 2    // min intact bonds to count toward re-integration
 let _reintFrameM      = 30   // consecutive frames with ≥N bonds before cleared
 const REINT_RAMP_FRAMES = 10  // frames to ramp speed mult from freed→lattice after re-integration
+let _motifStrength    = 0.004 // max motif-bias spring k at full cooling ramp (see applyMotifBias)
+let _motifAlign       = 0.5   // slow cool: fraction of the neighbour-orientation offset each Si's slots adopt (0–1)
 export const setSioHotMult         = v => { _sioHotMult = v }
 export const setFreeAttractSiOMult  = v => { _freeAttractSiOMult = v }
 export const setSioExclMult        = v => { _sioExclMult = v }
@@ -88,6 +90,10 @@ export const setLatticeSpeedMult   = v => { _latticeSpeedMult = v }
 export const setFreedSpeedMult     = v => { _freedSpeedMult = v }
 export const setReintBondN         = v => { _reintBondN = v }
 export const setReintFrameM        = v => { _reintFrameM = v }
+export const setMotifStrength      = v => { _motifStrength = v }
+export const setMotifAlign         = v => { _motifAlign = v }
+export const setSiSiRepR0          = v => { PAIR_TABLE[0][0].r0 = v }
+export const getSiSiRepR0          = () => PAIR_TABLE[0][0].r0
 export const setSioK               = v => { PREFERRED['O-Si'].k = v }
 export const setNaOK               = v => { PREFERRED['Na-O'].k = v }
 
@@ -147,7 +153,9 @@ PAIR_TABLE[3][1] = PAIR_TABLE[1][3] = PREFERRED['Ca-O']
 // Like-charge repulsion: same-sign ions push each other away.
 // repOnly:true means force only fires at d < r0 (pure repulsion, never attractive).
 // freeRepR0/freeRepK: extra floor repulsion when both atoms are freed (not in original crystal).
-PAIR_TABLE[0][0] = { r0: 12, k: 0.22, mult: 1, repOnly: true }                                               // Si-Si  (Si⁴⁺)
+// Si-Si r0 15.6: with Si-O r0=9 this keeps Si-O-Si ≥ ~120°, so the melt can't fold denser
+// than the crystal (Si-Si = 18px there, unaffected). Tunable via setSiSiRepR0 dev slider.
+PAIR_TABLE[0][0] = { r0: 15.6, k: 0.22, mult: 1, repOnly: true }                                             // Si-Si  (Si⁴⁺)
 PAIR_TABLE[1][1] = { r0:  8, k: 0.32, mult: 1, repOnly: true, freeRepR0: 6, freeRepK: 0.3 }                 // O-O    (O²⁻; extra push when freed)
 PAIR_TABLE[2][2] = { r0:  8, k: 0.45, mult: 1, repOnly: true }                                               // Na-Na  (Na⁺)
 PAIR_TABLE[3][3] = { r0: 10, k: 0.50, mult: 1, repOnly: true }                                               // Ca-Ca  (Ca²⁺)
@@ -185,6 +193,88 @@ function idealHexAngle(existingAngles, candidateAngle) {
   return free.reduce((best, s) =>
     diff(s, candidateAngle) < diff(best, candidateAngle) ? s : best
   )
+}
+
+// ── Motif bias (cooling) ─────────────────────────────────────────────────────
+// Relative targets instead of absolute positions: each Si prefers its bonded O at
+// 120° slots (distance r0), each 2-coordinated O prefers its two Si roughly opposite.
+// Slots are fixed once per step from step-start positions; forces are momentum-
+// conserving springs so the thermostat keeps temperature honest.
+const PI2 = Math.PI * 2
+const wrapPi = a => { a = ((a + Math.PI) % PI2 + PI2) % PI2; return a - Math.PI }
+const PERMS3 = [[0,1,2],[0,2,1],[1,0,2],[1,2,0],[2,0,1],[2,1,0]]
+
+// Best-fit 3-fold orientation φ (mod 120°) of a set of bond angles.
+function fitPhi(angles) {
+  let c = 0, sn = 0
+  for (const t of angles) { c += Math.cos(3 * t); sn += Math.sin(3 * t) }
+  return Math.atan2(sn, c) / 3
+}
+
+// Builds per-step motif data. align=0 → each Si only regularises its own angles
+// (amorphous). align>0 → each Si's φ is pulled toward its Si neighbours' orientation
+// mod 60° (both honeycomb sublattices share φ mod 60°), so domains spread (crystal).
+function buildMotif(particles, siO, oSi, align) {
+  const phiOwn = new Map()
+  for (const [s, os] of siO) {
+    if (os.length < 2 || os.length > 3) continue   // >3 only via uncapped rigid bonds; no 3-slot motif fits
+    const ps = particles[s]
+    phiOwn.set(s, fitPhi(os.map(o => Math.atan2(miDy(particles[o].y - ps.y), miDx(particles[o].x - ps.x)))))
+  }
+  const sites = []
+  for (const [s, os] of siO) {
+    if (!phiOwn.has(s)) continue
+    let phi = phiOwn.get(s)
+    if (align > 0) {
+      let c = 0, sn = 0
+      for (const o of os) for (const s2 of (oSi.get(o) ?? [])) {
+        if (s2 === s || !phiOwn.has(s2)) continue
+        c += Math.cos(6 * phiOwn.get(s2)); sn += Math.sin(6 * phiOwn.get(s2))
+      }
+      if (c !== 0 || sn !== 0) {
+        const dom = Math.atan2(sn, c) / 6
+        const off = ((dom - phi) % (Math.PI / 3) + Math.PI / 3 * 1.5) % (Math.PI / 3) - Math.PI / 6  // wrap ±30°
+        phi += align * off
+      }
+    }
+    // Assign O to unique slots minimising total angular error
+    const ps = particles[s]
+    const ang = os.map(o => Math.atan2(miDy(particles[o].y - ps.y), miDx(particles[o].x - ps.x)))
+    const slots = [phi, phi + PI2 / 3, phi - PI2 / 3]
+    let best = null, bestErr = Infinity
+    for (const perm of PERMS3) {
+      let err = 0
+      for (let k = 0; k < os.length; k++) { const e = wrapPi(ang[k] - slots[perm[k]]); err += e * e }
+      if (err < bestErr) { bestErr = err; best = perm }
+    }
+    sites.push({ s, os, slotAng: os.map((_, k) => slots[best[k]]) })
+  }
+  const bridges = []
+  for (const [o, ss] of oSi) if (ss.length === 2) bridges.push([o, ss[0], ss[1]])
+  return { sites, bridges }
+}
+
+function applyMotifForces(particles, motif, k, r0, fx, fy) {
+  for (const { s, os, slotAng } of motif.sites) {
+    const ps = particles[s]
+    for (let m = 0; m < os.length; m++) {
+      const o = os[m], po = particles[o]
+      const tx = r0 * Math.cos(slotAng[m]) - miDx(po.x - ps.x)
+      const ty = r0 * Math.sin(slotAng[m]) - miDy(po.y - ps.y)
+      fx[o] += k * tx;  fy[o] += k * ty
+      fx[s] -= k * tx;  fy[s] -= k * ty
+    }
+  }
+  // O bridge: pull O toward the midpoint of its two Si → straightens Si-O-Si toward 180°
+  const kb = k * 0.5
+  for (const [o, s1, s2] of motif.bridges) {
+    const po = particles[o], p1 = particles[s1]
+    const mx = miDx(p1.x - po.x) + miDx(particles[s2].x - p1.x) * 0.5
+    const my = miDy(p1.y - po.y) + miDy(particles[s2].y - p1.y) * 0.5
+    fx[o]  += kb * mx;        fy[o]  += kb * my
+    fx[s1] -= kb * mx * 0.5;  fy[s1] -= kb * my * 0.5
+    fx[s2] -= kb * mx * 0.5;  fy[s2] -= kb * my * 0.5
+  }
 }
 
 // ── Init ─────────────────────────────────────────────────────────────────────
@@ -353,6 +443,35 @@ export function buildRigidBondMap(phys) {
 const ATTRACT_RANGE  = 40
 export const COORD_TARGET   = [3, 2, 1, 2]   // Si, O, Na, Ca (typeId order)
 
+// Promote atom i's live dynamic bonds to rigid bonds (on re-integration during cooling)
+// so XPBD projection + strain breaking hold the new solid. r0 = spec.r0 (not current d).
+function promoteBonds(phys, i) {
+  const { particles, n } = phys
+  if (!phys.rigidKeys) phys.rigidKeys = new Set(phys.rigidBonds.map(rb => rb.i * n + rb.j))
+  for (const b of (phys.bonds ?? [])) {
+    if (b.broken || (b.i !== i && b.j !== i)) continue
+    const a = Math.min(b.i, b.j), c = Math.max(b.i, b.j)
+    if (phys.rigidKeys.has(a * n + c)) continue
+    const spec = PAIR_TABLE[particles[a].typeId][particles[c].typeId]
+    if (!spec || spec.repOnly) continue
+    const isSiO  = spec === PAIR_TABLE[0][1]
+    const factor = 1 + (Math.random() * 2 - 1) * _breakStrainSpread
+    phys.rigidBonds.push({
+      i: a, j: c, r0: spec.r0,
+      broken: false,
+      breakable: true,
+      isSiO,
+      specMult: isSiO ? null : spec.mult,
+      bondDepth: 0.5 * spec.k * (spec.r0 * (spec.mult - 1)) ** 2,
+      breakStrain:      (isSiO ? _breakStrain : _naBreakStrain) * factor,
+      projectionCutoff: (isSiO ? 1700 : 650) * factor,
+      avgStrain:        0,
+      promoted:         true,
+    })
+    phys.rigidKeys.add(a * n + c)
+  }
+}
+
 // ── Energy diagnostics ────────────────────────────────────────────────────────
 export function computeKE(phys) {
   const { particles, n } = phys
@@ -461,17 +580,29 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
 
   // Per-atom opposite-charge bond counts and (for slow cool) Si bond-angle maps.
   // Both built from last frame's bond snapshot — one frame stale, acceptable.
-  const doAttract = attractK > 0 && coolingMode !== null
-  const bondCount = doAttract ? new Int32Array(n) : null
-  if (bondCount) {
-    for (const { i, j } of phys.bonds) { bondCount[i]++; bondCount[j]++ }
+  // Broken rigid bonds stay in phys.bonds (for the pink fade) until 40px apart — they
+  // must not count toward coordination, or freshly-broken atoms look saturated.
+  const liveCount = new Int32Array(n)   // live opposite-charge bonds per atom
+  const siOCount  = new Int32Array(n)   // Si: bonded O; O: bonded Si
+  const siOPairs  = new Set()           // live Si-O pairs, key = min·n + max
+  for (const b of (phys.bonds ?? [])) {
+    if (b.broken) continue
+    liveCount[b.i]++; liveCount[b.j]++
+    if (particles[b.i].typeId + particles[b.j].typeId === 1) {
+      siOCount[b.i]++; siOCount[b.j]++
+      siOPairs.add(b.i < b.j ? b.i * n + b.j : b.j * n + b.i)
+    }
   }
+  const doAttract = attractK > 0 && coolingMode !== null
+  const bondCount = doAttract ? liveCount : null
 
   // For slow cool: map each Si → array of current O-bond angles so idealHexAngle()
   // can direct incoming O toward the correct 120° slot rather than Si's center.
   const siBondAngles = (doAttract && coolingMode === 'slow') ? new Map() : null
   if (siBondAngles) {
-    for (const { i, j } of phys.bonds) {
+    for (const b of (phys.bonds ?? [])) {
+      if (b.broken) continue
+      const { i, j } = b
       const ti = particles[i].typeId, tj = particles[j].typeId
       let si, oi
       if      (ti === 0 && tj === 1) { si = i; oi = j }
@@ -484,8 +615,32 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
     }
   }
 
+  // Motif bias during cooling: ramps 0 → _motifStrength as target T falls 1500 → 600°C.
+  // Fast: half strength, no orientation alignment → amorphous. Slow: full + alignment → crystal.
+  const isCooling = coolingMode === 'fast' || coolingMode === 'slow'
+  const motifRamp = isCooling ? Math.max(0, Math.min(1, (1500 - totalEnergy) / 900)) : 0
+  const motifK    = motifRamp * _motifStrength * (coolingMode === 'slow' ? 1 : 0.5)
+  let motif = null
+  if (motifK > 0) {
+    const siO = new Map(), oSi = new Map()
+    for (const key of siOPairs) {
+      const a = Math.floor(key / n), b = key % n
+      const [s, o] = particles[a].typeId === 0 ? [a, b] : [b, a]
+      if (!siO.has(s)) siO.set(s, []); siO.get(s).push(o)
+      if (!oSi.has(o)) oSi.set(o, []); oSi.get(o).push(s)
+    }
+    motif = buildMotif(particles, siO, oSi, coolingMode === 'slow' ? _motifAlign : 0)
+  }
+  phys.motifK = motifK
+
+  // Freed atoms' extra thermal kick fades to lattice level as cooling passes 1300 → 600°C,
+  // otherwise freed atoms run ~12× hotter than the target and can never freeze.
+  const coolFrac     = isCooling ? Math.max(0, Math.min(1, (1300 - totalEnergy) / 700)) : 0
+  const freedMultEff = _freedSpeedMult + (_latticeSpeedMult - _freedSpeedMult) * coolFrac
+
   for (let sub = 0; sub < SUBSTEPS; sub++) {
     fx.fill(0); fy.fill(0)
+    if (motif) applyMotifForces(particles, motif, motifK, PREFERRED['O-Si'].r0, fx, fy)
 
     // ── Pairwise interaction forces ──────────────────────────────
     // Fast early-reject on single axis before computing full distance.
@@ -511,7 +666,12 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
           // form a stable well at r0=9px, matching Na-O capture behaviour.
           const effOneSided = spec.oneSided && !(isSiOSpec && isFreedPair)
           const effMult = isSiOSpec ? sioMult : spec.mult
-          if (d < spec.r0 * effMult && (!effOneSided || d > spec.r0) && (!spec.repOnly || d < spec.r0)) {
+          // Coordination cap (Si ≤ 3 O, O ≤ 2 Si): a freed Si-O pair that isn't already
+          // bonded gets no spring/attract if either side is full. Without this ~6 O pack
+          // around each Si and the melt goes denser than the crystal.
+          const siOSat = isSiOSpec && isFreedPair && !siOPairs.has(i * n + j) &&
+            (siOCount[i] >= COORD_TARGET[pi.typeId] || siOCount[j] >= COORD_TARGET[pj.typeId])
+          if (!siOSat && d < spec.r0 * effMult && (!effOneSided || d > spec.r0) && (!spec.repOnly || d < spec.r0)) {
             // Freed-freed: skip the attractive part for non-Si-O pairs while hot so dissolved
             // Na/Ca ions disperse. Gate on coolingMode so ions can re-bond during cooling.
             // Si-O is always exempt — freed Si must be able to re-bond with freed O.
@@ -531,7 +691,13 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
           // Long-range attract for freed Si-O — runs always, not gated on coolingMode.
           // This is the only mechanism that brings freed Si toward freed O in the hot
           // liquid; the spring only fires once they're already within ~9.6px.
-          if (isSiOSpec && isFreedPair && _freeAttractSiOMult > 0 && d > spec.r0 * effMult && d < ATTRACT_RANGE) {
+          // Saturated pair: plain repulsion inside r0 so extra O can't pack in around a full Si.
+          if (siOSat && d < spec.r0) {
+            const f = spec.k * (d - spec.r0)   // negative → push apart
+            fx[i] += f * nx;  fy[i] += f * ny
+            fx[j] -= f * nx;  fy[j] -= f * ny
+          }
+          if (isSiOSpec && isFreedPair && !siOSat && _freeAttractSiOMult > 0 && d > spec.r0 * effMult && d < ATTRACT_RANGE) {
             const f = _freeAttractSiOMult * 0.004 * spec.r0 / d
             fx[i] += f * nx;  fy[i] += f * ny
             fx[j] -= f * nx;  fy[j] -= f * ny
@@ -726,7 +892,13 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
         if (dx > FORCE_CUTOFF || dx < -FORCE_CUTOFF) continue
         const dy   = miDy(pj.y - pi.y)
         const isSiOPair = pi.typeId + pj.typeId === 1  // Si(0)+O(1) uniquely sums to 1
-        const minD = (pi.r + pj.r) * (isSiOPair ? _sioExclMult : FREE_EXCL)
+        let minD = (pi.r + pj.r) * (isSiOPair ? _sioExclMult : FREE_EXCL)
+        // During cooling, opposite-charge modifier pairs (Na-O, Ca-O) may close to 0.9·r0 so
+        // they can actually bond — FREE_EXCL alone puts Ca-O's floor (13.6px) past r0 (12px).
+        if (isCooling && !isSiOPair) {
+          const xs = PAIR_TABLE[pi.typeId][pj.typeId]
+          if (xs && !xs.repOnly) minD = Math.min(minD, xs.r0 * 0.9)
+        }
         const d2   = dx * dx + dy * dy
         if (d2 >= minD * minD || d2 < 1e-6) continue
         const d    = Math.sqrt(d2)
@@ -770,8 +942,8 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
         const isFreed = latticeFreed[i]
         const rampFrames = phys.reintRampFrames?.[i] ?? 0
         const kickMult = rampFrames > 0
-          ? _latticeSpeedMult + (rampFrames / REINT_RAMP_FRAMES) * (_freedSpeedMult - _latticeSpeedMult)
-          : (isFreed ? _freedSpeedMult : _latticeSpeedMult)
+          ? _latticeSpeedMult + (rampFrames / REINT_RAMP_FRAMES) * (freedMultEff - _latticeSpeedMult)
+          : (isFreed ? freedMultEff : _latticeSpeedMult)
         const baseSigma = (crystAnchor[i] || naAnchor[i]) ? kickSigmaCryst : kickSigma
         const ks = baseSigma * kickMult
         const u1 = Math.random() || 1e-10
@@ -900,7 +1072,10 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
     for (let i = 0; i < n; i++) {
       if (rrf[i] > 0) rrf[i]--
       if (!phys.latticeFreed[i]) continue
-      if (intactCount[i] >= _reintBondN) {
+      // Live bonds (rigid or dynamic) — rigid bonds only reform with original partners,
+      // which are long gone after a melt, so intactCount alone never re-integrates anyone.
+      const need = Math.min(_reintBondN, COORD_TARGET[particles[i].typeId])
+      if (liveCount[i] >= need) {
         sbf[i]++
         if (sbf[i] >= _reintFrameM) {
           phys.latticeFreed[i] = 0
@@ -908,6 +1083,7 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
           rrf[i] = REINT_RAMP_FRAMES
           const p = particles[i]
           p.x0 = p.x; p.y0 = p.y
+          promoteBonds(phys, i)
         }
       } else {
         sbf[i] = 0
@@ -1055,7 +1231,14 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
       bonds.push({ i: rb.i, j: rb.j, strain: (d - rb.r0) / rb.r0, currentBreakStrain: rb.breakStrain, broken: rb.broken, avgStrain: rb.avgStrain, effThreshold: rb.effThreshold })
     }
   }
-  // Dynamic soft bonds: Na-O / Ca-O pairs not already in rigidBonds
+  // Dynamic soft bonds: opposite-charge pairs not already in rigidBonds.
+  // Si-O candidates are accepted nearest-first under the coordination cap (Si ≤ 3, O ≤ 2,
+  // counting intact rigid Si-O first) so the bond list never shows over-coordination.
+  const sioCoord = new Int32Array(n)
+  for (const b of bonds) {
+    if (!b.broken && particles[b.i].typeId + particles[b.j].typeId === 1) { sioCoord[b.i]++; sioCoord[b.j]++ }
+  }
+  const sioCands = []
   for (let i = 0; i < n; i++) {
     const pi = particles[i]
     for (let j = i + 1; j < n; j++) {
@@ -1063,14 +1246,24 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
       const pj   = particles[j]
       const spec = PAIR_TABLE[pi.typeId][pj.typeId]
       if (!spec || spec.repOnly) continue
-      const effMult    = (spec === PAIR_TABLE[0][1]) ? sioMult : spec.mult
+      const isSiO      = spec === PAIR_TABLE[0][1]
+      const effMult    = isSiO ? sioMult : spec.mult
       const renderMult = spec.viewMult ?? effMult
       const dx = miDx(pj.x - pi.x)
       if (dx > spec.r0 * renderMult || dx < -spec.r0 * renderMult) continue
       const d = Math.hypot(dx, miDy(pj.y - pi.y))
       if (d > spec.r0 * renderMult) continue
-      bonds.push({ i, j, strain: (d - spec.r0) / spec.r0, currentBreakStrain: 0.25 })
+      const b = { i, j, strain: (d - spec.r0) / spec.r0, currentBreakStrain: 0.25, broken: false }
+      if (isSiO) { b.d = d; sioCands.push(b) } else bonds.push(b)
     }
+  }
+  sioCands.sort((a, b) => a.d - b.d)
+  for (const b of sioCands) {
+    if (sioCoord[b.i] >= COORD_TARGET[particles[b.i].typeId]) continue
+    if (sioCoord[b.j] >= COORD_TARGET[particles[b.j].typeId]) continue
+    sioCoord[b.i]++; sioCoord[b.j]++
+    delete b.d
+    bonds.push(b)
   }
   phys.bonds = bonds
 
@@ -1121,7 +1314,7 @@ export function rebuildBonds(phys) {
       if (Math.abs(dx) > spec.r0 * effMult) continue
       const d = Math.hypot(dx, particles[j].y - particles[i].y)
       if (d > spec.r0 * effMult) continue
-      bonds.push({ i, j, spec, strain: (d - spec.r0) / spec.r0, currentBreakStrain: effMult - 1 })
+      bonds.push({ i, j, spec, strain: (d - spec.r0) / spec.r0, currentBreakStrain: effMult - 1, broken: false })
     }
   }
   phys.bonds = bonds
@@ -1151,4 +1344,88 @@ export function measureStrain95(phys) {
     'fBroken':      { value: (phys.fBroken ?? 0).toFixed(3) },
   })
   return { p50: strains[idx50], p95: strains[idx95] }
+}
+
+// ── Structure diagnostic ──────────────────────────────────────────────────────
+// Call from browser console: meltStructure()
+// Run at startup (crystal reference) and in the melt; a melt denser than the crystal
+// shows up as higher Si coord / more close Si-Si pairs / higher local density.
+export function meltStructure(phys) {
+  if (!phys?.particles || !phys?.bonds) { console.warn('no phys'); return }
+  const ps = phys.particles, n = ps.length
+  const siSiR0 = PAIR_TABLE[0][0].r0
+  const coord = new Int32Array(n)
+  for (const b of phys.bonds) {
+    if (b.broken) continue
+    if (ps[b.i].typeId + ps[b.j].typeId === 1) { coord[b.i]++; coord[b.j]++ }
+  }
+  const si = [], o = []
+  for (let i = 0; i < n; i++) {
+    if (ps[i].typeId === 0) si.push(i)
+    else if (ps[i].typeId === 1 && ps[i].cellType === 'SiO2') o.push(i)
+  }
+  if (!si.length) { console.warn('no Si'); return }
+  const mean = arr => arr.reduce((s, i) => s + coord[i], 0) / (arr.length || 1)
+  let close = 0, pairs = 0, nbrSum = 0, nnSum = 0
+  for (const a of si) {
+    let nn = Infinity
+    for (let j = 0; j < n; j++) {
+      if (j === a) continue
+      const d = Math.hypot(miDx(ps[j].x - ps[a].x), miDy(ps[j].y - ps[a].y))
+      if (d < 20) nbrSum++
+      if (ps[j].typeId === 0) {
+        if (d < nn) nn = d
+        if (j > a) { pairs++; if (d < siSiR0) close++ }
+      }
+    }
+    if (nn < Infinity) nnSum += nn
+  }
+  // Orientational order: |⟨e^{6iφ}⟩| over Si with exactly 3 O (φ = best-fit 3-fold angle).
+  // ~1 = one shared crystal orientation (all grains start aligned), ~0 = random (amorphous).
+  const siONbr = new Map()
+  for (const b of phys.bonds) {
+    if (b.broken || ps[b.i].typeId + ps[b.j].typeId !== 1) continue
+    const [s, o] = ps[b.i].typeId === 0 ? [b.i, b.j] : [b.j, b.i]
+    if (!siONbr.has(s)) siONbr.set(s, []); siONbr.get(s).push(o)
+  }
+  let oc = 0, os = 0, on = 0, angErr = 0
+  for (const [s, nb] of siONbr) {
+    if (nb.length !== 3) continue
+    const ang = nb.map(o => Math.atan2(miDy(ps[o].y - ps[s].y), miDx(ps[o].x - ps[s].x)))
+    const phi = fitPhi(ang)
+    oc += Math.cos(6 * phi); os += Math.sin(6 * phi); on++
+    for (const a of ang) { const e = wrapPi(3 * (a - phi)) / 3; angErr += e * e }
+  }
+  // Local order: mean cos(6Δφ) between 3-coordinated Si that share an O (domain coherence).
+  const phiOf = new Map()
+  for (const [s, nb] of siONbr) {
+    if (nb.length === 3) phiOf.set(s, fitPhi(nb.map(o => Math.atan2(miDy(ps[o].y - ps[s].y), miDx(ps[o].x - ps[s].x)))))
+  }
+  const oToSi = new Map()
+  for (const [s, nb] of siONbr) for (const o of nb) { if (!oToSi.has(o)) oToSi.set(o, []); oToSi.get(o).push(s) }
+  let loc = 0, locN = 0
+  for (const ss of oToSi.values()) {
+    if (ss.length !== 2 || !phiOf.has(ss[0]) || !phiOf.has(ss[1])) continue
+    loc += Math.cos(6 * (phiOf.get(ss[0]) - phiOf.get(ss[1]))); locN++
+  }
+  const T = phys.dbg?.totalEnergy ?? '—'
+  const row = {
+    'T target °C':            T,
+    'Si count':               si.length,
+    'mean Si coord (O)':      +mean(si).toFixed(2),
+    'mean O coord (Si)':      +mean(o).toFixed(2),
+    '% Si with >3 O':         +(100 * si.filter(i => coord[i] > 3).length / si.length).toFixed(1),
+    '% Si with <3 O':         +(100 * si.filter(i => coord[i] < 3).length / si.length).toFixed(1),
+    'Si-Si pairs < r0':       close,
+    'mean Si-Si nearest px':  +(nnSum / si.length).toFixed(2),
+    'atoms within 20px / Si': +(nbrSum / si.length).toFixed(2),
+    'hex order ψ6 (0–1)':     on ? +(Math.hypot(oc, os) / on).toFixed(2) : '—',
+    'local order (0–1)':      locN ? +(loc / locN).toFixed(2) : '—',
+    'O-Si-O rms err °':       on ? +(Math.sqrt(angErr / (3 * on)) * 180 / Math.PI).toFixed(1) : '—',
+    'Si-Si rep r0 px':        siSiR0,
+    'Si-O r0 px':             PREFERRED['O-Si'].r0,
+    'motif k':                +(phys.motifK ?? 0).toExponential(2),
+  }
+  console.table(Object.fromEntries(Object.entries(row).map(([k, v]) => [k, { value: v }])))
+  return row
 }

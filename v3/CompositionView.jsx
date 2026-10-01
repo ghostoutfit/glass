@@ -3,7 +3,7 @@ import { initPhysics, stepPhysics, setSiOr0,
          rebuildBonds, computeKE, computeBondedKE, computePE, ENERGY_UNIT, THERMAL_SPEED,
          buildRigidBondMap, setSioExclMult, setBreakStrain, setReformStrain, setCrystAnchorK, setLiberateFrac, setSioK, setNaOK,
          setNaAnchorK, setNaLiberateFrac, setNaBreakStrain, setLatticeSpeedMult, setFreedSpeedMult,
-         resetLibStats, getLibStats, measureStrain95, setUseEmaStrain } from './meltPhysics.js'
+         resetLibStats, getLibStats, measureStrain95, meltStructure, setUseEmaStrain } from './meltPhysics.js'
 import { drawScene, setVisualScale, findAtomNear, getVisualScale, getLastHudLines } from './renderer.js'
 
 const VW      = 600
@@ -56,7 +56,44 @@ function buildGrid(sio2Pct, na2oPct, caoPct) {
     const j = Math.floor(rand() * (i + 1))
     ;[types[i], types[j]] = [types[j], types[i]]
   }
+  declumpGrid(types, rand)
   return types
+}
+
+// Count orthogonally-adjacent cell pairs that share a grain type.
+function likeAdjacency(types) {
+  let c = 0
+  for (let r = 0; r < ROWS; r++) {
+    for (let col = 0; col < COLS; col++) {
+      const t = types[r * COLS + col]
+      if (col + 1 < COLS && types[r * COLS + col + 1] === t) c++
+      if (r + 1 < ROWS && types[(r + 1) * COLS + col] === t) c++
+    }
+  }
+  return c
+}
+
+// Up to 3 SiO2↔Na2O swaps, each the one that most reduces like-type adjacency.
+// Ties broken by the seeded rand so the layout is stable per composition.
+function declumpGrid(types, rand, maxSwaps = 3) {
+  for (let s = 0; s < maxSwaps; s++) {
+    const base = likeAdjacency(types)
+    let best = 0, bestPairs = []
+    for (let a = 0; a < types.length; a++) {
+      if (types[a] !== 'SiO2') continue
+      for (let b = 0; b < types.length; b++) {
+        if (types[b] !== 'Na2O') continue
+        types[a] = 'Na2O'; types[b] = 'SiO2'
+        const gain = base - likeAdjacency(types)
+        types[a] = 'SiO2'; types[b] = 'Na2O'
+        if (gain > best) { best = gain; bestPairs = [[a, b]] }
+        else if (gain === best && gain > 0) bestPairs.push([a, b])
+      }
+    }
+    if (best <= 0) break
+    const [a, b] = bestPairs[Math.floor(rand() * bestPairs.length)]
+    types[a] = 'Na2O'; types[b] = 'SiO2'
+  }
 }
 
 // ── Per-species hex lattice placement ────────────────────────────────────────
@@ -477,6 +514,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
     physRef.current.sio2Pct = sio2Pct
     window._meltPhys = physRef.current
     window.measureStrain95 = () => measureStrain95(window._meltPhys)
+    window.meltStructure   = () => meltStructure(window._meltPhys)
     // A handful of near-zero-temperature steps let spring forces seat atoms at r0
     // after the dead-zone snap in initPhysics. 5 steps is enough; initPhysics
     // already handles overlap resolution so we don't need many here.
