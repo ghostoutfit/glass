@@ -46,33 +46,47 @@ To look at it running: `npx vite preview` then open `/glass/v3/index.html`.
 
 # ⚡ Performance — read this before touching the hot paths
 
-**The sim does not hit 60 fps.** Measured in headless Chromium on a fast cloud container
-(soda preset, default `simSpeed` 0.5, ~1500 °C). Method: Playwright + Chromium 1194,
-`requestAnimationFrame` interval sampling over 5–6 s, first 5 frames discarded.
+**The sim does not hit 60 fps.** Measured in headless Chromium (Playwright + Chromium 1194,
+`requestAnimationFrame` interval sampling over 5 s, first 5 frames discarded), soda preset at
+~1500 °C, default `simSpeed` 0.5. **4× CPU throttle** (Chrome DevTools `Emulation.setCPUThrottlingRate`)
+is the stand-in for an old education Chromebook: those are roughly 3–4× slower single-thread than
+this container, and passively cooled, so sustained they behave like 4–6×.
 
-| Configuration | ms/frame | fps |
-|---|---|---|
-| **Particles and Fields — Detailed** (current) | **43.4** | **23.0** |
-| Particles and Fields — Simple | 36.6 | 27.3 |
-| Bulk Material (either tier) | 70–90 | 11–14 |
-| *before the tab fix: melt tab with the box sim also running* | *106* | *9.4* |
+| panel dpr | CPU | tier | Particles and Fields | Bulk Material |
+|---|---|---|---|---|
+| 1 | 1× | detailed | 56 ms / 18 fps | 89 ms / 11 fps |
+| 1 | 1× | **simple** | **32 ms / 31 fps** | 72 ms / 14 fps |
+| 1 | 4× | detailed | 315 ms / 3.2 fps | 465 ms / 2.2 fps |
+| 1 | 4× | **simple** | **229 ms / 4.4 fps** | 322 ms / 3.1 fps |
+| 2 | 1× | detailed | 128 ms / 7.8 fps | 90 ms / 11 fps |
+| 2 | 1× | **simple** | **41 ms / 24 fps** | 76 ms / 13 fps |
+| 2 | 4× | detailed | 677 ms / 1.5 fps | 382 ms / 2.6 fps |
+| 2 | 4× | **simple** | **211 ms / 4.7 fps** | 323 ms / 3.1 fps |
 
-Expect roughly a quarter of these numbers on the weak hardware this has to run on.
+⚠️ **This container is noisy** — repeat runs of the same build vary by up to ~35 % in absolute
+ms. Trust the **ratios measured within one run** (same row-pair, same session), not absolutes
+across runs. The robust results are: Simple is **~3× faster than Detailed on a dpr-2 panel**
+(both runs agreed, 2.8–3.2×) and **~1.3–1.75× on a dpr-1 panel**.
 
-**Approximate melt-tab frame budget at 1500 °C** (43 ms). The field row is A/B measured in the
-browser; the physics row is the clean node step cost amortised over `simSpeed` 0.5, so it is
-indicative only (browser and node JIT differ):
-
-| | ms/frame | how |
-|---|---|---|
-| melt physics | ~22 | 43.4 ms/step ÷ 2 (steps every other frame) |
-| blurred bond-strain field | ~7 | A/B: Detailed → Simple, 43.4 → 36.6 |
-| rest of `drawScene`, React, graph, bookkeeping | ~14 | remainder |
-
-⚠️ The strain field measured **~13 ms** before the tab fix and **~7 ms** after. The earlier figure
-was inflated by the box sim competing for the same frame; ~7 ms is the honest number.
+**Still not good enough.** At 4× the melt tab is 4.4 fps on Simple. Under ~10 fps interaction
+feels broken. The remaining gap is the melt physics (a spatial hash) plus the per-atom/per-bond
+raster described in 2.
 
 ## Where the time goes
+
+**Melt-tab frame profile at 4× throttle** (dev build, so React's `jsxDEV` is inflated and should
+be discounted):
+
+| | share | note |
+|---|---|---|
+| native canvas rasterisation (`(program)` + `drawImage` + `bezierCurveTo`) | ~53 % | the blurs, the per-atom arcs, the per-bond lenses |
+| `stepPhysics` | ~26 % | the five O(n²) loops |
+| everything else | ~21 % | React (dev-inflated), graph, bookkeeping |
+
+**Rasterisation dominates, not physics** — which is why the DPR cap and the blur caps moved the
+numbers more than anything done to the step. The Bulk Material tab profiles similarly: ~45 %
+rasterisation, ~34 % `stepSandPhysics`.
+
 
 ### 1. One tab simulates at a time — FIXED (was ~35 ms/frame of waste)
 
@@ -139,8 +153,8 @@ strain field. That tab holds 11 of the 13 `ctx.filter` applications in the proje
 
 ### 1c. Quality tier — wired, speed test NOT yet connected
 
-**Added 2026-10-02.** There is a render-quality tier so weak machines can drop the expensive
-effects. Everything downstream is plumbed; only the detection is a stub.
+**Added 2026-10-02, extended 2026-10-03.** A render-quality tier so weak machines drop the
+expensive effects. Everything downstream is plumbed; only the detection is a stub.
 
 ```js
 // GlassViewer.jsx, top of file
@@ -148,30 +162,96 @@ function detectPerformanceTier() {
   // TODO(speed-test): return 'simple' | 'detailed' from the shared speed test.
   return null            // null = unknown → falls back to QUALITY_DEFAULT ('detailed')
 }
-const QUALITY = {
-  detailed: { bondStrainField: true  },
-  simple:   { bondStrainField: false },
-}
 ```
 
 **To switch it on, replace the body of `detectPerformanceTier()` and nothing else.** The other
-sims in this project already run a speed test returning "Simple" for weak machines and "Detailed"
-for better ones; drop that verdict in here, lowercased.
+sims in this project already run a speed test returning "Simple"/"Detailed"; drop that verdict in
+here, lowercased.
 
-What's already wired:
-- `quality` state, initialised from `detectPerformanceTier() ?? QUALITY_DEFAULT`.
-- `caps = qualityCaps(quality)` → `fieldAllowed` → `effectiveShowField = showField && fieldAllowed`.
-- `effectiveShowField` is what `CompositionView` receives, what the Field button's active state
-  reflects, and what gates the viz-panel and the field legend. On `simple` the Field button is
-  disabled with an explanatory tooltip rather than silently doing nothing.
-- A **manual tier override** in the dev panel (type "dev", "── Quality ──") so the Simple path can
-  be exercised before the real test lands. It is outside the per-tab blocks because the tier is
-  global. It also prints "(speed test not wired yet)" while `detectPerformanceTier()` returns null.
+`QUALITY` is the single table of per-tier caps:
 
-`QUALITY` is the single place that decides what a tier gives up. Today `simple` only drops the
-melt tab's blurred strain field (~7 ms/frame); atoms and bonds still draw, so the interaction
-being taught is intact and only the soft glow goes. **The obvious next caps are on the Bulk
-Material tab** — see 1b.
+| cap | detailed | simple | what it does |
+|---|---|---|---|
+| `bondStrainField` | true | false | full-canvas `blur(2px)` + screen/multiply composite on the melt tab |
+| `maxDpr` | 2 | 1 | **the biggest render lever** — see below |
+| `blobGlowBlur` | true | false | the Bulk tab's decorative heat-glow blurs (up to `blur(12px)`, full canvas, plus a per-grain arc fill) |
+| `sandGrainScale` | 1 | **1 (parked)** | would halve Bulk-tab grain count; measured 68 → 30 ms but **not safe yet** — see below |
+
+A manual tier override sits at the top of the dev panel (type "dev", "── Quality ──"), outside the
+per-tab blocks because the tier is global. It prints "(speed test not wired yet)" while
+`detectPerformanceTier()` returns null.
+
+#### `maxDpr` — the single biggest render lever
+
+A canvas backing store is sized at `devicePixelRatio`, so fill cost scales with its **square**: a
+dpr-2 panel is 4× the pixels. Measured on the melt tab, dpr 1 → 2 costs **2.2×** per frame
+(52 → 113 ms at 1×; 259 → 612 ms at 4×). Capping at 1 on `simple` is what produces the ~3×
+Simple/Detailed gap on a dpr-2 panel in the table above.
+
+⚠️ **`devicePixelRatio` also tracks browser zoom.** A student at 125 % zoom silently pays ~1.56×
+fill with nothing else changed. This is a strong candidate for the machine-to-machine variance
+between a dev machine at 100 % and field machines — worth checking zoom level before trusting any
+field measurement.
+
+Everything that sizes a canvas or maps pointer coordinates **must** use `effectiveDpr()` from
+`renderer.js`, never `window.devicePixelRatio`. Verified: the pointer mapping in
+`CompositionView`'s `toPhys` exactly inverts `drawScene`'s transform at every dpr (the dpr factor
+cancels algebraically — round-trip checked at dpr 1, 1.25, 2, 3), so click-to-inspect is
+unaffected by the cap.
+
+The Bulk Material tab is **dpr-insensitive** — its canvas is sized in CSS pixels
+(`canvas.width = canvas.clientWidth`, no dpr) and the blob is drawn through fixed 320×320
+offscreens. That is why `maxDpr` moves the melt tab and not that one.
+
+#### `sandGrainScale` is parked at 1 — do not enable it without fixing the rates first
+
+Halving the Bulk tab's grain count measured **68 → 30 ms/frame at 1× and 308 → 162 ms at 4×** —
+by far the biggest win available on that tab, since `stepSandPhysics`' 10-pass PBD solve is ~34 %
+of its CPU and is linear in grain count.
+
+It is disabled anyway, because it **changes what the sim teaches**. Screenshots at 1500 °C showed
+Detailed as discrete grains with glowing blobs forming among them, and Simple as a flat orange
+mass. The cause is in the next section: the melt-progression rates are per-frame with **absolute**
+caps, so halving the grain count roughly doubles the fraction of the pile that melts per frame.
+
+Fix the rates first, then set it to 0.5.
+
+### 1d. ⚠️ Frame-rate-coupled behaviour — the sim runs a different lesson on different hardware
+
+**Found 2026-10-03. Pre-existing, not caused by any optimisation here, and it matters more than
+the frame rate does.** Two separate couplings make the *content* of the lesson depend on how fast
+the machine is:
+
+**1. Sand melt progression is proportional to frame rate.** All four melt-progression calls run
+**once per rendered frame** with per-frame probabilities, in `GlassViewer`'s box loop:
+
+| call | rate limit | scale-dependent? |
+|---|---|---|
+| `mergeSodaGrains(grains, meldProb)` | per-pair probability per frame | ∝ fps |
+| `convertLargeNaGrains(...)` | **"one per frame"**, absolute | ∝ fps, and ∝ 1/grainCount in fractional terms |
+| `mergeSilicateGrains(..., maxMerges: 3)` | **absolute 3 per frame** | ∝ fps, and ∝ 1/grainCount |
+| `absorbNearbyGrains(...)` | per-grain probability per frame | ∝ fps |
+
+So a machine running at 30 fps melts sand twice as fast as one at 15 fps, in wall-clock terms.
+**Any performance work changes the melt pacing**, including the glow caps shipped here
+(Bulk 89 → 72 ms is ~24 % more frames/sec, so ~24 % faster melting on Simple).
+
+**2. Heating runs slower on slow machines.** `GlassViewer`'s `integrateMelt` uses
+`elapsed = Math.min((ts - lastTs) / 1000, 0.05)`. The clamp is there to stop a huge jump after a
+stall, but it means that below **20 fps the temperature ramp falls behind real time** — at 11 fps
+(Bulk, Detailed) heating advances at ~61 % of the intended rate. "Heat to 1500 °C" therefore takes
+noticeably longer on a weak Chromebook, and the student's lesson is paced differently.
+
+**Why this matters more than fps:** a dev machine and a field Chromebook are not running the same
+simulation. They melt at different rates and heat at different rates. Any field report of
+"it behaved differently on my machine" may be this rather than a bug, and A/B comparisons of the
+physics across machines are not valid until it is fixed.
+
+**The fix** is to drive both from wall-clock, not frames: accumulate elapsed time and apply melt
+progression per simulated second (the box physics already does this correctly for `stepSandPhysics`
+via its `FIXED_DT` accumulator — use the same pattern), and replace the heating clamp with an
+accumulator that doesn't silently drop time. Scale `maxMerges` and the one-per-frame conversion by
+grain count at the same time, which unblocks `sandGrainScale`.
 
 ### 2. Canvas2D `ctx.filter` and `getImageData` — the graphical hot spots
 
@@ -298,35 +378,35 @@ frames cheaper.
 
 ## Guidance for the trimmed-down build
 
-The goal is a version that is just as clear about the *interactions* but runs on weak hardware.
 Remaining work, in rough order of payoff per unit of effort:
 
-1. ~~**Gate the box sim on the active tab.**~~ **DONE** — see 1. 106 → 43 ms/frame on the melt tab.
-2. ~~**Quality tier for the blurred strain field.**~~ **DONE** — see 1c. Wired; the speed test
-   itself is still a stub, which is deliberate.
-3. **Tier caps for the Bulk Material tab.** It is now the slowest tab (70–90 ms/frame, 11–14 fps)
-   and the tier does nothing for it. It holds 11 of the 13 `ctx.filter` applications and both
-   `getImageData` metaball passes. Biggest remaining win and the same shape of fix as 1c.
-4. **Spatial hash for the pair loops.** Removes most of the ~22 ms/frame physics cost (more at
-   `simSpeed` ≥ 1, where the step runs every frame). Pattern already exists in `sandPhysics.js`.
-   Physics-neutral if the cell size ≥ the largest cutoff. **This is the fix that makes cutting
-   `n` unnecessary** — once the loops are linear in neighbours rather than quadratic in atoms,
-   716 atoms is comfortable. Joe's call (2026-10-02) was to leave the loops alone for now and get
-   the tab split and the tier right first; revisit if the frame is still too slow after 3.
-5. **Break down the ~14 ms/frame remainder** in `drawScene` / React / the graph. Not yet profiled
-   at that granularity; may be cheaper to fix than the physics.
-6. **Collapse the 6 substeps to 2–3** for the low-end build. Linear saving on the three substep
-   loops. Costs stability at high T (`SUBSTEPS` exists to stop tunnelling), so re-check that
-   atoms don't pass through each other at 1800 °C before shipping it.
-7. ~~**Cut `n`.**~~ **Ruled out by Joe (2026-10-02)** — the atom count carries the teaching and
-   isn't negotiable. Noted here so nobody re-proposes it.
-8. Precompute the heat-capacity integrals, hoist the per-step allocations, drop the duplicate
-   `computeKE`, delete the dead `peNow`, subsample the replay buffer. Each is small; together
-   they're a few ms and much less GC.
+1. ~~**Gate the box sim on the active tab.**~~ **DONE** — see 1.
+2. ~~**Quality tier for the blurred strain field.**~~ **DONE** — see 1c.
+3. ~~**`maxDpr` cap.**~~ **DONE** — see 1c. ~3× on the melt tab on a dpr-2 panel.
+4. ~~**Bulk-tab glow caps.**~~ **DONE** — see 1c. ~1.25–1.45× on that tab.
+5. **Make melt progression and heating frame-rate-independent** — see 1d. This is now the top
+   item. It is a *correctness* fix, not a perf fix: right now a fast machine and a slow one teach
+   different lessons. It also unblocks `sandGrainScale` (worth another ~2× on the Bulk tab), so it
+   pays for itself in performance too.
+6. **Spatial hash for the pair loops.** The melt tab is still 4.4 fps at 4× on Simple, and
+   physics is ~26 % of that frame. Pattern already exists in `sandPhysics.js`. Physics-neutral if
+   the cell size ≥ the largest cutoff.
+7. **Per-atom and per-bond raster on the melt tab.** After the tab split and the DPR cap this is
+   the largest remaining render cost: ~716 atoms × up to 4 ghost copies = up to ~2,900 `arc`
+   fill+stroke pairs per frame, plus ~800 bond lenses each built from `bezierCurveTo`
+   (`fillLens`). Both are candidates for a pre-rendered sprite blitted with `drawImage`.
+8. **Collapse the 6 substeps to 2–3** on `simple`. ⚠️ Not free: a substep is one unit of simulated
+   time, so fewer substeps means less dynamics per wall-clock second — it would slow cooling and
+   could weaken the slow-vs-fast-cool difference in final order, which is on the do-not-cut list.
+   Measure `meltStructure()` after a slow cool before accepting it.
+9. ~~**Cut `n`.**~~ **Ruled out by Joe (2026-10-02).**
+10. Precompute the heat-capacity integrals, hoist the per-step allocations, drop the duplicate
+    `computeKE`, delete the dead `peNow`, subsample the replay buffer.
 
 Things *not* to cut, because they carry the teaching:
 bond colour responding to strain; grains visibly dissolving; the freed/bonded distinction;
-the latent-heat plateau; the fast-vs-slow cool difference in final order.
+the latent-heat plateau; the fast-vs-slow cool difference in final order; **discrete sand grains
+visibly turning into blobs** (the `sandGrainScale` screenshot showed how easily that one is lost).
 
 ## Reproducing the measurements
 
@@ -772,6 +852,9 @@ forever. Measured 15–39 ms; one-time, on composition change only.
 
 # Rendering (`renderer.js`)
 
+`renderer.js` also owns the **DPR cap** (`setMaxDpr` / `effectiveDpr`) used by every canvas in
+the project — see 1c. Never call `window.devicePixelRatio` directly in this codebase.
+
 `drawScene(canvas, phys, options)` is the only entry point. Options: `ts`, `visualScale`,
 `bondRound`, `showField`, `showCharge`, `darkMode`, `bondNums`, `atomColorMode`,
 `showBrokenBonds`, `showLiveStats`, `targetTempC`, `hoverIdx`, `selectedIdx`.
@@ -852,7 +935,7 @@ Rules this layout depends on:
 | Control | Effect |
 |---|---|
 | Charge | `showCharge` — radial charge halos (blue cations, orange O). Allocates a gradient per atom per frame. |
-| Field | `showField` — the blurred bond strain field, ~7 ms/frame. Forced off and the button disabled on `simple` quality; the UI reads `effectiveShowField`, never raw `showField`. |
+| Field | `showField` — the blurred bond strain field. Forced off and the button disabled on `simple` quality; the UI reads `effectiveShowField`, never raw `showField`. |
 | Count / Graph | right panel: bond-count table vs energy graph |
 | Turtle / Rabbit | `simSpeed` (default **0.5**) |
 | Slow / Fast Heat, Slow / Fast Cool | cooling modes; cool gated at 1500 °C |
@@ -906,7 +989,8 @@ Checkboxes: **Broken bonds** (`showBrokenBonds`), **Live stats** (`showLiveStats
 metaball with its own `getImageData` pass).
 
 Plus the global **── Quality ──** tier override (`detailed` / `simple`), at the top of the dev
-panel outside the per-tab blocks. See 1c.
+panel outside the per-tab blocks. It drives `bondStrainField`, `maxDpr`, `blobGlowBlur` and
+(parked) `sandGrainScale`. See 1c.
 
 The Pre-Compute checkbox is **gone**, along with the precompute system behind it.
 

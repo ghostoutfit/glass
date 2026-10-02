@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useRef } from 'react'
 import CompositionView from './CompositionView'
 import { initParticles, stepPhysics, stepFloorPhysics, PARTICLE_R, FIXED_DT, T_RIGID, freezeParticles, syncParticlesToRigidBody, stepRigidBody } from './glassPhysics.js'
 import { setSioHotMult, setFreeAttractSiOMult, setSioExclMult, setCrystJiggleMult, setBreakStrain, setReformStrain, setCrystAnchorK, setLiberateFrac, setSioK, setNaOK, setNaAnchorK, setNaLiberateFrac, setNaBreakStrain, setLatticeSpeedMult, setFreedSpeedMult, setReintBondN, setReintFrameM, setBreakStrainSpread, setSevTriggerDist, setFeedbackGainMult, setSiSiRepR0, setMotifStrength, setMotifAlign, setBondStiffMult, setFreedTau, setNaNaRepR0, setSevCooldown, setSevPullK } from './meltPhysics.js'
-import { setVisualScale } from './renderer.js'
+import { setVisualScale, setMaxDpr, effectiveDpr } from './renderer.js'
 import { initSandParticles, stepSandPhysics, mergeSodaGrains, mergeSilicateGrains, convertLargeNaGrains, stepNaBlobSprings, checkNaBlobMerges, absorbNearbyGrains, GRAIN_R as SAND_GRAIN_R, NA_BLOB_R_CTR } from './sandPhysics.js'
 import './GlassViewer.css'
 
@@ -307,17 +307,44 @@ function detectPerformanceTier() {
 const QUALITY_DEFAULT = 'detailed'
 
 // Per-tier render caps. Keep this the single place that decides what a tier gives up.
+//
+// Measured at 4x CPU throttle (our stand-in for an old Chromebook), the melt tab is
+// ~53% native canvas rasterisation and ~26% physics JS; the Bulk Material tab is
+// ~45% rasterisation and ~34% stepSandPhysics. So the caps target raster first and
+// grain count second — not the melt physics, which is deferred to a spatial hash.
 const QUALITY = {
-  // Full fidelity.
+  // Full fidelity. maxDpr 2 is not a downgrade for a normal 1x or 2x panel; it only
+  // clamps the pathological case of a high-DPI panel plus browser zoom.
   detailed: {
     bondStrainField: true,
+    maxDpr:          2,
+    sandGrainScale:  1,
+    blobGlowBlur:    true,
   },
-  // Weak machines. The blurred bond-strain field is a full-canvas blur(2px) plus a
-  // screen/multiply composite every frame — measured at ~13 ms/frame, the most
-  // expensive single thing the melt renderer does. Atoms and bonds still draw, so
-  // the interaction being taught is intact; only the soft glow goes away.
+  // Weak machines.
+  //  · bondStrainField — full-canvas blur(2px) + screen/multiply composite each frame.
+  //  · maxDpr 1 — the biggest single render win: dpr 2 costs 2.2x per melt frame, and
+  //    devicePixelRatio tracks browser zoom, so this also caps a zoomed-in student.
+  //    Cost: atoms look slightly soft on a high-DPI panel.
+  //  · sandGrainScale — PARKED AT 1. Halving it measured 68 -> 30 ms/frame on the
+  //    Bulk tab (the single biggest win available there), but it is NOT SAFE YET:
+  //    the melt-progression calls are rate-limited per FRAME with absolute caps —
+  //    mergeSilicateGrains(..., maxMerges: 3) and convertLargeNaGrains' "one per
+  //    frame" — so halving the grain count roughly doubles the FRACTION of the pile
+  //    that melts per frame, and sand visibly melts faster on 'simple'. Screenshots
+  //    confirmed it: the pile reads as flat orange goo instead of discrete grains
+  //    turning into blobs. Make those rates frame-rate- and count-independent first
+  //    (see "Frame-rate-coupled behaviour" in CLAUDE.md), then set this to 0.5.
+  //  · blobGlowBlur — drops the decorative outer heat-glow blurs (up to blur(12px),
+  //    full canvas). The metaball mask that gives the blob its shape is kept, so the
+  //    melt still reads as a blob.
+  // Atoms, bonds, grains and the blob all still draw: every interaction being taught
+  // survives this tier. Only soft glows and resolution go.
   simple: {
     bondStrainField: false,
+    maxDpr:          1,
+    sandGrainScale:  1,
+    blobGlowBlur:    false,
   },
 }
 const qualityCaps = tier => QUALITY[tier] ?? QUALITY[QUALITY_DEFAULT]
@@ -340,6 +367,8 @@ export default function GlassViewer() {
   // The blurred strain field is off entirely on 'simple', whatever the Field button says.
   const fieldAllowed      = caps.bondStrainField
   const effectiveShowField = showField && fieldAllowed
+  // The RAF closures are created once with [] deps, so they read caps through a ref.
+  const capsRef = useRef(caps)
 
   const [tab, setTab]             = useState('melt')
 
@@ -497,6 +526,23 @@ export default function GlassViewer() {
   useEffect(() => { boxSimRef.current.sandDevMode = sandDevMode }, [sandDevMode])
   useEffect(() => { boxSimRef.current.showMiniView = showMiniView }, [showMiniView])
   useEffect(() => { tabRef.current = tab }, [tab])
+  // Quality tier → renderer DPR cap, and rebuild the box sim because its grain count
+  // is fixed at init. The melt tab needs no rebuild: nothing tier-dependent is baked in.
+  useEffect(() => {
+    capsRef.current = caps
+    setMaxDpr(caps.maxDpr)
+    const phys = physRef.current
+    if (phys) {
+      phys.sandParticles = null
+      phys.particles     = null
+      phys.springs       = null
+      phys.rigidBody     = null
+      phys.naBlobs       = []
+      phys.blobMct       = {}
+      phys.accumulator   = 0
+      phys.prevTime      = null
+    }
+  }, [caps])
   useEffect(() => { coolingModeRef.current  = coolingMode  }, [coolingMode])
   useEffect(() => { meltHeatModeRef.current = meltHeatMode }, [meltHeatMode])
 
@@ -865,7 +911,11 @@ export default function GlassViewer() {
         if (s.boxState === 'sand') {
           if (!phys.sandParticles) {
             const pr = PRESETS.find(x => x.id === presetIdRef.current) ?? PRESETS[0]
-            phys.sandParticles = initSandParticles(HS, s.multiRadius, pr.na2o, pr.nGrains ?? 1800)
+            // Grain count is scaled by the quality tier. stepSandPhysics' 10-pass PBD
+            // solve is ~34% of this tab's CPU at 4x throttle and is linear in grain
+            // count, so halving it on 'simple' is the main lever here.
+            const _grains = Math.round((pr.nGrains ?? 1800) * (capsRef.current.sandGrainScale ?? 1))
+            phys.sandParticles = initSandParticles(HS, s.multiRadius, pr.na2o, _grains)
             phys.nNaOriginal = phys.sandParticles.filter(g => g.type === 'na').length
             phys.meldCount = 0
             phys.naBlobs = []
@@ -971,8 +1021,9 @@ export default function GlassViewer() {
           // Na grains switch to metaball rendering at 700°C so they merge visually
           const _naAsMeta = _isSoda && s.temp >= 700
 
-          // Heat glow pass — pure sand only
-          if (heatT > 0 && !_isSoda) {
+          // Heat glow pass — pure sand only. Decorative; dropped on 'simple' (a
+          // full-canvas blur up to 12 px plus a per-grain arc fill, every frame).
+          if (heatT > 0 && !_isSoda && capsRef.current.blobGlowBlur) {
             const gc = sandGlowOff.getContext('2d')
             gc.clearRect(0, 0, BOX_SIZE, BOX_SIZE)
             gc.globalCompositeOperation = 'lighter'
@@ -1012,7 +1063,7 @@ export default function GlassViewer() {
             }
           }
 
-          if (heatT > 0 && !_isSoda) {
+          if (heatT > 0 && !_isSoda && capsRef.current.blobGlowBlur) {
             ctx.filter = `blur(${Math.round(heatT * 12)}px)`
             ctx.globalCompositeOperation = 'lighter'
             ctx.drawImage(sandGlowOff, -HS, -HS, BOX_SIZE, BOX_SIZE)
@@ -1077,8 +1128,10 @@ export default function GlassViewer() {
             smctx.restore()
             ctx.drawImage(sandMeltOff, -HS, -HS, BOX_SIZE, BOX_SIZE)
 
-            // Pass 2: soft glow overlay — blur the crisp mask, tint at low alpha, draw lighter
-            {
+            // Pass 2: soft glow overlay — blur the crisp mask, tint at low alpha, draw
+            // lighter. Decorative; dropped on 'simple'. The crisp metaball mask itself is
+            // kept, so the melt still reads as a blob.
+            if (capsRef.current.blobGlowBlur) {
               const glowBlur = Math.round(4 + 6 * t)
               smctx.clearRect(0, 0, BOX_SIZE, BOX_SIZE)
               smctx.filter = `blur(${glowBlur}px)`
@@ -1094,8 +1147,9 @@ export default function GlassViewer() {
               ctx.globalCompositeOperation = 'source-over'
             }
 
-            // Pass 3: same heat glow as pure sand, using blob sub-circles as sources
-            if (heatT > 0) {
+            // Pass 3: same heat glow as pure sand, using blob sub-circles as sources.
+            // Decorative; dropped on 'simple'.
+            if (heatT > 0 && capsRef.current.blobGlowBlur) {
               const gc = sandGlowOff.getContext('2d')
               gc.clearRect(0, 0, BOX_SIZE, BOX_SIZE)
               gc.globalCompositeOperation = 'lighter'
@@ -1305,7 +1359,7 @@ export default function GlassViewer() {
       const mc = miniCanvasRef.current
       if (mc && tabRef.current === 'glass' && s.showMiniView &&
           (phys.particles?.length || phys.sandParticles?.length)) {
-        const dpr = window.devicePixelRatio || 1
+        const dpr = effectiveDpr()
         const mW  = mc.clientWidth, mH = mc.clientHeight
         if (mW && mH) {
           const cW = Math.round(mW * dpr), cH = Math.round(mH * dpr)

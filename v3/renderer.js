@@ -27,6 +27,24 @@ const riDx = dx => dx >  VW * 0.5 ? dx - VW : dx < -VW * 0.5 ? dx + VW : dx
 const riDy = dy => dy >  VH * 0.5 ? dy - VH : dy < -VH * 0.5 ? dy + VH : dy
 const GHOST_ZONE = 25  // px from edge at which ghost copies are drawn
 
+// ── Device-pixel-ratio cap ──────────────────────────────────────────────────
+// A canvas backing store is sized at devicePixelRatio, so fill cost scales with
+// its SQUARE: a dpr-2 panel is 4x the pixels of dpr-1. Measured on the melt tab,
+// dpr 1 -> 2 costs 2.2x per frame (52 -> 113 ms on a fast machine; 259 -> 612 ms
+// at 4x CPU throttle). It is the single largest render lever in this project.
+//
+// devicePixelRatio ALSO tracks browser zoom, so a student at 125% zoom silently
+// pays ~1.56x fill with no other change — a likely source of the machine-to-machine
+// variance seen in field testing versus a dev machine at 100%.
+//
+// Everything that sizes a canvas or maps pointer coordinates MUST use effectiveDpr(),
+// never window.devicePixelRatio directly, or the melt tab's click-to-inspect mapping
+// desyncs from what was actually drawn.
+let _maxDpr = 2
+export const setMaxDpr   = v => { _maxDpr = Math.max(0.5, v) }
+export const getMaxDpr   = () => _maxDpr
+export const effectiveDpr = () => Math.min(window.devicePixelRatio || 1, _maxDpr)
+
 let _visualScale = 3.3   // amplify lattice-atom displacement from x0; freed atoms unaffected
 export const setVisualScale = v => { _visualScale = v }
 // Only the first JIGGLE_PX of displacement from x0 is amplified — that's the thermal jiggle the
@@ -219,7 +237,7 @@ export function drawScene(canvas, phys, {
 } = {}) {
   if (!canvas || !phys) return
 
-  const dpr = window.devicePixelRatio || 1
+  const dpr = effectiveDpr()
   const W   = canvas.clientWidth
   const H   = canvas.clientHeight
   if (!W || !H) return

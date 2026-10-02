@@ -4,7 +4,7 @@ import { initPhysics, stepPhysics, setSiOr0,
          buildRigidBondMap, setSioExclMult, setBreakStrain, setReformStrain, setCrystAnchorK, setLiberateFrac, setSioK, setNaOK,
          setNaAnchorK, setNaLiberateFrac, setNaBreakStrain, setLatticeSpeedMult, setFreedSpeedMult,
          resetLibStats, getLibStats, measureStrain95, meltStructure, setUseEmaStrain } from './meltPhysics.js'
-import { drawScene, setVisualScale, findAtomNear, getVisualScale, getLastHudLines } from './renderer.js'
+import { drawScene, setVisualScale, findAtomNear, getVisualScale, getLastHudLines, effectiveDpr } from './renderer.js'
 
 const VW      = 600
 const VH_GRID = 350
@@ -202,7 +202,7 @@ function buildAllAtoms(types, sioR0) {
 // ── Graph drawing helpers ─────────────────────────────────────────────────────
 function setupCanvas(canvas) {
   if (!canvas || !canvas.clientWidth) return null
-  const dpr = window.devicePixelRatio || 1
+  const dpr = effectiveDpr()
   const w = canvas.clientWidth, h = canvas.clientHeight
   const cw = Math.round(w * dpr), ch = Math.round(h * dpr)
   if (canvas.width !== cw || canvas.height !== ch) { canvas.width = cw; canvas.height = ch }
@@ -466,7 +466,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
     if (!canvas) return
     const toPhys = e => {
       const rect  = canvas.getBoundingClientRect()
-      const dpr   = window.devicePixelRatio || 1
+      const dpr   = effectiveDpr()   // must match what drawScene used, or hit-testing desyncs
       const W     = canvas.clientWidth, H = canvas.clientHeight
       const scale = Math.min(W / 600, H / 350) * dpr
       const offX  = (W * dpr - 600 * scale) / 2
