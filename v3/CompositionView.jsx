@@ -365,7 +365,7 @@ function countBonds(phys) {
   return counts
 }
 
-export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, attractK = 0, attractFalloff = 1, debug = false, bondNums = false, meltTemp = 50, simSpeed = 1, speedMult = 1, coolingMode = null, onTempUpdate = null, onEnergyUpdate = null, onBondCounts = null, replayFrame = null, onReplayReady = null, graphCanvasRef = null, cumulativeEnergyRef = null, graphXMaxRef = null, darkMode = true, showCharge = false, showField = true, atomColorMode = 'normal', showBrokenBonds = false, showLiveStats = false, useEmaStrain = true, hcPlateau = 4 }) {
+export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, attractK = 0, attractFalloff = 1, debug = false, bondNums = false, meltTemp = 50, simSpeed = 1, speedMult = 1, coolingMode = null, onTempUpdate = null, onEnergyUpdate = null, onBondCounts = null, replayFrame = null, onReplayReady = null, graphCanvasRef = null, cumulativeEnergyRef = null, graphXMaxRef = null, darkMode = true, showCharge = false, showField = true, atomColorMode = 'normal', showBrokenBonds = false, showLiveStats = false, useEmaStrain = true, hcPlateau = 4, active = true, resetToken = 0 }) {
   const types = useMemo(
     () => buildGrid(sio2Pct, na2oPct, caoPct),
     [sio2Pct, na2oPct, caoPct]
@@ -395,6 +395,11 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
   const cumulativeEnergyRefRef   = useRef(cumulativeEnergyRef)
   const na2oPctRef               = useRef(na2oPct)
   const hcPlateauRef             = useRef(4)
+  // When false this tab is not showing: keep the RAF alive (so the shared energy
+  // ramp still advances and the other tab can cool) but skip stepPhysics, drawing,
+  // replay recording, the graph and the bond-count callback. See the activeRef
+  // guard in the RAF loop below.
+  const activeRef                = useRef(active)
   const graphXMaxRefRef          = useRef(graphXMaxRef)
   const frameAccRef         = useRef(0)
   const stepCallCountRef    = useRef(0)   // diagnostic: total stepPhysics calls
@@ -452,6 +457,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
   useEffect(() => { cumulativeEnergyRefRef.current = cumulativeEnergyRef }, [cumulativeEnergyRef])
   useEffect(() => { na2oPctRef.current = na2oPct }, [na2oPct])
   useEffect(() => { hcPlateauRef.current = hcPlateau }, [hcPlateau])
+  useEffect(() => { activeRef.current = active }, [active])
   useEffect(() => { graphXMaxRefRef.current = graphXMaxRef }, [graphXMaxRef])
 
   // Hover highlight: mousemove tracks nearest atom for the white ring in renderer
@@ -838,7 +844,12 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
         })
       }
     }
-  }, [cellData])  // eslint-disable-line react-hooks/exhaustive-deps
+    // resetToken: bumped by GlassViewer when this tab's frozen state is no longer
+    // valid for the current conditions (temperature moved, preset or ramp mode
+    // changed while the Bulk Material tab was showing). Re-running this effect
+    // rebuilds the melt from a fresh start state: initPhysics → 5 settling steps →
+    // buildRigidBondMap → 20 warm-up steps at the current target temperature.
+  }, [cellData, resetToken])  // eslint-disable-line react-hooks/exhaustive-deps
 
   // RAF loop
   useEffect(() => {
@@ -893,7 +904,12 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
       }
 
       const phys = physRef.current
-      if (phys) {
+      // activeRef gate: everything above this point is cheap bookkeeping that must
+      // keep running while the other tab is showing — the energy-content ramp above
+      // is the sole temperature driver for Slow/Fast Cool, and the Bulk Material tab
+      // reads that temperature. Everything below is the expensive part (stepPhysics,
+      // drawScene, replay capture, the graph, bond counts) and is frozen with the tab.
+      if (phys && activeRef.current) {
         const rf = replayFrameRef.current
 
         // ── Replay mode ───────────────────────────────────────────────

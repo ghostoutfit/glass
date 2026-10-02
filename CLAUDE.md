@@ -36,7 +36,8 @@ npm run lint      # oxlint — warnings only today, no errors. Keep it that way.
 
 `npm run lint` currently emits **82 warnings, 0 errors** — 45 of them in `v3/`, the rest
 unused-vars in the `v1/`, `v2/` and `src/` snapshots. Two of the `v3/` ones are flagged in this
-file as real: `no-constant-condition` (the `if (true)` box-sim gate) and the unused `peNow`.
+file as real: the unused `peNow` in `stepPhysics`. (The `no-constant-condition` warning for the
+`if (true)` box-sim gate is gone — that gate is now a real tab check.)
 New warnings in `v3/` are yours.
 
 To look at it running: `npx vite preview` then open `/glass/v3/index.html`.
@@ -45,47 +46,132 @@ To look at it running: `npx vite preview` then open `/glass/v3/index.html`.
 
 # ⚡ Performance — read this before touching the hot paths
 
-**The sim does not hit 60 fps. It does not hit 30 fps.** Measured in headless Chromium on a
-fast cloud container (soda preset, melt tab, default `simSpeed` 0.5):
+**The sim does not hit 60 fps.** Measured in headless Chromium on a fast cloud container
+(soda preset, default `simSpeed` 0.5, ~1500 °C). Method: Playwright + Chromium 1194,
+`requestAnimationFrame` interval sampling over 5–6 s, first 5 frames discarded.
 
-| Configuration | ms/frame (median) | fps |
+| Configuration | ms/frame | fps |
 |---|---|---|
-| As shipped, at rest (default ~50 °C) | 113 | 8.8 |
-| As shipped, 1500 °C | 106 | 9.4 |
-| Box sim disabled, 1500 °C | 71 | 14.2 |
-| Box sim + bond-strain field disabled, 1500 °C | 58 | 17.2 |
+| **Particles and Fields — Detailed** (current) | **43.4** | **23.0** |
+| Particles and Fields — Simple | 36.6 | 27.3 |
+| Bulk Material (either tier) | 70–90 | 11–14 |
+| *before the tab fix: melt tab with the box sim also running* | *106* | *9.4* |
 
-So on the target "shitty hardware" expect roughly 2–4 fps as shipped. Method: Playwright +
-Chromium 1194, `requestAnimationFrame` interval sampling over 5 s, first 5 frames discarded.
-Reproduce with the scripts described under "Reproducing the measurements" below.
+Expect roughly a quarter of these numbers on the weak hardware this has to run on.
 
-**Approximate frame budget at 1500 °C** (106 ms). The first two rows are A/B measured in the
+**Approximate melt-tab frame budget at 1500 °C** (43 ms). The field row is A/B measured in the
 browser; the physics row is the clean node step cost amortised over `simSpeed` 0.5, so it is
 indicative only (browser and node JIT differ):
 
 | | ms/frame | how |
 |---|---|---|
-| off-screen box sim | ~35 | A/B: gating it off → 71 ms |
-| blurred bond-strain field | ~13 | A/B: `showField` off → 58 ms |
 | melt physics | ~22 | 43.4 ms/step ÷ 2 (steps every other frame) |
-| rest of `drawScene`, React, graph, bookkeeping | ~36 | remainder |
+| blurred bond-strain field | ~7 | A/B: Detailed → Simple, 43.4 → 36.6 |
+| rest of `drawScene`, React, graph, bookkeeping | ~14 | remainder |
 
-That last row is bigger than I'd have guessed and is **not** yet broken down. If the first three
-get fixed and the frame is still slow, start there rather than optimising physics further.
+⚠️ The strain field measured **~13 ms** before the tab fix and **~7 ms** after. The earlier figure
+was inflated by the box sim competing for the same frame; ~7 ms is the honest number.
 
 ## Where the time goes
 
-### 1. The box sim runs on every tab — ~35 ms/frame wasted (biggest single win)
+### 1. One tab simulates at a time — FIXED (was ~35 ms/frame of waste)
 
-`GlassViewer.jsx` wraps the entire sand/glass box simulation and its renderer in a literal
-`if (true) {` — grep for it; oxlint already flags it as `no-constant-condition`. The result:
-while the student is on the **melt** tab, the sim is also stepping 1800–2250 sand grains through
-a 10-pass PBD solve, running the Na-blob spring system, and drawing the metaball blob — none of
-which is on screen.
+**Resolved 2026-10-02.** The melt tab ("Particles and Fields") and the bulk-material box sim
+("Bulk Material") are no longer stepped or drawn in the same frame. Measured effect on the melt
+tab at 1500 °C: **106 ms → 43 ms per frame, 9.4 → 23.0 fps.**
 
-A/B measured: gating that block off takes the melt tab from 106 ms → 71 ms per frame at 1500 °C.
-**Gate it on the active tab.** There is no `tabRef` yet; `tab` is React state in the same
-component, so add a ref beside the others and read it in `frame()`.
+How it works now:
+
+- `GlassViewer.jsx` had a literal `if (true) {` around the whole box simulation and its renderer,
+  so on the melt tab it kept stepping 1800–2250 sand grains through a 10-pass PBD solve and
+  running two `getImageData` metaball passes for a `display:none` canvas. That gate is now
+  `if (tabRef.current === 'glass')`.
+- **Both tabs stay mounted.** `CompositionView` used to be conditionally rendered, so switching
+  to Bulk Material *destroyed* the melt physics and switching back rebuilt it from scratch. It is
+  now always mounted inside a `display` wrapper and takes an `active` prop, so its state survives
+  and the two tabs can be A/B'd instantly.
+- **The inactive tab is frozen, not torn down.** `CompositionView`'s RAF keeps running but an
+  `activeRef` guard skips `stepPhysics`, `drawScene`, replay capture, the graph and the bond-count
+  callback. Verified in-browser: melt particle positions are bit-identical across a second of
+  sitting on the other tab, and resume stepping on return.
+- **A frozen state is only reused while it is still valid.** On every tab switch the conditions
+  the outgoing tab was simulating under are recorded (`frozenCondRef`): rounded temperature,
+  preset, cooling mode, heat mode. On entering a tab, if any of those have moved, that tab is
+  rebuilt from a fresh start state instead of resumed — `setMeltResetToken` re-runs
+  `CompositionView`'s init effect for the melt tab, and nulling `phys.sandParticles` /
+  `phys.particles` lets the box sim's existing lazy-init path rebuild. Verified: heating from
+  50 → 798 °C on the Bulk Material tab and returning gives a fresh 782-bond array with
+  `promoted: 0`; a round trip with nothing changed resumes the same arrays.
+
+⚠️ **Why the melt tab's energy ramp still runs while frozen.** `startCooling` sets
+`energyInput = 0` and leaves *CompositionView's* energy-content ramp as "the sole temperature
+driver" for Slow/Fast Cool, reporting up through `onTempUpdate`. Both tabs have Cool buttons, so
+freezing `CompositionView` wholesale would have silently broken cooling on the Bulk Material tab.
+The `activeRef` guard is therefore placed *below* the ramp: the cheap per-frame arithmetic
+(ramp advance, `onTempUpdate`) keeps running, and only the expensive work is gated. Verified:
+Fast Cool started on the Bulk Material tab takes 1655 → 1370 °C while melt particle positions
+stay bit-identical. **If you ever move that guard higher, cooling on the Bulk Material tab dies.**
+The cleaner fix is to move the cooling ramp into `GlassViewer`'s `integrateMelt` alongside
+heating, so temperature is fully tab-independent; not done yet.
+
+⚠️ **The mini blob preview is effectively disabled.** The `blob-box` thumbnail (dev-panel "Mini
+photo view", default off) rendered a *live* bulk-material metaball — its own
+`contrast(9999)` + `getImageData(320×320)` pass — in the header while the melt tab was showing.
+That is precisely the both-at-once case being eliminated, so it is now gated on
+`tabRef.current === 'glass'`, where the thumbnail isn't displayed. The code is left intact behind
+the gate rather than deleted. If a macro thumbnail on the melt tab is wanted later it needs to be
+a **cached still**, not a second live sim.
+
+### 1b. The Bulk Material tab is now the bottleneck
+
+With the melt tab fixed, the slow tab is the other one. Measured at ~1500 °C:
+
+| Tab / tier | ms/frame | fps |
+|---|---|---|
+| Particles and Fields — Detailed | 43.4 | 23.0 |
+| Particles and Fields — Simple | 36.6 | 27.3 |
+| Bulk Material — either tier | 70–90 | 11–14 |
+
+The Bulk Material figure moves with temperature (blur radius scales with `heatT`, up to 12 px),
+hence the range. **The quality tier does nothing for it yet** — `simple` only drops the melt tab's
+strain field. That tab holds 11 of the 13 `ctx.filter` applications in the project and both
+`getImageData` metaball passes, so it is where the next tier caps belong.
+
+### 1c. Quality tier — wired, speed test NOT yet connected
+
+**Added 2026-10-02.** There is a render-quality tier so weak machines can drop the expensive
+effects. Everything downstream is plumbed; only the detection is a stub.
+
+```js
+// GlassViewer.jsx, top of file
+function detectPerformanceTier() {
+  // TODO(speed-test): return 'simple' | 'detailed' from the shared speed test.
+  return null            // null = unknown → falls back to QUALITY_DEFAULT ('detailed')
+}
+const QUALITY = {
+  detailed: { bondStrainField: true  },
+  simple:   { bondStrainField: false },
+}
+```
+
+**To switch it on, replace the body of `detectPerformanceTier()` and nothing else.** The other
+sims in this project already run a speed test returning "Simple" for weak machines and "Detailed"
+for better ones; drop that verdict in here, lowercased.
+
+What's already wired:
+- `quality` state, initialised from `detectPerformanceTier() ?? QUALITY_DEFAULT`.
+- `caps = qualityCaps(quality)` → `fieldAllowed` → `effectiveShowField = showField && fieldAllowed`.
+- `effectiveShowField` is what `CompositionView` receives, what the Field button's active state
+  reflects, and what gates the viz-panel and the field legend. On `simple` the Field button is
+  disabled with an explanatory tooltip rather than silently doing nothing.
+- A **manual tier override** in the dev panel (type "dev", "── Quality ──") so the Simple path can
+  be exercised before the real test lands. It is outside the per-tab blocks because the tier is
+  global. It also prints "(speed test not wired yet)" while `detectPerformanceTier()` returns null.
+
+`QUALITY` is the single place that decides what a tier gives up. Today `simple` only drops the
+melt tab's blurred strain field (~7 ms/frame); atoms and bonds still draw, so the interaction
+being taught is intact and only the soft glow goes. **The obvious next caps are on the Bulk
+Material tab** — see 1b.
 
 ### 2. Canvas2D `ctx.filter` and `getImageData` — the graphical hot spots
 
@@ -108,7 +194,8 @@ ctx.filter = 'contrast(9999)' → drawImage → getImageData(320×320)
 In `renderer.js` the two blurred offscreen layers are:
 - **bond strain field** — full-canvas layer, `blur(2px)`, then composited with
   `globalCompositeOperation = 'screen'` (dark) / `'multiply'` (light). Measured at
-  **~13 ms/frame**; `showField: false` takes 71 → 58 ms at 1500 °C.
+  **~7 ms/frame** (Detailed → Simple, 43.4 → 36.6 ms at 1500 °C). It is the one effect the
+  `simple` quality tier drops — see 1c.
 - **grain outlines** — full-canvas layer, `blur(2px)`. Cheaper (outlines dissolve
   permanently as grains melt, so it empties out), but same mechanism.
 
@@ -212,23 +299,28 @@ frames cheaper.
 ## Guidance for the trimmed-down build
 
 The goal is a version that is just as clear about the *interactions* but runs on weak hardware.
-In rough order of payoff per unit of effort:
+Remaining work, in rough order of payoff per unit of effort:
 
-1. **Gate the box sim on the active tab.** ~35 ms/frame, one line plus a ref. No visual change.
-2. **Spatial hash for the pair loops.** Removes most of the ~22 ms/frame physics cost (more at
+1. ~~**Gate the box sim on the active tab.**~~ **DONE** — see 1. 106 → 43 ms/frame on the melt tab.
+2. ~~**Quality tier for the blurred strain field.**~~ **DONE** — see 1c. Wired; the speed test
+   itself is still a stub, which is deliberate.
+3. **Tier caps for the Bulk Material tab.** It is now the slowest tab (70–90 ms/frame, 11–14 fps)
+   and the tier does nothing for it. It holds 11 of the 13 `ctx.filter` applications and both
+   `getImageData` metaball passes. Biggest remaining win and the same shape of fix as 1c.
+4. **Spatial hash for the pair loops.** Removes most of the ~22 ms/frame physics cost (more at
    `simSpeed` ≥ 1, where the step runs every frame). Pattern already exists in `sandPhysics.js`.
    Physics-neutral if the cell size ≥ the largest cutoff. **This is the fix that makes cutting
    `n` unnecessary** — once the loops are linear in neighbours rather than quadratic in atoms,
-   716 atoms is comfortable.
-3. **Replace the two blurred layers with direct drawing or cached sprites.** ~15 ms/frame.
-4. **Collapse the 6 substeps to 2–3** for the low-end build. Linear saving on the three substep
+   716 atoms is comfortable. Joe's call (2026-10-02) was to leave the loops alone for now and get
+   the tab split and the tier right first; revisit if the frame is still too slow after 3.
+5. **Break down the ~14 ms/frame remainder** in `drawScene` / React / the graph. Not yet profiled
+   at that granularity; may be cheaper to fix than the physics.
+6. **Collapse the 6 substeps to 2–3** for the low-end build. Linear saving on the three substep
    loops. Costs stability at high T (`SUBSTEPS` exists to stop tunnelling), so re-check that
    atoms don't pass through each other at 1800 °C before shipping it.
-5. ~~**Cut `n`.**~~ **Ruled out by Joe (2026-10-02)** — the atom count carries the teaching and
-   isn't negotiable. Noted here so nobody re-proposes it. The spatial hash (2) is what removes
-   the need: `n` only hurts because the loops are quadratic, not because 716 atoms is inherently
-   too many to draw.
-6. Precompute the heat-capacity integrals, hoist the per-step allocations, drop the duplicate
+7. ~~**Cut `n`.**~~ **Ruled out by Joe (2026-10-02)** — the atom count carries the teaching and
+   isn't negotiable. Noted here so nobody re-proposes it.
+8. Precompute the heat-capacity integrals, hoist the per-step allocations, drop the duplicate
    `computeKE`, delete the dead `peNow`, subsample the replay buffer. Each is small; together
    they're a few ms and much less GC.
 
@@ -726,12 +818,41 @@ been **deleted**. `renderer.js` is the only renderer.
 Only two: **Pure SiO₂** (100/0/0, 1800 sand grains) and **High Na₂O** (70/30/0, 2250 grains).
 Soda-lime exists in the physics but not as a preset button.
 
+## Tab contract — read before touching either RAF loop
+
+Two tabs, both driven by one shared temperature, **never simulating in the same frame**:
+
+| Tab button | `tab` | Renders | Sim |
+|---|---|---|---|
+| "Particles and Fields" | `'melt'` | `CompositionView` (atoms, bonds, strain field) | `meltPhysics.js` |
+| "Bulk Material" | `'glass'` | `boxCanvasRef` (sand grains / SPH blob / metaball) | `sandPhysics.js` or `glassPhysics.js` |
+
+Rules this layout depends on:
+
+1. **Both are always mounted.** The melt tab lives inside a `display:none` wrapper when hidden,
+   not behind a `&&`. Conditionally rendering it destroys its physics and forces a full rebuild on
+   every switch, which is what the mount used to do.
+2. **`tabRef` gates the simulations**, not React state — the RAF closures are created once with
+   `[]` deps and never see state updates. `tabRef.current` is synced by its own effect.
+3. **Freezing is by guard, not by cancelling the RAF.** `CompositionView` keeps its RAF and
+   early-skips the expensive block via `activeRef`. The box loop keeps its RAF and skips its
+   whole body. Cancelling instead would mean restarting on every switch.
+4. **The melt energy ramp runs even when frozen** — it is the only temperature driver for
+   Slow/Fast Cool, and the Bulk Material tab has Cool buttons. The `activeRef` guard sits below
+   the ramp for exactly this reason. Moving it above breaks cross-tab cooling.
+5. **Frozen state has a validity condition.** `frozenCondRef` records `{temp, preset, cooling,
+   heat}` per tab at the moment it goes inactive; on reactivation a mismatch triggers a rebuild
+   (`setMeltResetToken` for melt, nulling `phys.sandParticles`/`phys.particles` for the box).
+   Dev-panel physics sliders are deliberately **not** tracked — they mutate shared module state in
+   `meltPhysics.js` and would need 29 more dependencies. Dev-only, so a frozen state can be
+   slightly stale after a slider move; change the temperature or switch twice to force a rebuild.
+
 ## Always-visible toggles
 
 | Control | Effect |
 |---|---|
 | Charge | `showCharge` — radial charge halos (blue cations, orange O). Allocates a gradient per atom per frame. |
-| Field | `showField` — the blurred bond strain field. **~13 ms/frame.** |
+| Field | `showField` — the blurred bond strain field, ~7 ms/frame. Forced off and the button disabled on `simple` quality; the UI reads `effectiveShowField`, never raw `showField`. |
 | Count / Graph | right panel: bond-count table vs energy graph |
 | Turtle / Rabbit | `simSpeed` (default **0.5**) |
 | Slow / Fast Heat, Slow / Fast Cool | cooling modes; cool gated at 1500 °C |
@@ -780,8 +901,12 @@ Soda-lime exists in the physics but not as a preset button.
 | Visual scale | 0.5–10.0 | 1.0 | `setVisualScale` (render only) |
 
 Checkboxes: **Broken bonds** (`showBrokenBonds`), **Live stats** (`showLiveStats` HUD),
-**EMA strain** (`_useEmaStrain`, default off), **Bond #s** (`bondNums`), **Mini view**
-(`showMiniView`, default off — it adds another `getImageData` metaball pass).
+**EMA strain** (`_useEmaStrain`, default off), **Bond #s** (`bondNums`), **Mini photo view**
+(`showMiniView`, default off — now effectively disabled, see 1; it rendered a second live
+metaball with its own `getImageData` pass).
+
+Plus the global **── Quality ──** tier override (`detailed` / `simple`), at the top of the dev
+panel outside the per-tab blocks. See 1c.
 
 The Pre-Compute checkbox is **gone**, along with the precompute system behind it.
 
@@ -922,9 +1047,12 @@ how fast springs adapt to deformation.
 
 # Dead code and traps
 
-## `if (true)` in `GlassViewer.jsx`
+## ~~`if (true)` in `GlassViewer.jsx`~~ — fixed
 
-Runs the entire box simulation on every tab. See the perf section — this is the top fix.
+Was running the entire box simulation on every tab. Now `if (tabRef.current === 'glass')`.
+See 1 in the performance section for the full tab contract, including the one trap: the melt
+tab's energy ramp must keep running while the tab is frozen, or cooling on the Bulk Material tab
+stops working.
 
 ## `freeRep` springs never fire (grep `spec.freeRepR0 &&`)
 

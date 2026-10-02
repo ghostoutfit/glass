@@ -286,6 +286,42 @@ function energyContentKJ(T, na2oPct, plateau) {
 const COOL_MIN_TEMP = 1500   // Slow/Fast Cool only engage from a full melt
 const ENERGY_KJ_MULT = 0.2   // arbitrary display scale: energy content × this → kJ readout
 
+// ── Performance tier ────────────────────────────────────────────────────────
+// Other sims in this project run a speed test that classifies the machine as
+// 'simple' (weak) or 'detailed' (capable). THAT TEST IS NOT WIRED UP HERE YET.
+//
+// detectPerformanceTier() is a deliberate placeholder: it always returns null,
+// meaning "unknown", so the tier falls back to QUALITY_DEFAULT and nothing
+// changes from today's behaviour. To switch it on, replace the body with a call
+// to the real speed test and return 'simple' | 'detailed'. Everything
+// downstream (the QUALITY caps table, the Field button, CompositionView's
+// showField prop) is already wired and starts working with no other edits.
+//
+// The dev panel has a manual Quality override so this can be exercised before
+// the real test lands.
+function detectPerformanceTier() {
+  // TODO(speed-test): return the shared speed test's verdict, 'simple' | 'detailed'.
+  return null
+}
+
+const QUALITY_DEFAULT = 'detailed'
+
+// Per-tier render caps. Keep this the single place that decides what a tier gives up.
+const QUALITY = {
+  // Full fidelity.
+  detailed: {
+    bondStrainField: true,
+  },
+  // Weak machines. The blurred bond-strain field is a full-canvas blur(2px) plus a
+  // screen/multiply composite every frame — measured at ~13 ms/frame, the most
+  // expensive single thing the melt renderer does. Atoms and bonds still draw, so
+  // the interaction being taught is intact; only the soft glow goes away.
+  simple: {
+    bondStrainField: false,
+  },
+}
+const qualityCaps = tier => QUALITY[tier] ?? QUALITY[QUALITY_DEFAULT]
+
 export default function GlassViewer() {
   const [darkMode,   setDarkMode]   = useState(true)
   const [bondView, setBondView] = useState('graph')  // 'count' | 'graph'
@@ -296,7 +332,30 @@ export default function GlassViewer() {
   const [showField,  setShowField]  = useState(true)
   const [showDev,    setShowDev]    = useState(false)
 
+  // Performance tier. detectPerformanceTier() is a stub returning null until the
+  // real speed test is dropped in (see the top of this file), so this currently
+  // always resolves to QUALITY_DEFAULT. The dev panel can override it by hand.
+  const [quality, setQuality] = useState(() => detectPerformanceTier() ?? QUALITY_DEFAULT)
+  const caps = qualityCaps(quality)
+  // The blurred strain field is off entirely on 'simple', whatever the Field button says.
+  const fieldAllowed      = caps.bondStrainField
+  const effectiveShowField = showField && fieldAllowed
+
   const [tab, setTab]             = useState('melt')
+
+  // ── One tab simulates at a time ───────────────────────────────────────────
+  // The particle melt ('melt' tab, "Particles and Fields") and the bulk-material
+  // box sim ('glass' tab, "Bulk Material") are never stepped or drawn in the same
+  // frame. Both stay MOUNTED so their state survives a switch and the two can be
+  // A/B'd instantly, but the inactive one is frozen: no stepPhysics, no draw.
+  //
+  // A frozen state is only reusable while the conditions it was computed under
+  // still hold. meltResetToken / boxResetToken bump when they don't, which rebuilds
+  // that tab from a fresh start state at the current conditions.
+  const tabRef = useRef('melt')
+  const [meltResetToken, setMeltResetToken] = useState(0)
+  // Conditions each tab's frozen state is valid for; null = currently active / unknown.
+  const frozenCondRef = useRef({ melt: null, glass: null })
   const [presetId, setPresetId]   = useState('soda')
   const [meltEnergyIn,   setMeltEnergyIn]   = useState(0)    // -100..100, snaps to 0
   const [meltLocalTemp,  setMeltLocalTemp]  = useState(50)  // melt tab's own temperature
@@ -413,6 +472,10 @@ export default function GlassViewer() {
   }, [])
   const glassVisualTypesRef = useRef(null)   // per-particle display color, assigned at init
   const presetIdRef  = useRef(presetId)
+  // Mirrors of the two ramp modes, for the tab-switch staleness check (which runs
+  // in an effect and must not re-fire on every mode change).
+  const coolingModeRef   = useRef(null)
+  const meltHeatModeRef  = useRef(null)
   const hcPlateauRef = useRef(4)
   const glassDkRef   = useRef(darkMode)
 
@@ -433,6 +496,67 @@ export default function GlassViewer() {
   useEffect(() => { boxSimRef.current.boxState = boxState }, [boxState])
   useEffect(() => { boxSimRef.current.sandDevMode = sandDevMode }, [sandDevMode])
   useEffect(() => { boxSimRef.current.showMiniView = showMiniView }, [showMiniView])
+  useEffect(() => { tabRef.current = tab }, [tab])
+  useEffect(() => { coolingModeRef.current  = coolingMode  }, [coolingMode])
+  useEffect(() => { meltHeatModeRef.current = meltHeatMode }, [meltHeatMode])
+
+  // ── Tab switch: freeze the old tab, validate-or-rebuild the new one ───────
+  // Conditions that make a frozen simulation state stale. Temperature is the big
+  // one — any heating, cooling or GO ramp moves it, and a frozen melt that was
+  // settled at 800 °C is simply wrong once the shared temperature reads 1500 °C.
+  // Rounded to 1 °C so thermostat jitter alone doesn't trigger a rebuild.
+  //
+  // NOTE: dev-panel physics sliders are NOT tracked here. They mutate shared module
+  // state in meltPhysics.js and would need 29 more dependencies; dev-only, so the
+  // frozen state can be slightly stale after a slider move. Switch tabs twice, or
+  // change the temperature, to force a rebuild.
+  const currentCond = useCallback(() => ({
+    temp:    Math.round(meltTempRef.current.temp),
+    preset:  presetIdRef.current,
+    cooling: coolingModeRef.current,
+    heat:    meltHeatModeRef.current,
+  }), [])
+
+  const prevTabRef = useRef('melt')
+  useEffect(() => {
+    const prev = prevTabRef.current
+    if (prev === tab) return
+    prevTabRef.current = tab
+    const frozen = frozenCondRef.current
+
+    // The tab we just left is now frozen — remember what it was valid for.
+    frozen[prev] = currentCond()
+
+    // The tab we just entered: reuse its frozen state only if nothing it depends
+    // on has moved since. Otherwise rebuild from a fresh start state.
+    const was = frozen[tab]
+    const now = currentCond()
+    const stale = !was || was.temp !== now.temp || was.preset !== now.preset ||
+                  was.cooling !== now.cooling || was.heat !== now.heat
+    frozen[tab] = null
+
+    if (!stale) return
+
+    if (tab === 'melt') {
+      // Re-runs CompositionView's init effect: initPhysics → settle → rigid bond
+      // map → warm to the current temperature.
+      setMeltResetToken(t => t + 1)
+    } else {
+      // Null the box sim's state; frame()'s lazy init rebuilds it for the current
+      // preset and boxState on the next tick.
+      const phys = physRef.current
+      if (phys) {
+        phys.sandParticles = null
+        phys.particles     = null
+        phys.springs       = null
+        phys.rigidBody     = null
+        phys.naBlobs       = []
+        phys.blobMct       = {}
+        phys.accumulator   = 0
+        phys.prevTime      = null
+      }
+    }
+  }, [tab, currentCond])
 
   useEffect(() => {
     document.body.style.background = darkMode ? '#080808' : '#e8e3da'
@@ -721,7 +845,13 @@ export default function GlassViewer() {
 
       ctx.clearRect(0, 0, canvas.width, canvas.height)
 
-      if (true) {
+      // Only simulate and draw the bulk-material box while its tab is showing.
+      // On the melt tab this block used to keep stepping 1800-2250 sand grains
+      // through a 10-pass PBD solve and running two getImageData metaball passes
+      // for a canvas that was display:none — measured at ~35 ms/frame of pure
+      // waste. The state is left untouched so switching back resumes instantly
+      // (or rebuilds, if the tab-switch staleness check nulled it).
+      if (tabRef.current === 'glass') {
         if (!s.box) s.box = { boxAngle: 0, boxAngularVel: 0, cornerDrag: null }
         if (s.floorMode) {
           // Returning from floor mode — reset to fresh particle state
@@ -1164,8 +1294,17 @@ export default function GlassViewer() {
       }
 
       // ── Mini blob preview (blob-box) ──────────────────────────────
+      // DISABLED on the melt tab by the tab gate below, which in practice disables
+      // it entirely: the blob-box only renders in the header while showMiniView is
+      // on, and showing a live bulk-material thumbnail beside the particle view is
+      // exactly the "both at once" case we are eliminating — it ran its own
+      // contrast(9999) + getImageData(320x320) metaball pass every frame on top of
+      // the main one. Left intact behind the gate rather than deleted; it is a
+      // dev-panel checkbox that defaults off. If a macro thumbnail is wanted on the
+      // melt tab later, it needs to be a cached still, not a live second sim.
       const mc = miniCanvasRef.current
-      if (mc && s.showMiniView && (phys.particles?.length || phys.sandParticles?.length)) {
+      if (mc && tabRef.current === 'glass' && s.showMiniView &&
+          (phys.particles?.length || phys.sandParticles?.length)) {
         const dpr = window.devicePixelRatio || 1
         const mW  = mc.clientWidth, mH = mc.clientHeight
         if (mW && mH) {
@@ -1636,8 +1775,12 @@ export default function GlassViewer() {
                 </button>
                 <button className={`action-btn replay-btn${showCharge?' active':''}`}
                   style={{padding:'3px 10px'}} onClick={() => setShowCharge(f => !f)}>Charge</button>
-                <button className={`action-btn replay-btn${showField?' active':''}`}
-                  style={{padding:'3px 10px'}} onClick={() => setShowField(f => !f)}>Field</button>
+                <button className={`action-btn replay-btn${effectiveShowField?' active':''}`}
+                  style={{padding:'3px 10px', opacity: fieldAllowed ? 1 : 0.4,
+                          cursor: fieldAllowed ? 'pointer' : 'not-allowed'}}
+                  disabled={!fieldAllowed}
+                  title={fieldAllowed ? undefined : 'Off on Simple quality — the blurred strain field is too slow for weak machines'}
+                  onClick={() => setShowField(f => !f)}>Field</button>
               </div>
             </div>
           </div>
@@ -1655,7 +1798,7 @@ export default function GlassViewer() {
       <div className="main">
 
         {/* Left visuals panel — shown when any toggle is active */}
-        {(bondView || showCharge || showField || showDev) && (
+        {(bondView || showCharge || effectiveShowField || showDev) && (
           <div className="viz-panel">
 
             {/* Particle key — always visible at top */}
@@ -1698,7 +1841,7 @@ export default function GlassViewer() {
             })()}
 
             {/* Bond strain gradient — field legend */}
-            {showField && (
+            {effectiveShowField && (
               <svg viewBox="0 0 200 50" width="100%" style={{ display: 'block', flexShrink: 0 }}>
                 <defs>
                   <linearGradient id="gl-strain-grad" x1="0" x2="1" y1="0" y2="0">
@@ -1817,6 +1960,29 @@ export default function GlassViewer() {
                 <input type="checkbox" checked={showMiniView} onChange={e => setShowMiniView(e.target.checked)} style={{accentColor:'#88ddaa'}} />
                 Mini photo view
               </label>
+
+              {/* ── Quality tier ── global, so it lives outside the per-tab blocks.
+                  Manual override: the real speed test is not wired up yet (see
+                  detectPerformanceTier at the top of this file), so this is how the
+                  Simple path gets exercised in the meantime. */}
+              <div style={{fontSize:11, color:'#aaa', marginBottom:4, letterSpacing:'0.06em'}}>── Quality ──</div>
+              <div style={{fontSize:11, color:'#888', marginBottom:4}}>
+                Tier <span style={{color:'#a090d0'}}>{quality}</span>
+                {detectPerformanceTier() === null && <span style={{color:'#666'}}> (speed test not wired yet)</span>}
+              </div>
+              <div style={{display:'flex', gap:3}}>
+                {['detailed','simple'].map(q => (
+                  <button key={q} onClick={() => setQuality(q)}
+                    style={{fontSize:10, padding:'2px 7px', cursor:'pointer', userSelect:'none',
+                      background: quality===q ? '#6050a0' : '#2a2a3a',
+                      color: quality===q ? '#fff' : '#aaa',
+                      border: quality===q ? '1px solid #a090e0' : '1px solid #444',
+                      borderRadius:3}}>{q}</button>
+                ))}
+              </div>
+              <div style={{fontSize:10, color:'#666', marginTop:3, marginBottom:8}}>
+                simple: no blurred bond-strain field on the melt tab
+              </div>
               {tab === 'melt' && <>
                 <div style={{fontFamily:'monospace', fontSize:12, color:'#e0d080', background:'rgba(255,220,80,0.07)', border:'1px solid rgba(255,220,80,0.2)', borderRadius:4, padding:'5px 8px', marginBottom:8}}>
                   <div style={{fontSize:10, color:'#888', marginBottom:2, letterSpacing:'0.05em'}}>TARGET ENERGY (ePerParticle)</div>
@@ -2018,8 +2184,12 @@ export default function GlassViewer() {
 
         {/* Particle canvas area */}
         <div className="particle-area">
-          {tab === 'melt' && (
+          {/* Melt canvas — always mounted so its physics state survives a tab switch
+              and the two tabs can be A/B'd instantly. `active` freezes its stepping
+              and drawing while the Bulk Material tab is showing. */}
+          <div style={{ display: tab==='melt' ? 'flex' : 'none', flexDirection:'column', width:'100%', height:'100%' }}>
             <CompositionView key="melt"
+              active={tab === 'melt'} resetToken={meltResetToken}
               sio2Pct={p.sio2} na2oPct={p.na2o} caoPct={p.cao}
               sioR0={sioR0} attractK={attractK} attractFalloff={attractFalloff} debug={false}
               bondNums={bondNums}
@@ -2030,11 +2200,11 @@ export default function GlassViewer() {
               cumulativeEnergyRef={meltCumulativeEnergyRef}
               graphXMaxRef={graphXMaxRef}
               replayFrame={replayFrame} onReplayReady={handleReplayReady}
-              darkMode={darkMode} showCharge={showCharge} showField={showField}
+              darkMode={darkMode} showCharge={showCharge} showField={effectiveShowField}
               atomColorMode={atomColorMode} showBrokenBonds={showBrokenBonds} showLiveStats={showLiveStats}
               useEmaStrain={useEmaStrain} hcPlateau={hcPlateau}
             />
-          )}
+          </div>
 
           {/* Glass canvas — always mounted so RAF never restarts */}
           <div style={{ display: tab==='glass' ? 'flex' : 'none', flexDirection:'column', width:'100%', height:'100%' }}>
