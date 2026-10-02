@@ -59,6 +59,20 @@ So on the target "shitty hardware" expect roughly 2–4 fps as shipped. Method: 
 Chromium 1194, `requestAnimationFrame` interval sampling over 5 s, first 5 frames discarded.
 Reproduce with the scripts described under "Reproducing the measurements" below.
 
+**Approximate frame budget at 1500 °C** (106 ms). The first two rows are A/B measured in the
+browser; the physics row is the clean node step cost amortised over `simSpeed` 0.5, so it is
+indicative only (browser and node JIT differ):
+
+| | ms/frame | how |
+|---|---|---|
+| off-screen box sim | ~35 | A/B: gating it off → 71 ms |
+| blurred bond-strain field | ~13 | A/B: `showField` off → 58 ms |
+| melt physics | ~22 | 43.4 ms/step ÷ 2 (steps every other frame) |
+| rest of `drawScene`, React, graph, bookkeeping | ~36 | remainder |
+
+That last row is bigger than I'd have guessed and is **not** yet broken down. If the first three
+get fixed and the frame is still slow, start there rather than optimising physics further.
+
 ## Where the time goes
 
 ### 1. The box sim runs on every tab — ~35 ms/frame wasted (biggest single win)
@@ -111,20 +125,34 @@ frame** — ~716 gradient objects/frame when Charge is on. Hoist to a cached spr
 ### 3. The physics step is five brute-force O(n²) loops
 
 `n` is larger than it looks: **716 atoms** (soda 70/30), **767** (pure SiO₂), 710 (soda-lime).
-Headless node, soda preset, instrumented copy of `meltPhysics.js`, 100 steps after 30 warm-up:
 
-| Section | ms/step @1500 °C | share | passes/step | ms/step @50 °C |
-|---|---|---|---|---|
-| **pairwise forces** | 21.2 | 32 % | 6 (one per substep) | 17.1 |
-| **hard-sphere collisions** | 17.3 | 26 % | 6 | 16.5 |
-| **bond rebuild for rendering** | 12.9 | 19 % | **1** | 12.2 |
-| freed-ion exclusion (XPBD) | 7.6 | 11 % | 6 | 0.0 (nothing freed) |
-| contact liberation | 3.1 | 4.6 % | 1 | 0.0 |
-| severance | 2.3 | 3.5 % | 1 | 1.6 |
-| everything else combined | <1.5 | 2 % | — | <1.5 |
-| **total** | **66.7** | | | **49.5** |
+**Clean step cost** — real `v3/meltPhysics.js`, headless node, median of 4 runs × 150 steps after
+60 warm-up steps:
 
-Pure SiO₂ @1500 °C: 59.3 ms/step (same three loops, 34/33/25 %).
+| Preset | ms/step | range |
+|---|---|---|
+| soda @ 1500 °C | **43.4** | 39.8–43.9 |
+| soda @ 50 °C | **29.9** | 28.3–30.7 |
+| pure SiO₂ @ 1500 °C | **33.6** | 32.0–34.4 |
+
+**Where it goes** — from an *instrumented* copy with `performance.now()` around each section
+banner. ⚠️ That instrumentation inflates the total by ~50 % (66.7 ms vs the clean 43.4) because
+sections inside the substep loop are timed 6× per step, so **treat the shares as indicative and
+the absolute ms as upper bounds**, and over-weighted for the substep-loop rows in particular:
+
+| Section | ms/step @1500 °C (instrumented) | share | passes/step |
+|---|---|---|---|
+| **pairwise forces** | 21.2 | 32 % | 6 (one per substep) |
+| **hard-sphere collisions** | 17.3 | 26 % | 6 |
+| **bond rebuild for rendering** | 12.9 | 19 % | **1** |
+| freed-ion exclusion (XPBD) | 7.6 | 11 % | 6 |
+| contact liberation | 3.1 | 4.6 % | 1 |
+| severance | 2.3 | 3.5 % | 1 |
+| everything else combined | <1.5 | 2 % | — |
+
+The ranking is robust — it matches the pair counts below, and the in-browser profile independently
+showed `stepPhysics` as the single largest frame cost. Note `bond rebuild` runs **once** per step
+yet still places third, so per pass it is the most expensive loop of all.
 
 All five are `for i … for j = i+1 …` over every pair with no spatial structure:
 
@@ -187,15 +215,19 @@ The goal is a version that is just as clear about the *interactions* but runs on
 In rough order of payoff per unit of effort:
 
 1. **Gate the box sim on the active tab.** ~35 ms/frame, one line plus a ref. No visual change.
-2. **Spatial hash for the pair loops.** ~40 ms/frame. Pattern already exists in `sandPhysics.js`.
-   Biggest change, biggest win, and physics-neutral if the cell size ≥ the largest cutoff.
+2. **Spatial hash for the pair loops.** Removes most of the ~22 ms/frame physics cost (more at
+   `simSpeed` ≥ 1, where the step runs every frame). Pattern already exists in `sandPhysics.js`.
+   Physics-neutral if the cell size ≥ the largest cutoff. **This is the fix that makes cutting
+   `n` unnecessary** — once the loops are linear in neighbours rather than quadratic in atoms,
+   716 atoms is comfortable.
 3. **Replace the two blurred layers with direct drawing or cached sprites.** ~15 ms/frame.
 4. **Collapse the 6 substeps to 2–3** for the low-end build. Linear saving on the three substep
    loops. Costs stability at high T (`SUBSTEPS` exists to stop tunnelling), so re-check that
    atoms don't pass through each other at 1800 °C before shipping it.
-5. **Cut `n`.** 716 atoms is a lot of pedagogy for a 5×4 grid. A 4×3 grid, or a larger lattice
-   constant, cuts the O(n²) loops quadratically — and after a spatial hash, linearly. This is a
-   *design* decision about how much structure a student needs to see, so ask before doing it.
+5. ~~**Cut `n`.**~~ **Ruled out by Joe (2026-10-02)** — the atom count carries the teaching and
+   isn't negotiable. Noted here so nobody re-proposes it. The spatial hash (2) is what removes
+   the need: `n` only hurts because the loops are quadratic, not because 716 atoms is inherently
+   too many to draw.
 6. Precompute the heat-capacity integrals, hoist the per-step allocations, drop the duplicate
    `computeKE`, delete the dead `peNow`, subsample the replay buffer. Each is small; together
    they're a few ms and much less GC.
@@ -216,7 +248,9 @@ Nothing here is checked in — these were throwaway scripts in the scratchpad. T
 - **Per-section timing**: copy `meltPhysics.js`, insert `performance.now()` pairs around the
   `// ── Section ──` comment banners in `stepPhysics`, accumulate into an exported object.
   Use `var` for the timer locals — several sections open inside the substep loop and close
-  outside it, so `const` is out of scope.
+  outside it, so `const` is out of scope. ⚠️ The timers themselves cost ~50 % of the step
+  (100+ `performance.now()` calls per step, since substep-loop sections are timed 6× each), so
+  take totals from an uninstrumented run and use the instrumented one only for shares.
 - **Browser fps**: `npm i -D playwright --no-save`, launch with
   `executablePath: '/opt/pw-browsers/chromium-1194/chrome-linux/chrome'` and
   `args: ['--no-sandbox', '--enable-unsafe-swiftshader']`, serve with `npx vite preview`, then
@@ -305,21 +339,60 @@ repulsion: `f = -REP_K × (cutoff - d)`, `cutoff = (ri + rj) × REP_MULT` = up t
 That is a large energy barrier, and it is the likely reason contact liberation of SiO2 atoms by
 freed Na2O atoms fires less often than intended.
 
-⚠️ **Na-Na `r0 = 35` exceeds `FORCE_CUTOFF = 20`, so the force is truncated mid-slope.**
-The value is deliberate — commit `ddcfe89` lists "Na-Na repulsion r0 default 35", and the inline
-comment's stated intent is to spread Na through the melt instead of letting it clump. The
-consequences below probably are not deliberate:
-- The pair loop rejects on **each axis** separately, so a Na-Na pair at `dx = dy = 20` has
-  `d = 28.3` and still passes the gate. The repulsion is therefore **anisotropic** — stronger
-  along diagonals than along axes.
-- At the cutoff the force is `0.45 × (20 − 35) = −6.75` px/substep², roughly 50× the Na-O
-  attraction, and it **steps discontinuously to zero** when a pair crosses 20 px.
-- The inline comment claims "Na-Na r0 16" and "crystal Na-Na = 24px, unaffected". Both are now
-  false at `r0 = 35`.
+### ⚠️ Na-Na `r0 = 35` exceeds `FORCE_CUTOFF = 20` — measured, and counterintuitive
 
-Either raise `FORCE_CUTOFF` above the largest `r0` so the force is continuous, or bring `r0`
-inside the cutoff. Both change melt structure, so re-measure with `meltStructure()` after.
-**This is unresolved. Don't quietly pick one.**
+The force is truncated mid-slope. At the 20 px gate it is still
+`0.45 × (20 − 35) = −6.75` px/substep², roughly 50× the Na-O attraction, and it steps
+discontinuously to zero when a pair crosses the gate. The value is deliberate — commit `ddcfe89`
+lists "Na-Na repulsion r0 default 35", and the inline comment's intent is to spread Na through
+the melt instead of letting it clump.
+
+Everything below is measured headless on the soda preset, 150 steps, same seed. **Read it before
+"fixing" this**, because two obvious readings are both wrong.
+
+**It is not wasteful.** Na-Na is gated by `FORCE_CUTOFF` like every other pair and costs nothing
+extra. `r0 = 35` does not widen any loop.
+
+**It is not inert either — the slider works, strongly.** Mean Na-Na nearest neighbour at 1500 °C:
+
+| `setNaNaRepR0` | mean Na-Na nn | min Na-Na |
+|---|---|---|
+| 35 (default) | 32.7 px | 22.0 px |
+| 20 | 24.1 px | 19.6 px |
+| 14 | 21.9 px | 14.5 px |
+| 8 | 21.1 px | 8.0 px |
+| 0.1 (off) | 20.4 px | 7.3 px |
+
+**But it does not work the way `r0 = 35` implies.** An instantaneous count finds **0–1 of 3160
+Na-Na pairs** satisfying "passes the gate AND inside r0" at any temperature from 50 to 1800 °C.
+That is not evidence the force is idle — it is evidence the force has already done its job. It
+acts as a rare, violent *impulse* whenever two Na drift into the 40×40 px gate box, not as a
+35 px-range field. Equilibrium settles just outside the gate (min 22.0 px at r0 = 35), so
+**`FORCE_CUTOFF` sets the Na-Na spacing; `r0` only sets how hard the kick is.**
+
+⚠️ If you measure this yourself, don't repeat the mistake of counting pairs in a settled snapshot
+and concluding the force does nothing. You are looking at the equilibrium the force created, not
+at its activity. A/B the parameter instead.
+
+**The anisotropy is real but barely exercised.** The gate rejects per axis, so a pair at
+`dx = dy = 20` is 28.3 px apart and still passes. Measured across 50–1800 °C, 0–1 pairs ever sit
+in that diagonal band. Na's square lattice is a = 24 px and an axis-aligned neighbour at 24 px is
+rejected outright, so lattice pairs can't trigger it at all.
+
+**Raising `FORCE_CUTOFF` to 35 is cheap, not expensive.** A/B measured: **43.75 → 46.33 ms/step
+(+2.6 ms, +6 %)**. The O(n²) rejection scan dominates and doesn't change; only the extra accepted
+pairs (2043 → 6608) pay for a sqrt and a force. But it moves mean Na-Na spacing **+8.1 px
+(30.3 → 38.4)** — a real structural change to the melt.
+
+The inline comment claims "Na-Na r0 16" and "crystal Na-Na = 24px, unaffected". Both are false
+at `r0 = 35`.
+
+So this is a physics decision with a small perf cost attached, not a bug fix:
+- leave it, and document that Na-Na spacing is really controlled by `FORCE_CUTOFF`;
+- raise `FORCE_CUTOFF` for a continuous force, accepting +6 % and a more spread-out melt;
+- or bring `r0` inside the cutoff so the slider's number means what it reads.
+
+Re-run `meltStructure()` after any of them. **Still unresolved — don't quietly pick one.**
 
 ## Si-O capture range (`sioMult`)
 
