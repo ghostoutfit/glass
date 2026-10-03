@@ -516,6 +516,7 @@ export default function GlassViewer() {
   // Melt tab has its own independent temperature driven by its own energy input
   const meltTempRef             = useRef({ temp: 50, lastTs: 0, cumulativeEnergy: 0 })
   const gotoTargetRef           = useRef(null)   // GO target temp; integrator ramps to it then stops
+  const [gotoTargetTemp, setGotoTargetTemp] = useState(null)   // shown as a dotted line on the graph
   const meltCumulativeEnergyRef = useRef(0)  // raw energy accumulated (x-axis for T-E graph)
   const meltSimRef  = useRef({
     energyInput: 0,
@@ -660,7 +661,7 @@ export default function GlassViewer() {
           // GO ramp: stop when the target is reached.
           const gt = gotoTargetRef.current
           if (gt != null && ((input > 0 && st.temp >= gt) || (input < 0 && st.temp <= gt))) {
-            st.temp = gt; s.energyInput = 0; gotoTargetRef.current = null; setMeltLocalTemp(gt)
+            st.temp = gt; s.energyInput = 0; gotoTargetRef.current = null; setMeltLocalTemp(gt)   // keep the dotted target line visible after arrival
           } else if (++tick % 6 === 0) setMeltLocalTemp(Math.round(st.temp))
         }
       }
@@ -680,7 +681,7 @@ export default function GlassViewer() {
     if (!Number.isFinite(v)) return
     setMeltHeatMode(null); setCoolingMode(null)
     // Ramp to the target via the heat-capacity integrator (same rate as Fast Heat / cool).
-    gotoTargetRef.current = v
+    gotoTargetRef.current = v; setGotoTargetTemp(v)
     meltSimRef.current.energyInput = v > meltTempRef.current.temp ? 100 : v < meltTempRef.current.temp ? -100 : 0
   }, [gotoTemp])
   const handleEnergyUpdate = useCallback((_ke, _pe, t, e, fb, mas, sfr, met, mxs) => {
@@ -2256,7 +2257,7 @@ export default function GlassViewer() {
               replayFrame={replayFrame} onReplayReady={handleReplayReady}
               darkMode={darkMode} showCharge={showCharge} showField={effectiveShowField}
               atomColorMode={atomColorMode} showBrokenBonds={showBrokenBonds} showLiveStats={showLiveStats}
-              useEmaStrain={useEmaStrain} hcPlateau={hcPlateau}
+              useEmaStrain={useEmaStrain} hcPlateau={hcPlateau} targetTempLine={gotoTargetTemp}
             />
           </div>
 

@@ -247,7 +247,7 @@ function rampEnergyLinearInContent(startE, endTemp, t, na2oPct, plateau) {
   return (T + 273) * ENERGY_UNIT
 }
 const GRAPH_E_MIN = 0
-function drawTEGraph(canvas, hist, darkMode = true, eMax = 4e-3) {
+function drawTEGraph(canvas, hist, darkMode = true, eMax = 4e-3, targetTempLine = null) {
   const s = setupCanvas(canvas)
   if (!s) return
   const { ctx, w, h } = s
@@ -279,6 +279,17 @@ function drawTEGraph(canvas, hist, darkMode = true, eMax = 4e-3) {
   ctx.textBaseline = 'alphabetic'
   ctx.fillText('Temp °C', 0, 0)
   ctx.restore()
+
+  // Target-temperature line (set via the GO box): dotted horizontal line + its value.
+  if (targetTempLine != null && targetTempLine >= 0 && targetTempLine <= tMax) {
+    const ly = pT + ph - (targetTempLine / tMax) * ph
+    ctx.strokeStyle = darkMode ? '#ffb060' : '#c05000'; ctx.lineWidth = 1.5; ctx.setLineDash([4, 4])
+    ctx.beginPath(); ctx.moveTo(pL, ly); ctx.lineTo(pL + pw, ly); ctx.stroke()
+    ctx.setLineDash([])
+    ctx.fillStyle = darkMode ? '#ffb060' : '#c05000'
+    ctx.font = 'bold 14px Lexend, system-ui, sans-serif'; ctx.textAlign = 'right'; ctx.textBaseline = 'bottom'
+    ctx.fillText(`${Math.round(targetTempLine)}°`, pL + pw, ly - 2)
+  }
 
   const n = hist.length
   if (n < 2) return
@@ -365,7 +376,7 @@ function countBonds(phys) {
   return counts
 }
 
-export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, attractK = 0, attractFalloff = 1, debug = false, bondNums = false, meltTemp = 50, simSpeed = 1, speedMult = 1, coolingMode = null, onTempUpdate = null, onEnergyUpdate = null, onBondCounts = null, replayFrame = null, onReplayReady = null, graphCanvasRef = null, cumulativeEnergyRef = null, graphXMaxRef = null, darkMode = true, showCharge = false, showField = true, atomColorMode = 'normal', showBrokenBonds = false, showLiveStats = false, useEmaStrain = true, hcPlateau = 4, active = true, resetToken = 0 }) {
+export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, attractK = 0, attractFalloff = 1, debug = false, bondNums = false, meltTemp = 50, simSpeed = 1, speedMult = 1, coolingMode = null, onTempUpdate = null, onEnergyUpdate = null, onBondCounts = null, replayFrame = null, onReplayReady = null, graphCanvasRef = null, cumulativeEnergyRef = null, graphXMaxRef = null, darkMode = true, showCharge = false, showField = true, atomColorMode = 'normal', showBrokenBonds = false, showLiveStats = false, useEmaStrain = true, hcPlateau = 4, active = true, resetToken = 0, targetTempLine = null }) {
   const types = useMemo(
     () => buildGrid(sio2Pct, na2oPct, caoPct),
     [sio2Pct, na2oPct, caoPct]
@@ -394,6 +405,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
   const graphCanvasRefRef        = useRef(graphCanvasRef)
   const cumulativeEnergyRefRef   = useRef(cumulativeEnergyRef)
   const na2oPctRef               = useRef(na2oPct)
+  const targetTempLineRef        = useRef(null)
   const hcPlateauRef             = useRef(4)
   // When false this tab is not showing: keep the RAF alive (so the shared energy
   // ramp still advances and the other tab can cool) but skip stepPhysics, drawing,
@@ -456,6 +468,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
   useEffect(() => { graphCanvasRefRef.current = graphCanvasRef }, [graphCanvasRef])
   useEffect(() => { cumulativeEnergyRefRef.current = cumulativeEnergyRef }, [cumulativeEnergyRef])
   useEffect(() => { na2oPctRef.current = na2oPct }, [na2oPct])
+  useEffect(() => { targetTempLineRef.current = targetTempLine }, [targetTempLine])
   useEffect(() => { hcPlateauRef.current = hcPlateau }, [hcPlateau])
   useEffect(() => { activeRef.current = active }, [active])
   useEffect(() => { graphXMaxRefRef.current = graphXMaxRef }, [graphXMaxRef])
@@ -1001,7 +1014,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
         const extCanvas = graphCanvasRefRef.current?.current
         if (extCanvas) {
           const eMax = energyContent(1800, na2oPctRef.current, hcPlateauRef.current) * 1.05
-          drawTEGraph(extCanvas, histRef.current, darkModeRef.current, eMax)
+          drawTEGraph(extCanvas, histRef.current, darkModeRef.current, eMax, targetTempLineRef.current)
         }
 
         // ── Record replay snapshot ────────────────────────────────────
