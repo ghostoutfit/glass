@@ -284,6 +284,28 @@ function energyContentKJ(T, na2oPct, plateau) {
   return c
 }
 const COOL_MIN_TEMP = 1500   // Slow/Fast Cool only engage from a full melt
+
+// ── Wall-clock pacing ───────────────────────────────────────────────────────
+// Both the heating ramp and the sand melt progression used to advance once per
+// RENDERED FRAME, which made the lesson run at a speed that depended on the
+// machine. Both are now driven by elapsed time. See CLAUDE.md, "Frame-rate-coupled
+// behaviour", for the measurements that prompted this.
+const HEAT_SUBSTEP     = 1 / 60  // s of simulated time per heating integration substep
+const HEAT_MAX_CATCHUP = 0.5     // s — most real time one frame may honour at once
+
+// The sand melt-progression rates were authored as per-frame probabilities and
+// per-frame counts. MELT_RATE_REF_FPS is the calibration anchor that converts them
+// to per-second rates: AT THIS FRAME RATE THE NEW BEHAVIOUR IS IDENTICAL TO THE OLD.
+// Below it, melting used to run slow and now runs at the intended wall-clock pace.
+// This is the one number to turn if the melt now feels too fast or too slow — it
+// does not affect whether the pacing is frame-rate-independent, only how fast the
+// fixed pace is.
+const MELT_RATE_REF_FPS = 60
+
+// Convert a per-frame probability p into the equivalent probability for k frames'
+// worth of time. Exact (not p*k), so it saturates correctly as k grows and handles
+// p = 1 without overshooting.
+const scaleProb = (p, k) => (p <= 0 ? 0 : p >= 1 ? 1 : 1 - Math.pow(1 - p, k))
 const ENERGY_KJ_MULT = 0.2   // arbitrary display scale: energy content × this → kJ readout
 
 // ── Performance tier ────────────────────────────────────────────────────────
@@ -326,15 +348,20 @@ const QUALITY = {
   //  · maxDpr 1 — the biggest single render win: dpr 2 costs 2.2x per melt frame, and
   //    devicePixelRatio tracks browser zoom, so this also caps a zoomed-in student.
   //    Cost: atoms look slightly soft on a high-DPI panel.
-  //  · sandGrainScale — PARKED AT 1. Halving it measured 68 -> 30 ms/frame on the
-  //    Bulk tab (the single biggest win available there), but it is NOT SAFE YET:
-  //    the melt-progression calls are rate-limited per FRAME with absolute caps —
-  //    mergeSilicateGrains(..., maxMerges: 3) and convertLargeNaGrains' "one per
-  //    frame" — so halving the grain count roughly doubles the FRACTION of the pile
-  //    that melts per frame, and sand visibly melts faster on 'simple'. Screenshots
-  //    confirmed it: the pile reads as flat orange goo instead of discrete grains
-  //    turning into blobs. Make those rates frame-rate- and count-independent first
-  //    (see "Frame-rate-coupled behaviour" in CLAUDE.md), then set this to 0.5.
+  //  · sandGrainScale — STILL PARKED AT 1. Halving it measured 68 -> 30 ms/frame on
+  //    the Bulk tab (the biggest win available there), but it changes how fast the
+  //    sand appears to melt and the correction is NOT linear.
+  //      - Before the wall-clock fix: 0.5 melted ~2x too FAST (the absolute per-frame
+  //        budgets are a bigger fraction of a smaller pile).
+  //      - With the budgets scaled by grain count (the `gScale` term below): 0.5 melts
+  //        too SLOW — measured at 35 s, 59 % of the pile melted vs 76 % at full count,
+  //        and 1 blob formed vs 43.
+  //    The reason is that `maxMerges` only binds some of the time; when the per-pair
+  //    PROBABILITY is the binding constraint instead, a smaller pile already produces
+  //    proportionally fewer merges, so scaling the budget on top double-counts.
+  //    Getting parity needs the merge model reworked, not a scalar. `gScale` is left
+  //    in because it is a no-op at 1 and is the right direction, but it is NOT a
+  //    validated fix — do not ship 0.5 on the strength of it.
   //  · blobGlowBlur — drops the decorative outer heat-glow blurs (up to blur(12px),
   //    full canvas). The metaball mask that gives the blob its shape is kept, so the
   //    melt still reads as a blob.
@@ -639,29 +666,54 @@ export default function GlassViewer() {
   }, [])
 
   // ── Melt tab temperature integration ─────────────────────────────────────
+  // Heating is integrated against WALL-CLOCK time, not frames. The old code used
+  //   elapsed = Math.min((ts - lastTs) / 1000, 0.05)
+  // which silently discarded every millisecond beyond 50 ms, so any machine below
+  // 20 fps heated slower than real time — at 11 fps the ramp advanced at ~61 % of
+  // the intended rate and "heat to 1500 °C" took noticeably longer on a weak
+  // machine than on a fast one. See "Frame-rate-coupled behaviour" in CLAUDE.md.
+  //
+  // Now the real elapsed time is honoured up to HEAT_MAX_CATCHUP (so a backgrounded
+  // tab or a slept laptop still can't dump minutes of heating into one frame), and
+  // it is consumed in fixed HEAT_SUBSTEP chunks so the heat-capacity factor stays
+  // accurate through the latent-heat plateau regardless of frame rate.
+  //
+  // At 60 fps a frame is 16.7 ms, below the old 50 ms clamp and below one substep,
+  // so behaviour at or above 20 fps is unchanged. Only slow machines move.
   useEffect(() => {
     let raf
     let tick = 0
     function integrateMelt(ts) {
       const s  = meltSimRef.current
       const st = meltTempRef.current
-      const elapsed = st.lastTs ? Math.min((ts - st.lastTs) / 1000, 0.05) : 0
+      const raw = st.lastTs ? (ts - st.lastTs) / 1000 : 0
       st.lastTs = ts
-      if (!boxSimRef.current.sandPaused && s.energyInput !== 0 && elapsed > 0) {
-        const input      = s.energyInput
-        const atFloor    = st.temp <= 0    && input < 0
-        const atCeiling  = st.temp >= 1800 && input > 0
-        if (!atFloor && !atCeiling) {
-          const rawDelta = (input / 100) * s.baseRate * elapsed
+      let remaining = Math.min(raw, HEAT_MAX_CATCHUP)
+      if (!boxSimRef.current.sandPaused && s.energyInput !== 0 && remaining > 0) {
+        const pr = PRESETS.find(x => x.id === presetIdRef.current) ?? PRESETS[0]
+        while (remaining > 1e-9) {
+          const input = s.energyInput
+          if (input === 0) break                       // GO target reached mid-catch-up
+          const atFloor   = st.temp <= 0    && input < 0
+          const atCeiling = st.temp >= 1800 && input > 0
+          if (atFloor || atCeiling) break
+          const dt = Math.min(HEAT_SUBSTEP, remaining)
+          remaining -= dt
+          const rawDelta = (input / 100) * s.baseRate * dt
           meltCumulativeEnergyRef.current += rawDelta
-          const pr       = PRESETS.find(x => x.id === presetIdRef.current) ?? PRESETS[0]
           const hcFactor = meltHeatCapacity(st.temp, pr.na2o, hcPlateauRef.current)
           st.temp = Math.max(0, Math.min(1800, st.temp + rawDelta / hcFactor))
           // GO ramp: stop when the target is reached.
           const gt = gotoTargetRef.current
           if (gt != null && ((input > 0 && st.temp >= gt) || (input < 0 && st.temp <= gt))) {
             st.temp = gt; s.energyInput = 0; gotoTargetRef.current = null; setMeltLocalTemp(gt)
-          } else if (++tick % 6 === 0) setMeltLocalTemp(Math.round(st.temp))
+            break
+          }
+        }
+        // LCD refresh is per FRAME, not per substep — it is display throttling, and
+        // tying it to substeps would make it fire faster on slow machines.
+        if (gotoTargetRef.current != null || s.energyInput !== 0) {
+          if (++tick % 6 === 0) setMeltLocalTemp(Math.round(st.temp))
         }
       }
       raf = requestAnimationFrame(integrateMelt)
@@ -935,7 +987,21 @@ export default function GlassViewer() {
           }
         }
 
-        const elapsed = Math.min((ts - phys.prevTime) / 1000, 0.05)
+        // Two clocks, deliberately.
+        //
+        // `elapsed` stays clamped at 0.05 s because it feeds the FIXED_DT accumulator:
+        // honouring the full gap on a slow machine would queue proportionally more
+        // physics substeps, making the frame slower still — the classic death spiral.
+        // The cost of the clamp is that grain MOTION runs in slow motion below 20 fps.
+        // That is a genuine limit: a machine that cannot do the work cannot keep up.
+        //
+        // `rateElapsed` is the true elapsed time (bounded only against a backgrounded
+        // tab). It paces the melt PROGRESSION — merging, conversion, absorption — which
+        // is cheap bookkeeping rather than per-grain simulation, so it can run at
+        // wall-clock rate without any spiral. This is what makes "sand melts in N
+        // seconds" the same on every machine.
+        const elapsed     = Math.min((ts - phys.prevTime) / 1000, 0.05)
+        const rateElapsed = Math.min((ts - phys.prevTime) / 1000, HEAT_MAX_CATCHUP)
         phys.prevTime    = ts
 
         if (!box.cornerDrag) {
@@ -958,23 +1024,53 @@ export default function GlassViewer() {
               checkNaBlobMerges(phys.naBlobs, phys.blobMct, phys.sandParticles, s.temp)
               phys.accumulator -= FIXED_DT
             }
-            // Na₂O grain merging — once per visual frame, only for soda preset
+            // ── Na₂O grain merging — WALL-CLOCK paced, soda preset only ──────
+            // These four calls were "once per visual frame", so the whole melt
+            // narrative ran proportional to frame rate: a 30 fps machine melted sand
+            // twice as fast as a 15 fps one. `k` is how many frames' worth of time
+            // this frame represents at the MELT_RATE_REF_FPS anchor, so k === 1 at
+            // 60 fps and the behaviour there is unchanged.
             const isSoda = presetIdRef.current === 'soda'
             if (isSoda && phys.sandParticles && phys.nNaOriginal > 0) {
+              // k = frames' worth of TIME. gScale additionally makes the absolute
+              // per-frame budgets below independent of GRAIN COUNT: "3 merges per
+              // frame" is a far larger FRACTION of a 1125-grain pile than of a
+              // 2250-grain one, which is what made sandGrainScale change how fast
+              // the sand appeared to melt. Probabilities (meldProb, naSandProb,
+              // silSilProb) are per-pair and already count-invariant, so only the
+              // budgets are scaled.
+              const k      = rateElapsed * MELT_RATE_REF_FPS
+              const gScale = capsRef.current.sandGrainScale ?? 1
               const tempFactor = Math.max(0, Math.min(1, (s.temp - 700) / 500))
               const meldFrac   = Math.min(1, phys.meldCount / phys.nNaOriginal)
               const meldProb   = tempFactor >= 1 ? 1 : tempFactor * 0.015 * (1 + meldFrac * 5)
               if (meldProb > 0) {
-                phys.meldCount += mergeSodaGrains(phys.sandParticles, meldProb)
+                phys.meldCount += mergeSodaGrains(phys.sandParticles, scaleProb(meldProb, k))
               }
-              convertLargeNaGrains(phys.sandParticles, phys.naBlobs)
-              absorbNearbyGrains(phys.sandParticles, phys.naBlobs, s.temp)
+              // convertLargeNaGrains converts at most ONE grain per call by design, to
+              // spread conversions out. That is an absolute per-frame budget, so it is
+              // carried fractionally and the call is repeated for whole units. The scan
+              // returns on its first match, so repeats are cheap.
+              phys.convBudget = (phys.convBudget ?? 0) + k * gScale
+              let convs = Math.floor(phys.convBudget)
+              phys.convBudget -= convs
+              while (convs-- > 0) convertLargeNaGrains(phys.sandParticles, phys.naBlobs)
+              absorbNearbyGrains(phys.sandParticles, phys.naBlobs, s.temp, k)
               // Na + Sand → silicate (> 1000°C); silicate + silicate (> 1200°C)
               const siFactor  = Math.max(0, Math.min(1, (s.temp - 1000) / 200))
               const silFactor = Math.max(0, Math.min(1, (s.temp - 1200) / 200))
               const naSandProb = siFactor * 0.004
               const silSilProb = silFactor * 0.004
-              mergeSilicateGrains(phys.sandParticles, naSandProb, silSilProb, 3)
+              // maxMerges was an absolute 3 per frame and it genuinely binds at high
+              // temperature, so it is budgeted fractionally rather than scaled inline.
+              phys.mergeBudget = (phys.mergeBudget ?? 0) + 3 * k * gScale
+              const maxMerges  = Math.floor(phys.mergeBudget)
+              phys.mergeBudget -= maxMerges
+              if (maxMerges > 0) {
+                mergeSilicateGrains(phys.sandParticles,
+                                    scaleProb(naSandProb, k), scaleProb(silSilProb, k),
+                                    maxMerges)
+              }
             }
           }
         } else {

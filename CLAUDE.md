@@ -175,7 +175,7 @@ here, lowercased.
 | `bondStrainField` | true | false | full-canvas `blur(2px)` + screen/multiply composite on the melt tab |
 | `maxDpr` | 2 | 1 | **the biggest render lever** — see below |
 | `blobGlowBlur` | true | false | the Bulk tab's decorative heat-glow blurs (up to `blur(12px)`, full canvas, plus a per-grain arc fill) |
-| `sandGrainScale` | 1 | **1 (parked)** | would halve Bulk-tab grain count; measured 68 → 30 ms but **not safe yet** — see below |
+| `sandGrainScale` | 1 | **1 (still parked)** | would halve Bulk-tab grain count; measured 68 → 30 ms but changes the melt narrative in a way a scalar can't correct — see below |
 
 A manual tier override sits at the top of the dev panel (type "dev", "── Quality ──"), outside the
 per-tab blocks because the tier is global. It prints "(speed test not wired yet)" while
@@ -203,55 +203,98 @@ The Bulk Material tab is **dpr-insensitive** — its canvas is sized in CSS pixe
 (`canvas.width = canvas.clientWidth`, no dpr) and the blob is drawn through fixed 320×320
 offscreens. That is why `maxDpr` moves the melt tab and not that one.
 
-#### `sandGrainScale` is parked at 1 — do not enable it without fixing the rates first
+#### `sandGrainScale` is still parked at 1 — a scalar will not fix it
 
 Halving the Bulk tab's grain count measured **68 → 30 ms/frame at 1× and 308 → 162 ms at 4×** —
 by far the biggest win available on that tab, since `stepSandPhysics`' 10-pass PBD solve is ~34 %
 of its CPU and is linear in grain count.
 
-It is disabled anyway, because it **changes what the sim teaches**. Screenshots at 1500 °C showed
-Detailed as discrete grains with glowing blobs forming among them, and Simple as a flat orange
-mass. The cause is in the next section: the melt-progression rates are per-frame with **absolute**
-caps, so halving the grain count roughly doubles the fraction of the pile that melts per frame.
+It stays disabled because it changes how fast the sand appears to melt, and the obvious
+correction does not work:
 
-Fix the rates first, then set it to 0.5.
+| attempt | result at 35 s, matched wall-clock |
+|---|---|
+| no correction (per-frame absolute budgets) | half-grain melts **~2× too fast** — the pile reads as flat orange goo instead of discrete grains becoming blobs |
+| budgets scaled by grain count (`gScale`) | half-grain melts **too slow** — 59 % of the pile melted vs 76 % at full count, and **1 blob formed vs 43** |
 
-### 1d. ⚠️ Frame-rate-coupled behaviour — the sim runs a different lesson on different hardware
+The reason is that `mergeSilicateGrains`' `maxMerges` cap only binds *some* of the time. When the
+per-pair probability is the binding constraint instead, a smaller pile already produces
+proportionally fewer merges, so scaling the budget on top double-counts the reduction. Parity
+needs the merge model reworked — probably expressing merges as a target *fraction* of the pile per
+second rather than a count — not a scalar.
 
-**Found 2026-10-03. Pre-existing, not caused by any optimisation here, and it matters more than
-the frame rate does.** Two separate couplings make the *content* of the lesson depend on how fast
-the machine is:
+`gScale` is left in the code because it is a no-op at 1 and is the right direction, but **it is
+not a validated fix. Do not ship 0.5 on the strength of it.**
 
-**1. Sand melt progression is proportional to frame rate.** All four melt-progression calls run
-**once per rendered frame** with per-frame probabilities, in `GlassViewer`'s box loop:
+### 1d. Frame-rate-coupled behaviour — FIXED for heating and melt progression
 
-| call | rate limit | scale-dependent? |
-|---|---|---|
-| `mergeSodaGrains(grains, meldProb)` | per-pair probability per frame | ∝ fps |
-| `convertLargeNaGrains(...)` | **"one per frame"**, absolute | ∝ fps, and ∝ 1/grainCount in fractional terms |
-| `mergeSilicateGrains(..., maxMerges: 3)` | **absolute 3 per frame** | ∝ fps, and ∝ 1/grainCount |
-| `absorbNearbyGrains(...)` | per-grain probability per frame | ∝ fps |
+**Found 2026-10-03, fixed the same day on `performance-fix-testing`.** Two couplings made the
+*content* of the lesson depend on machine speed. Both are now driven by wall-clock time.
 
-So a machine running at 30 fps melts sand twice as fast as one at 15 fps, in wall-clock terms.
-**Any performance work changes the melt pacing**, including the glow caps shipped here
-(Bulk 89 → 72 ms is ~24 % more frames/sec, so ~24 % faster melting on Simple).
+#### What was wrong, measured
 
-**2. Heating runs slower on slow machines.** `GlassViewer`'s `integrateMelt` uses
-`elapsed = Math.min((ts - lastTs) / 1000, 0.05)`. The clamp is there to stop a huge jump after a
-stall, but it means that below **20 fps the temperature ramp falls behind real time** — at 11 fps
-(Bulk, Detailed) heating advances at ~61 % of the intended rate. "Heat to 1500 °C" therefore takes
-noticeably longer on a weak Chromebook, and the student's lesson is paced differently.
+Running the identical scenario at 1× and 4× CPU throttle, on `main`:
 
-**Why this matters more than fps:** a dev machine and a field Chromebook are not running the same
-simulation. They melt at different rates and heat at different rates. Any field report of
-"it behaved differently on my machine" may be this rather than a bug, and A/B comparisons of the
-physics across machines are not valid until it is fixed.
+| | 1× (9.8 fps) | 4× (2.6 fps) | coupling |
+|---|---|---|---|
+| heating rate | 75.2 °C/s | 48.6 °C/s | **1.55×** |
+| temperature after 12 s of Fast Heat | 952 °C | 633 °C | 319 °C apart |
+| melted sand (blob sub-circles) after 20 s | 392 | **0** | total |
+| "GO to 900 °C" wall-clock time | 10.8 s | **36.4 s** | **3.4×** |
 
-**The fix** is to drive both from wall-clock, not frames: accumulate elapsed time and apply melt
-progression per simulated second (the box physics already does this correctly for `stepSandPhysics`
-via its `FIXED_DT` accumulator — use the same pattern), and replace the heating clamp with an
-accumulator that doesn't silently drop time. Scale `maxMerges` and the one-per-frame conversion by
-grain count at the same time, which unblocks `sandGrainScale`.
+**The two couplings compounded.** The slow machine heated so much more slowly that after 12 s it
+was at 633 °C — below the 700 °C melting threshold — so it had melted *literally nothing* while
+the fast machine was well into the melt. Same build, same inputs, different lesson.
+
+#### The fix: two clocks, deliberately
+
+**Heating** (`integrateMelt`): the old `elapsed = Math.min(dt, 0.05)` silently discarded
+everything past 50 ms, so anything below 20 fps heated slower than real time. Now the true
+elapsed time is honoured up to `HEAT_MAX_CATCHUP` (0.5 s, so a backgrounded tab still can't dump
+minutes of heating into one frame) and consumed in fixed `HEAT_SUBSTEP` (1/60 s) chunks, so the
+heat-capacity factor stays accurate through the latent-heat plateau at any frame rate. At or
+above 20 fps a frame was already under the old clamp, so **nothing changes on a fast machine**.
+
+**The box loop** now derives two different time values from the same frame:
+
+| | bound | drives | why |
+|---|---|---|---|
+| `elapsed` | 0.05 s | the `FIXED_DT` physics accumulator, box rotation | honouring the full gap would queue proportionally more substeps on a slow machine, making the frame slower still — the classic death spiral |
+| `rateElapsed` | `HEAT_MAX_CATCHUP` | melt progression (merge / convert / absorb) | cheap bookkeeping, not per-grain simulation, so it can run at wall-clock rate with no spiral |
+
+The four melt-progression calls were per-frame probabilities and per-frame counts. They are now
+scaled by `k = rateElapsed * MELT_RATE_REF_FPS` — how many frames' worth of time this frame
+represents. Probabilities use the exact `1 − (1−p)^k` form so they saturate correctly rather than
+exceeding 1; the two absolute caps (`mergeSilicateGrains`' `maxMerges: 3` and
+`convertLargeNaGrains`' one-per-call) are carried as fractional budgets.
+
+**`MELT_RATE_REF_FPS` (60) is the calibration anchor.** At that frame rate the new behaviour is
+identical to the old. It is the one number to turn if the melt now feels too fast or too slow —
+it does not affect *whether* the pacing is frame-rate-independent, only how fast the fixed pace is.
+
+#### Result, measured (two reps)
+
+| | 1× | 4× | coupling |
+|---|---|---|---|
+| heating rate | 85.6 / 86.1 °C/s | 84.0 / 83.7 °C/s | **1.02× / 1.03×** |
+| melted sand (sub-circles) after 20 s | 1674 / 1761 | 1747 / 1764 | **0.96× / 1.00×** |
+| "GO to 900 °C" wall-clock | 9.2 s | 11.3 s | **1.23×** (was 3.4×) |
+
+GO lands exactly on target and holds at both throttles — the restructured break-out was
+regression-tested.
+
+#### What is deliberately NOT fixed
+
+**Grain motion still runs in slow motion below 20 fps**, because `elapsed` stays clamped to bound
+physics work. This is a real limit, not an oversight: a machine that cannot do the work cannot
+keep up, and the alternative is a death spiral.
+
+A visible consequence: blob *count* is still frame-rate-dependent (1× gives ~60 large blobs, 4×
+gives ~110 smaller ones) even though melted *mass* matches to 1.00×. Blob-blob coalescence
+(`checkNaBlobMerges`) runs inside the `FIXED_DT` loop, i.e. on the physics clock, and it should —
+it depends on blobs genuinely being in contact for a dwell time. Forcing it to wall-clock would
+merge blobs that never actually touched. **The right metric for melt progression is sub-circle
+count, not blob count.**
 
 ### 2. Canvas2D `ctx.filter` and `getImageData` — the graphical hot spots
 
@@ -384,10 +427,10 @@ Remaining work, in rough order of payoff per unit of effort:
 2. ~~**Quality tier for the blurred strain field.**~~ **DONE** — see 1c.
 3. ~~**`maxDpr` cap.**~~ **DONE** — see 1c. ~3× on the melt tab on a dpr-2 panel.
 4. ~~**Bulk-tab glow caps.**~~ **DONE** — see 1c. ~1.25–1.45× on that tab.
-5. **Make melt progression and heating frame-rate-independent** — see 1d. This is now the top
-   item. It is a *correctness* fix, not a perf fix: right now a fast machine and a slow one teach
-   different lessons. It also unblocks `sandGrainScale` (worth another ~2× on the Bulk tab), so it
-   pays for itself in performance too.
+5. ~~**Make melt progression and heating frame-rate-independent.**~~ **DONE** — see 1d.
+   Heating 1.55× → 1.02× coupled; melted mass total → 1.00×; "GO to 900 °C" 3.4× → 1.23×.
+   ⚠️ It did **not** unblock `sandGrainScale` as predicted — grain-count independence turned out
+   to be a separate, non-linear problem. See 1c.
 6. **Spatial hash for the pair loops.** The melt tab is still 4.4 fps at 4× on Simple, and
    physics is ~26 % of that frame. Pattern already exists in `sandPhysics.js`. Physics-neutral if
    the cell size ≥ the largest cutoff.

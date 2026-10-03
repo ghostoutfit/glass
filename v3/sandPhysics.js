@@ -524,11 +524,21 @@ export function checkNaBlobMerges(naBlobs, mct, grains, temp = 1000) {
 // All types activate at 700°C; sand is slower (weaker Si-O bond probability).
 // Proximity is checked against the nearest sub-circle, not the phantom center, so
 // grains trapped inside the hull (where the center may have drifted) are caught.
-export function absorbNearbyGrains(grains, naBlobs, temp) {
+// rateScale: how many frames' worth of time this call represents. The probabilities
+// below were authored per-frame; scaling them keeps absorption paced by wall-clock
+// rather than by frame rate (see MELT_RATE_REF_FPS in GlassViewer.jsx). 1 = one frame
+// at the reference rate, which is the old behaviour. The exact 1-(1-p)^k form is used
+// so the probability saturates correctly instead of exceeding 1 on a slow frame.
+//
+// NOTE: the per-blob "one absorption per call" cap below is left as-is. At these
+// probabilities (≤0.008 per frame) it effectively never binds, so scaling the
+// probability alone reproduces the intended rate.
+export function absorbNearbyGrains(grains, naBlobs, temp, rateScale = 1) {
   if (!naBlobs.length) return
   const tempF    = Math.max(0, Math.min(1, (temp - 700) / 500))
-  const naSilProb = tempF * 0.008
-  const sandProb  = tempF * 0.002  // sand dissolves ~4× slower than Na/silicate
+  const scaleP   = p => (p <= 0 ? 0 : p >= 1 ? 1 : 1 - Math.pow(1 - p, rateScale))
+  const naSilProb = scaleP(tempF * 0.008)
+  const sandProb  = scaleP(tempF * 0.002)  // sand dissolves ~4× slower than Na/silicate
   if (naSilProb <= 0) return
 
   for (const blob of naBlobs) {
