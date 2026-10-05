@@ -374,16 +374,33 @@ const QUALITY_DEFAULT = 'detailed'
 // ~45% rasterisation and ~34% stepSandPhysics. So the caps target raster first and
 // grain count second — not the melt physics, which is deferred to a spatial hash.
 const QUALITY = {
+  // Hi-Res — everything in 'detailed' plus frame interpolation: freed atoms are drawn between
+  // physics steps so motion is buttery even when the sim steps less often than the display
+  // refreshes. Only worth it on hardware with frames to spare (it's a draw-time lerp, cheap,
+  // but pointless on machines that can't render the extra frames). Detection never selects it;
+  // it is a manual opt-in from the dev panel.
+  hires: {
+    bondStrainField: true,
+    chargeGradient:  true,
+    interpolate:     true,
+    maxDpr:          2,
+    sandGrainScale:  1,
+    blobGlowBlur:    true,
+  },
   // Full fidelity. maxDpr 2 is not a downgrade for a normal 1x or 2x panel; it only
   // clamps the pathological case of a high-DPI panel plus browser zoom.
   detailed: {
     bondStrainField: true,
+    chargeGradient:  true,
+    interpolate:     false,
     maxDpr:          2,
     sandGrainScale:  1,
     blobGlowBlur:    true,
   },
   // Weak machines.
-  //  · bondStrainField — full-canvas blur(2px) + screen/multiply composite each frame.
+  //  · bondStrainField — gates ONLY the field's full-canvas blur(2px) (~7 ms/frame), not the
+  //    field itself. On 'simple' the strain field still draws (crisp lens shapes, composited),
+  //    so "strained bond → pink" survives; only the Gaussian is dropped. See renderer fieldBlur.
   //  · maxDpr 1 — the biggest single render win: dpr 2 costs 2.2x per melt frame, and
   //    devicePixelRatio tracks browser zoom, so this also caps a zoomed-in student.
   //    Cost: atoms look slightly soft on a high-DPI panel.
@@ -403,6 +420,8 @@ const QUALITY = {
   // survives this tier. Only soft glows and resolution go.
   simple: {
     bondStrainField: false,
+    chargeGradient:  false,   // charge halos still draw, but as flat discs (no per-atom gradient)
+    interpolate:     false,
     maxDpr:          1,
     sandGrainScale:  1,
     blobGlowBlur:    false,
@@ -412,6 +431,10 @@ const qualityCaps = tier => QUALITY[tier] ?? QUALITY[QUALITY_DEFAULT]
 
 export default function GlassViewer() {
   const [darkMode,   setDarkMode]   = useState(true)
+  const [verTagFits, setVerTagFits] = useState(true)   // build marker visible only if it fits
+  const tabGroupRef = useRef(null)
+  const verTagRef   = useRef(null)
+  const toolbarRef  = useRef(null)
   const [bondView, setBondView] = useState('graph')  // 'count' | 'graph'
   const graphCanvasRef  = useRef(null)
   const graphXMaxRef    = useRef(5000)
@@ -425,8 +448,12 @@ export default function GlassViewer() {
   // always resolves to QUALITY_DEFAULT. The dev panel can override it by hand.
   const [quality, setQuality] = useState(() => detectPerformanceTier() ?? QUALITY_DEFAULT)
   const caps = qualityCaps(quality)
-  // The blurred strain field is off entirely on 'simple', whatever the Field button says.
-  const fieldAllowed      = caps.bondStrainField
+  // The strain field is available on both tiers; 'simple' just draws it crisp (no blur) via
+  // fieldBlur, because the blur — not the field itself — is the expensive part.
+  const fieldAllowed      = true
+  const fieldBlur         = caps.bondStrainField
+  const chargeLite        = !caps.chargeGradient   // Simple draws flat charge discs
+  const interpolate       = !!caps.interpolate      // Hi-Res interpolates freed atoms between steps
   const effectiveShowField = showField && fieldAllowed
   // The RAF closures are created once with [] deps, so they read caps through a ref.
   const capsRef = useRef(caps)
@@ -460,7 +487,9 @@ export default function GlassViewer() {
   const [sevTriggerDist, setSevTriggerDistState] = useState(13)
   const [feedbackGainMult, setFeedbackGainMultState] = useState(40)
   const [sevFireRate,    setSevFireRate]    = useState(0)
-  const [simSpeed, setSimSpeed]   = useState(0.5)
+  const [simSpeed, setSimSpeed]   = useState(0.3)   // was 0.5; hash ~2× the frame rate, so the
+                                                    // per-frame pace was doubled. Live-tune via
+                                                    // window.setSimSpeed(x), then lock the value here.
   const [sioR0, setSioR0]         = useState(9)
   const [attractK, setAttractK]         = useState(0)   // 0.10 over-densified cooled solid (local density 7–8 vs crystal 4.6)
   const [attractFalloff, setAttractFalloff] = useState(1.0)
@@ -680,6 +709,24 @@ export default function GlassViewer() {
     glassDkRef.current = darkMode
     return () => document.body.removeAttribute('data-theme')
   }, [darkMode])
+
+  // Build marker: show it only when it fits to the right of the tab buttons without
+  // running past the toolbar's right edge. The marker is absolutely positioned, so it is
+  // always laid out (visibility toggles, layout doesn't) — its measured right edge is the
+  // same whether shown or hidden, so this can't oscillate.
+  useEffect(() => {
+    const measure = () => {
+      const tag = verTagRef.current, host = toolbarRef.current
+      if (!tag || !host) return
+      const t = tag.getBoundingClientRect(), h = host.getBoundingClientRect()
+      setVerTagFits(t.right <= h.right - 6)
+    }
+    measure()
+    const raf = requestAnimationFrame(measure)   // re-measure once fonts/layout settle
+    const ro = new ResizeObserver(measure)
+    if (toolbarRef.current) ro.observe(toolbarRef.current)
+    return () => { cancelAnimationFrame(raf); ro.disconnect() }
+  }, [tab])
 
   // dev mode: type "dev" to toggle
   useEffect(() => {
@@ -1747,16 +1794,25 @@ export default function GlassViewer() {
           )}
 
           {/* Action row */}
-          <div style={{ display:'flex', alignItems:'flex-start', gap:4, paddingLeft:6, paddingRight:6 }}>
+          <div ref={toolbarRef} style={{ display:'flex', alignItems:'flex-start', gap:4, paddingLeft:6, paddingRight:6 }}>
             {/* Left/center: two-row layout */}
             <div style={{ flex:1, display:'flex', flexDirection:'column', gap:3, minWidth:0 }}>
 
               {/* Row: tab-specific controls */}
               <div style={{ display:'flex', alignItems:'center', gap:4, minWidth:0, flexWrap:'wrap' }}>
                 {/* Tab buttons — centered in the row (presets sit at the left via order:-1) */}
-                <div style={{ display:'flex', gap:2, marginLeft:'auto', marginRight:'auto' }}>
+                <div ref={tabGroupRef} style={{ display:'flex', gap:2, marginLeft:'auto', marginRight:'auto', position:'relative' }}>
                   <button className={`tab-btn ${tab==='melt'?'active':''}`}  onClick={() => setTab('melt')}>Particles and Fields</button>
                   <button className={`tab-btn ${tab==='glass'?'active':''}`} onClick={() => setTab('glass')}>Bulk Material</button>
+                  {/* Build marker, pinned to the right of "Bulk Material". Absolutely positioned so
+                      it never shifts the centered tab pair; hidden by the effect when the toolbar
+                      is too narrow to fit it (see verTagFits ResizeObserver). */}
+                  <span ref={verTagRef} style={{
+                    position:'absolute', left:'100%', top:0, bottom:0, marginLeft:8,
+                    display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
+                    fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
+                    color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
+                  }}>Field Test Version 08</span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),
@@ -1882,10 +1938,8 @@ export default function GlassViewer() {
                   <button className={`action-btn replay-btn${showCharge?' active':''}`}
                     style={{padding:'3px 10px'}} onClick={() => setShowCharge(f => !f)}>Charge</button>
                   <button className={`action-btn replay-btn${effectiveShowField?' active':''}`}
-                    style={{padding:'3px 10px', opacity: fieldAllowed ? 1 : 0.4,
-                            cursor: fieldAllowed ? 'pointer' : 'not-allowed'}}
-                    disabled={!fieldAllowed}
-                    title={fieldAllowed ? undefined : 'Off on Simple quality — the blurred strain field is too slow for weak machines'}
+                    style={{padding:'3px 10px'}}
+                    title={fieldBlur ? undefined : 'Simple quality: strain field drawn crisp (no blur)'}
                     onClick={() => setShowField(f => !f)}>Field</button>
                 </>)}
               </div>
@@ -2078,7 +2132,7 @@ export default function GlassViewer() {
                 {detectPerformanceTier() === null && <span style={{color:'#666'}}> (speed test not wired yet)</span>}
               </div>
               <div style={{display:'flex', gap:3}}>
-                {['detailed','simple'].map(q => (
+                {['hires','detailed','simple'].map(q => (
                   <button key={q} onClick={() => setQuality(q)}
                     style={{fontSize:10, padding:'2px 7px', cursor:'pointer', userSelect:'none',
                       background: quality===q ? '#6050a0' : '#2a2a3a',
@@ -2099,6 +2153,10 @@ export default function GlassViewer() {
                   <div style={{marginTop:2}}><span style={{fontSize:10, color:'#888'}}>effThresh ×1k: </span><span style={{color:'#ffcc88'}}>{(meanEffThreshold * 1000).toFixed(1)}</span></div>
                   <div style={{marginTop:3}}><span style={{fontSize:10, color:'#888'}}>sev fires/sec: </span><span style={{color:'#ffaa88'}}>{sevFireRate.toFixed(1)}</span></div>
                 </div>
+                <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Sim speed (viz): <span style={{color:'#a090d0'}}>{simSpeed.toFixed(2)}×</span> <span style={{fontSize:9, color:'#666'}}>&lt;1 skips frames · 1+ steps/frame</span></div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={0.1} max={4} step={0.05} value={simSpeed}
+                  onChange={e => { const v = +e.target.value; setSimSpeed(v); window._simSpeed = v }} />
                 <div style={{fontSize:11, color:'#aaa', marginTop:10, marginBottom:3, letterSpacing:'0.06em'}}>── Active: Na₂O breaking ──</div>
                 <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Si-O break strain: <span style={{color:'#a090d0'}}>{breakStrain.toFixed(3)}</span></div>
                 <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
@@ -2307,7 +2365,7 @@ export default function GlassViewer() {
               cumulativeEnergyRef={meltCumulativeEnergyRef}
               graphXMaxRef={graphXMaxRef}
               replayFrame={replayFrame} onReplayReady={handleReplayReady}
-              darkMode={darkMode} showCharge={showCharge} showField={effectiveShowField}
+              darkMode={darkMode} showCharge={showCharge} chargeLite={chargeLite} showField={effectiveShowField} fieldBlur={fieldBlur} interpolate={interpolate}
               atomColorMode={atomColorMode} showBrokenBonds={showBrokenBonds} showLiveStats={showLiveStats}
               useEmaStrain={useEmaStrain} hcPlateau={hcPlateau} targetTempLine={gotoTargetTemp}
             />

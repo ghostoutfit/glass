@@ -3,7 +3,8 @@ import { initPhysics, stepPhysics, setSiOr0,
          rebuildBonds, computeKE, computeBondedKE, computePE, ENERGY_UNIT, THERMAL_SPEED,
          buildRigidBondMap, setSioExclMult, setBreakStrain, setReformStrain, setCrystAnchorK, setLiberateFrac, setSioK, setNaOK,
          setNaAnchorK, setNaLiberateFrac, setNaBreakStrain, setLatticeSpeedMult, setFreedSpeedMult,
-         resetLibStats, getLibStats, measureStrain95, meltStructure, setUseEmaStrain } from './meltPhysics.js'
+         resetLibStats, getLibStats, measureStrain95, meltStructure, setUseEmaStrain,
+         verifyHashPairs, setMeltHash } from './meltPhysics.js'
 import { drawScene, setVisualScale, findAtomNear, getVisualScale, getLastHudLines, effectiveDpr } from './renderer.js'
 
 const VW      = 600
@@ -20,9 +21,18 @@ const CA_A = 24   // Ca-O bond: O at midpoints = 12px = r0_CaO
 
 const GRAIN_MARGIN = 5
 
-// Cooling durations in RAF frames (≈60 fps)
-const FAST_COOL_FRAMES = 270   // ~4.5 s wall-clock
-const SLOW_COOL_FRAMES = 1440  // ~24 s wall-clock
+// Cooling durations in SIM STEPS (not frames). With wall-clock pacing the ramp advances by
+// the number of steps taken, so a cool always runs this many relaxation steps regardless of
+// frame rate — the slow-vs-fast-cool structure difference no longer depends on the hardware.
+// At BASE_STEPS_PER_SEC these equal the historical ~4.5 s / ~24 s wall-clock at simSpeed 1.
+const FAST_COOL_FRAMES = 270   // ~4.5 s at simSpeed 1
+const SLOW_COOL_FRAMES = 1440  // ~24 s at simSpeed 1
+
+// Wall-clock pacing: the sim advances by elapsed real time, not per rendered frame, so faster
+// hardware just draws more (smoother) frames of the SAME sim rate instead of running faster.
+const BASE_STEPS_PER_SEC = 60   // sim steps per second at simSpeed 1 (simSpeed scales this)
+const MAX_FRAME_DT       = 0.1  // clamp elapsed (s): a struggling machine lags, never spirals
+const MAX_STEPS_PER_FRAME = 8   // safety cap on catch-up work in any single frame
 
 
 const C = {
@@ -381,7 +391,7 @@ function countBonds(phys) {
   return counts
 }
 
-export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, attractK = 0, attractFalloff = 1, debug = false, bondNums = false, meltTemp = 50, simSpeed = 1, speedMult = 1, coolingMode = null, onTempUpdate = null, onEnergyUpdate = null, onBondCounts = null, replayFrame = null, onReplayReady = null, graphCanvasRef = null, cumulativeEnergyRef = null, graphXMaxRef = null, darkMode = true, showCharge = false, showField = true, atomColorMode = 'normal', showBrokenBonds = false, showLiveStats = false, useEmaStrain = true, hcPlateau = 4, active = true, resetToken = 0, targetTempLine = null }) {
+export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, attractK = 0, attractFalloff = 1, debug = false, bondNums = false, meltTemp = 50, simSpeed = 1, speedMult = 1, coolingMode = null, onTempUpdate = null, onEnergyUpdate = null, onBondCounts = null, replayFrame = null, onReplayReady = null, graphCanvasRef = null, cumulativeEnergyRef = null, graphXMaxRef = null, darkMode = true, showCharge = false, chargeLite = false, showField = true, fieldBlur = true, interpolate = false, atomColorMode = 'normal', showBrokenBonds = false, showLiveStats = false, useEmaStrain = true, hcPlateau = 4, active = true, resetToken = 0, targetTempLine = null }) {
   const types = useMemo(
     () => buildGrid(sio2Pct, na2oPct, caoPct),
     [sio2Pct, na2oPct, caoPct]
@@ -418,7 +428,9 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
   // guard in the RAF loop below.
   const activeRef                = useRef(active)
   const graphXMaxRefRef          = useRef(graphXMaxRef)
-  const frameAccRef         = useRef(0)
+  const frameAccRef         = useRef(0)   // fractional sim-step accumulator (wall-clock pacing)
+  const lastTsRef           = useRef(0)   // previous frame timestamp, for elapsed-time pacing
+  const lastRampSyncRef     = useRef(0)   // throttle for the ramp → parent temperature sync
   const stepCallCountRef    = useRef(0)   // diagnostic: total stepPhysics calls
   const diagDoneRef         = useRef(false)  // diagnostic: first-10-calls log emitted
   const smoothTempRef       = useRef(25)  // EMA of derivedTempC for stable readout
@@ -437,6 +449,9 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
   const darkModeRef         = useRef(darkMode)
   const showChargeRef       = useRef(showCharge)
   const showFieldRef        = useRef(showField)
+  const fieldBlurRef        = useRef(fieldBlur)
+  const chargeLiteRef       = useRef(chargeLite)
+  const interpolateRef      = useRef(interpolate)
   const atomColorModeRef    = useRef(atomColorMode)
   const showBrokenBondsRef  = useRef(showBrokenBonds)
   const showLiveStatsRef    = useRef(showLiveStats)
@@ -463,6 +478,9 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
   useEffect(() => { darkModeRef.current = darkMode }, [darkMode])
   useEffect(() => { showChargeRef.current = showCharge }, [showCharge])
   useEffect(() => { showFieldRef.current = showField }, [showField])
+  useEffect(() => { fieldBlurRef.current = fieldBlur }, [fieldBlur])
+  useEffect(() => { chargeLiteRef.current = chargeLite }, [chargeLite])
+  useEffect(() => { interpolateRef.current = interpolate }, [interpolate])
   useEffect(() => { atomColorModeRef.current = atomColorMode }, [atomColorMode])
   useEffect(() => { showBrokenBondsRef.current = showBrokenBonds }, [showBrokenBonds])
   useEffect(() => { showLiveStatsRef.current = showLiveStats }, [showLiveStats])
@@ -559,6 +577,11 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
     window._meltPhys = physRef.current
     window.measureStrain95 = () => measureStrain95(window._meltPhys)
     window.meltStructure   = () => meltStructure(window._meltPhys)
+    window.verifyHashPairs = () => verifyHashPairs(window._meltPhys)   // stage-1 hash check
+    window.setMeltHash     = setMeltHash                               // toggle hash on/off
+    // Live sim-speed tuning: lower = slower. 0.5 steps every 2nd frame, 0.25 every 4th, etc.
+    // Dial it here, then tell me the value to hard-code into simSpeed's useState default.
+    window.setSimSpeed     = (v) => { window._simSpeed = v }
     // A handful of near-zero-temperature steps let spring forces seat atoms at r0
     // after the dead-zone snap in initPhysics. 5 steps is enough; initPhysics
     // already handles overlap resolution so we don't need many here.
@@ -597,6 +620,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
     for (let s = 0; s < 20; s++) stepPhysics(physRef.current, eWarm)
     smoothTempRef.current = energyValRef.current  // seed EMA at known target (25°C)
     frameAccRef.current = 0
+    lastTsRef.current = 0   // restart elapsed-time pacing cleanly after a rebuild
     histRef.current = []
 
     window.bondAudit = () => {
@@ -892,20 +916,48 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
         prevCoolingRef.current = cm
       }
 
+      // ── Wall-clock pacing ─────────────────────────────────────────
+      // Advance the sim by elapsed real time, not per rendered frame, so it runs the same
+      // speed on every machine — fast hardware just draws more (smoother) frames of the same
+      // sim rate, a struggling one lags. The ramp advances by the same step count and must
+      // keep running even while THIS tab is frozen (it drives the Bulk Material tab's
+      // temperature), so it is computed here, above the activeRef gate. window._wallClock =
+      // false restores the old per-frame behaviour for A/B.
+      const nowMs = ts || performance.now()
+      let elapsed = lastTsRef.current ? (nowMs - lastTsRef.current) / 1000 : 0
+      lastTsRef.current = nowMs
+      if (elapsed > MAX_FRAME_DT) elapsed = MAX_FRAME_DT   // clamp → slow hw lags, never spirals
+      const speed   = window._simSpeed ?? speedRef.current
+      const useWall = window._wallClock !== false
+      let stepsThisFrame, rampAdvance
+      if (useWall) {
+        frameAccRef.current += elapsed * BASE_STEPS_PER_SEC * speed
+        stepsThisFrame = Math.floor(frameAccRef.current)
+        frameAccRef.current -= stepsThisFrame
+        if (stepsThisFrame > MAX_STEPS_PER_FRAME) { stepsThisFrame = MAX_STEPS_PER_FRAME; frameAccRef.current = 0 }
+        rampAdvance = stepsThisFrame
+      } else if (speed >= 1) {
+        stepsThisFrame = Math.floor(speed); frameAccRef.current = 0; rampAdvance = 1
+      } else {
+        frameAccRef.current += speed
+        stepsThisFrame = frameAccRef.current >= 1 ? (frameAccRef.current -= 1, 1) : 0
+        rampAdvance = 1
+      }
+
       // ── Compute energy target for this frame ──────────────────────
-      // All ramps are energy-based: ePerParticle = (sliderVal+273)*ENERGY_UNIT
-      const E_COOL_END = (200  + 273) * ENERGY_UNIT
-      const E_HEAT_END = (1500 + 273) * ENERGY_UNIT
+      // All ramps are energy-based: ePerParticle = (sliderVal+273)*ENERGY_UNIT. The ramp is
+      // advanced in SIM STEPS (rampAdvance), so a cool runs a fixed number of relaxation
+      // steps regardless of frame rate — the crystallinity lesson is hardware-independent.
       let ePerParticle
       const isRamping = cm === 'fast' || cm === 'slow' || cm === 'fastHeat' || cm === 'slowHeat'
       if (cm === 'fast' || cm === 'slow') {
-        coolingFrameRef.current++
+        coolingFrameRef.current += rampAdvance
         const dur = cm === 'fast' ? FAST_COOL_FRAMES : SLOW_COOL_FRAMES
         const t   = Math.min(1, coolingFrameRef.current / dur)
         ePerParticle = rampEnergyLinearInContent(coolingStartERef.current, 200, t, na2oPctRef.current, hcPlateauRef.current)
         effectiveERef.current = ePerParticle
       } else if (cm === 'fastHeat' || cm === 'slowHeat') {
-        coolingFrameRef.current++
+        coolingFrameRef.current += rampAdvance
         const dur = cm === 'fastHeat' ? FAST_COOL_FRAMES : SLOW_COOL_FRAMES
         const t   = Math.min(1, coolingFrameRef.current / dur)
         ePerParticle = rampEnergyLinearInContent(coolingStartERef.current, 1500, t, na2oPctRef.current, hcPlateauRef.current)
@@ -915,9 +967,9 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
         effectiveERef.current = ePerParticle
       }
 
-      // Propagate slider-equivalent energy value to parent (throttled, every 6 frames)
-      if (onTempUpdateRef.current && isRamping && coolingFrameRef.current % 6 === 0) {
-        // Convert back to slider-equivalent so GlassViewer can sync the slider
+      // Propagate slider-equivalent energy value to parent (throttled to ~10×/s by wall-clock)
+      if (onTempUpdateRef.current && isRamping && nowMs - lastRampSyncRef.current > 100) {
+        lastRampSyncRef.current = nowMs
         onTempUpdateRef.current(Math.round(ePerParticle / ENERGY_UNIT - 273))
       }
 
@@ -939,42 +991,27 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
             ps[i].py = snap[i * 2 + 1]; ps[i].y = snap[i * 2 + 1]
           }
           rebuildBonds(phys)
-          drawScene(canvasRef.current, phys, { ts, bondNums: bondNumsRef.current, darkMode: darkModeRef.current, showCharge: showChargeRef.current, showField: showFieldRef.current, atomColorMode: atomColorModeRef.current, showBrokenBonds: showBrokenBondsRef.current, showLiveStats: showLiveStatsRef.current, targetTempC: Math.round(ePerParticle / ENERGY_UNIT - 273), hoverIdx: hoverIdxRef.current, selectedIdx: selectedIdxRef.current })
+          drawScene(canvasRef.current, phys, { ts, bondNums: bondNumsRef.current, darkMode: darkModeRef.current, showCharge: showChargeRef.current, chargeLite: chargeLiteRef.current, showField: showFieldRef.current, fieldBlur: fieldBlurRef.current, atomColorMode: atomColorModeRef.current, showBrokenBonds: showBrokenBondsRef.current, showLiveStats: showLiveStatsRef.current, targetTempC: Math.round(ePerParticle / ENERGY_UNIT - 273), hoverIdx: hoverIdxRef.current, selectedIdx: selectedIdxRef.current })
           rafRef.current = requestAnimationFrame(frame)
           return
         }
 
-        const speed = speedRef.current
-
-        if (speed >= 1) {
-          const steps = Math.floor(speed)
-          for (let s = 0; s < steps; s++) {
-            for (const p of phys.particles) { p.px = p.x; p.py = p.y }
-            stepPhysics(phys, ePerParticle, 1.0, attractKRef.current, cm, speedMultRef.current, attractFalloffRef.current)
-            stepCallCountRef.current++
-            if (!diagDoneRef.current && stepCallCountRef.current <= 10) {
-              const meanSpd = phys.particles.reduce((s, p) => s + Math.hypot(p.vx, p.vy), 0) / phys.n
-              console.log(`[diag] stepPhysics call #${stepCallCountRef.current}: coolingFactor=1.0 speedMult=${speedMultRef.current.toFixed(3)} ePerParticle=${ePerParticle.toExponential(3)} meanSpeed=${meanSpd.toExponential(3)} cm=${cm}`)
-              if (stepCallCountRef.current === 10) diagDoneRef.current = true
-            }
-          }
-          frameAccRef.current = 0
-        } else {
-          frameAccRef.current += speed
-          if (frameAccRef.current >= 1) {
-            frameAccRef.current -= 1
-            for (const p of phys.particles) { p.px = p.x; p.py = p.y }
-            stepPhysics(phys, ePerParticle, 1.0, attractKRef.current, cm, speedMultRef.current, attractFalloffRef.current)
-            stepCallCountRef.current++
-            if (!diagDoneRef.current && stepCallCountRef.current <= 10) {
-              const meanSpd = phys.particles.reduce((s, p) => s + Math.hypot(p.vx, p.vy), 0) / phys.n
-              console.log(`[diag] stepPhysics call #${stepCallCountRef.current}: coolingFactor=1.0 speedMult=${speedMultRef.current.toFixed(3)} ePerParticle=${ePerParticle.toExponential(3)} meanSpeed=${meanSpd.toExponential(3)} cm=${cm}`)
-              if (stepCallCountRef.current === 10) diagDoneRef.current = true
-            }
+        // Run the sim steps scheduled for this frame by the wall-clock pacer above.
+        for (let s = 0; s < stepsThisFrame; s++) {
+          for (const p of phys.particles) { p.px = p.x; p.py = p.y }
+          stepPhysics(phys, ePerParticle, 1.0, attractKRef.current, cm, speedMultRef.current, attractFalloffRef.current)
+          stepCallCountRef.current++
+          if (!diagDoneRef.current && stepCallCountRef.current <= 10) {
+            const meanSpd = phys.particles.reduce((s, p) => s + Math.hypot(p.vx, p.vy), 0) / phys.n
+            console.log(`[diag] stepPhysics call #${stepCallCountRef.current}: coolingFactor=1.0 speedMult=${speedMultRef.current.toFixed(3)} ePerParticle=${ePerParticle.toExponential(3)} meanSpeed=${meanSpd.toExponential(3)} cm=${cm}`)
+            if (stepCallCountRef.current === 10) diagDoneRef.current = true
           }
         }
 
-        drawScene(canvasRef.current, phys, { ts, bondNums: bondNumsRef.current, darkMode: darkModeRef.current, showCharge: showChargeRef.current, showField: showFieldRef.current, atomColorMode: atomColorModeRef.current, showBrokenBonds: showBrokenBondsRef.current, showLiveStats: showLiveStatsRef.current, targetTempC: Math.round(ePerParticle / ENERGY_UNIT - 273), hoverIdx: hoverIdxRef.current, selectedIdx: selectedIdxRef.current })
+        // Hi-Res interpolation: draw freed atoms `frameAccRef` of the way into the next step
+        // (the unconsumed time fraction), so motion is smooth between physics steps. 1 = off.
+        const interpAlpha = interpolateRef.current ? Math.min(1, frameAccRef.current) : 1
+        drawScene(canvasRef.current, phys, { ts, bondNums: bondNumsRef.current, darkMode: darkModeRef.current, showCharge: showChargeRef.current, chargeLite: chargeLiteRef.current, showField: showFieldRef.current, fieldBlur: fieldBlurRef.current, interp: interpAlpha, atomColorMode: atomColorModeRef.current, showBrokenBonds: showBrokenBondsRef.current, showLiveStats: showLiveStatsRef.current, targetTempC: Math.round(ePerParticle / ENERGY_UNIT - 273), hoverIdx: hoverIdxRef.current, selectedIdx: selectedIdxRef.current })
 
         // ── KE / PE diagnostics + graph history ──────────────────────
         const ke = computeKE(phys)

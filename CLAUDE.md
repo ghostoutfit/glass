@@ -291,7 +291,11 @@ frame** — ~716 gradient objects/frame when Charge is on. Hoist to a cached spr
 
 ### 3. The physics step is five brute-force O(n²) loops
 
-`n` is larger than it looks: **716 atoms** (soda 70/30), **767** (pure SiO₂), 710 (soda-lime).
+`n` is larger than it looks: **799 atoms** (soda 70/30), **859** (pure SiO₂), 802 (soda-lime).
+⚠️ These rose from 716/767/710 on 2026-10-05 when `buildHexLayer`'s `i` loop was widened to
+fill the sheared-out bottom-left SiO₂ chunks (see "Grid layout"). All headless step/fps
+measurements in this file predate that change and were taken at the old, lower counts — the
+O(n²) loops are now ~12–20 % heavier per preset.
 
 **Clean step cost** — real `v3/meltPhysics.js`, headless node, median of 4 runs × 150 steps after
 60 warm-up steps:
@@ -440,7 +444,7 @@ Nothing here is checked in — these were throwaway scripts in the scratchpad. T
 | Constant | Value | Meaning |
 |---|---|---|
 | `SIM_W` × `SIM_H` | 600 × 350 px | physics domain; toroidal wrap on both axes |
-| `n` | 716 (soda) / 767 (pure) / 710 (soda-lime) | atom count |
+| `n` | 799 (soda) / 859 (pure) / 802 (soda-lime) | atom count |
 | `THERMAL_SPEED` | 0.0018 | `v_rms = 0.0018 × √T` px/substep |
 | `ENERGY_UNIT` | `THERMAL_SPEED²/2` = **1.62e-6** | `ePerParticle = (T+273) × ENERGY_UNIT` |
 | `SUBSTEPS` | 6 | physics substeps per `stepPhysics` call |
@@ -461,14 +465,14 @@ Nothing here is checked in — these were throwaway scripts in the scratchpad. T
 | `SLOW_COOL_FRAMES` | 1440 (~24 s) | `CompositionView.jsx` |
 | `COOL_MIN_TEMP` | 1500 °C | cooling gate, `GlassViewer.jsx` |
 | Temperature cap | 1800 °C | `GlassViewer.jsx` |
-| Start temperature | 50 °C | `meltLocalTemp` initial state, `GlassViewer.jsx` |
+| Start temperature | 100 °C | `meltLocalTemp` / `derivedTemp` / `targetE` initial state, `GlassViewer.jsx` |
 
 ⚠️ **The inline comment on `ENERGY_UNIT` says `1.125e-6`. It is wrong** —
 `0.0018² / 2 = 1.62e-6`. The stale number is left over from `THERMAL_SPEED = 0.0015`.
 `GlassViewer.jsx`'s `targetE` initial state hardcodes the correct `1.62e-6`. Fix the comment;
 don't trust it.
 
-`PHYSICS_START_TEMP = 0` is exported but unused — the UI starts at 50 °C.
+`PHYSICS_START_TEMP = 0` is exported but unused — the UI starts at 100 °C.
 
 ## Atom species
 
@@ -842,6 +846,14 @@ one that most reduces orthogonal like-type adjacency, ties broken by the seeded 
 
 `buildHexLayer` / `buildSquareLayer` place cations then bridge **same-chunk** nearest-neighbour
 pairs with O at the midpoint (`nnSq = (a × 1.05)²` rejects diagonals on the square lattices).
+
+⚠️ **The hex lattice shears right by `j·a2x` (= `j·a1x/2`) per row**, so lower rows need
+increasingly negative `i`. The `i` loop used to start at `-1`, which left the bottom-left SiO₂
+chunks empty or sparse (chunk 15 had 0 atoms on soda, chunk 10 had 11) — a visible blank in the
+lower-left of the Particles tab. It now starts at `-Math.ceil(nj/2)-1`, far enough left to cover
+the shear; out-of-range points are clipped by the `x`/`y` bounds and the `seen` dedupe, so only
+the previously-missing atoms are added and every SiO₂ chunk fills to 46. The square lattice has
+no shear and was never affected. This is what raised `n` (see the perf section).
 
 `initPhysics` then runs **120 passes** of O(n²) overlap resolution (needed because chunk
 polygons overlap) plus one O(n²) Si-O dead-zone pass that nudges pairs sitting in
