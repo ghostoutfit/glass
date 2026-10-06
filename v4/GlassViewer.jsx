@@ -504,7 +504,9 @@ export default function GlassViewer() {
   const tabGroupRef = useRef(null)
   const verTagRef   = useRef(null)
   const toolbarRef  = useRef(null)
-  const [bondView, setBondView] = useState('graph')  // 'count' | 'graph'
+  const [showGraph, setShowGraph] = useState(true)   // energy graph panel (both tabs)
+  const [showCount, setShowCount] = useState(false)  // bond-count table (Particles tab only)
+  const [showGoBox, setShowGoBox] = useState(false)  // dev: show the temperature + GO box
   const graphCanvasRef  = useRef(null)
   const graphXMaxRef    = useRef(5000)
   const graphDragRef    = useRef(null)   // { startX, startXMax } while dragging
@@ -1479,11 +1481,21 @@ export default function GlassViewer() {
 
         ctx.restore()
 
-        // Subtle glass container border
+        // Container border — colour + glow announces the active heat/cool RATE:
+        //   fast heat → hot glowing red; slow heat → dim red; fast cool → icy glowing blue;
+        //   slow cool → muted blue; idle → the subtle neutral border.
+        const _heat = meltHeatModeRef.current, _cool = coolingModeRef.current
+        let _stroke = 'rgba(180,200,220,0.22)', _lw = 1.5, _glow = 0, _glowCol = 'transparent'
+        if (_cool === 'fast')      { _stroke = 'rgba(70,170,255,0.98)';  _lw = 3; _glow = 22; _glowCol = 'rgba(40,150,255,0.95)' }
+        else if (_cool === 'slow') { _stroke = 'rgba(120,160,205,0.60)'; _lw = 2; _glow = 5;  _glowCol = 'rgba(100,150,210,0.40)' }
+        else if (_heat === 'fast') { _stroke = 'rgba(255,70,35,0.98)';   _lw = 3; _glow = 22; _glowCol = 'rgba(255,45,20,0.95)' }
+        else if (_heat === 'slow') { _stroke = 'rgba(220,105,80,0.60)';  _lw = 2; _glow = 5;  _glowCol = 'rgba(210,90,60,0.40)' }
         ctx.save()
         ctx.translate(bcx, bcy); ctx.rotate(box.boxAngle); ctx.scale(drawScale, drawScale)
-        ctx.strokeStyle = 'rgba(180,200,220,0.22)'; ctx.lineWidth = 1.5 / drawScale
+        ctx.strokeStyle = _stroke; ctx.lineWidth = _lw / drawScale
+        if (_glow > 0) { ctx.shadowBlur = _glow / drawScale; ctx.shadowColor = _glowCol }
         ctx.strokeRect(-HS, -HS, BOX_SIZE, BOX_SIZE)
+        if (_glow > 0) { ctx.strokeRect(-HS, -HS, BOX_SIZE, BOX_SIZE); ctx.shadowBlur = 0 }  // 2nd pass = stronger glow
         ctx.restore()
 
         // Non-sand entity count — diagnostic HUD (dev mode only)
@@ -1955,7 +1967,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 29</span>
+                  }}>Field Test Version 33</span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),
@@ -1985,13 +1997,15 @@ export default function GlassViewer() {
                     disabled={coolingMode !== 'fast' && meltLocalTemp < COOL_MIN_TEMP}
                     title={coolingMode !== 'fast' && meltLocalTemp < COOL_MIN_TEMP ? `Heat to ${COOL_MIN_TEMP}°C first` : undefined}
                     style={{padding:'3px 9px', fontSize:11}} onClick={() => startCooling('fast')}>Fast Cool</button>
-                  <div className="toolbar-divider" />
-                  <input type="number" min={0} max={1800} value={gotoTemp}
-                    onChange={e => setGotoTemp(e.target.value)}
-                    onKeyDown={e => { if (e.key === 'Enter') onGoTemp() }}
-                    placeholder="°C"
-                    style={{ width:68, padding:'3px 5px', fontSize:12, textAlign:'right', border:'1px solid rgba(100,90,70,0.5)', borderRadius:3, background:'#e8e3da', color:'#2a2620' }} />
-                  <button className="action-btn test-btn" style={{padding:'3px 10px', fontSize:11}} onClick={onGoTemp}>GO</button>
+                  {showGoBox && <>
+                    <div className="toolbar-divider" />
+                    <input type="number" min={0} max={1800} value={gotoTemp}
+                      onChange={e => setGotoTemp(e.target.value)}
+                      onKeyDown={e => { if (e.key === 'Enter') onGoTemp() }}
+                      placeholder="°C"
+                      style={{ width:68, padding:'3px 5px', fontSize:12, textAlign:'right', border:'1px solid rgba(100,90,70,0.5)', borderRadius:3, background:'#e8e3da', color:'#2a2620' }} />
+                    <button className="action-btn test-btn" style={{padding:'3px 10px', fontSize:11}} onClick={onGoTemp}>GO</button>
+                  </>}
                   <div className="toolbar-divider" />
                   <div style={lcdStyle}>
                     <span style={{visibility:'hidden', display:'block', padding:'3px 6px'}}>9999</span>
@@ -2063,21 +2077,22 @@ export default function GlassViewer() {
                 </div>
               </div>
               <span style={{fontSize:11, fontWeight:700, letterSpacing:'0.09em', textTransform:'uppercase', color:'rgba(30,45,60,0.65)'}}>Visuals</span>
-              {/* Particles: Graph / Charge / Field. Bulk: the same slot holds Rotate. */}
+              {/* Particles: Count / Graph / Charge / Field. Bulk: Graph / Rotate. */}
               <div style={{display:'flex', alignItems:'center', gap:3}}>
-                {tab === 'glass' ? (
+                {tab === 'glass' ? (<>
+                  <button className={`action-btn replay-btn${showGraph?' active':''}`}
+                    style={{padding:'3px 10px'}} onClick={() => setShowGraph(f => !f)}>Graph</button>
                   <button className={`action-btn replay-btn${autoRotate?' active':''}`}
                     style={{padding:'3px 10px'}}
                     onClick={() => {
                       const v = !autoRotate; setAutoRotate(v); boxSimRef.current.autoRotate = v
                       if (!v && boxSimRef.current.box) boxSimRef.current.box.boxAngularVel = 0
                     }}>Rotate</button>
-                ) : (<>
-                  <button className="action-btn replay-btn active"
-                    style={{padding:'3px 10px', minWidth:52}}
-                    onClick={() => setBondView(v => v === 'count' ? 'graph' : 'count')}>
-                    {bondView === 'count' ? 'Count' : 'Graph'}
-                  </button>
+                </>) : (<>
+                  <button className={`action-btn replay-btn${showCount?' active':''}`}
+                    style={{padding:'3px 10px'}} onClick={() => setShowCount(f => !f)}>Count</button>
+                  <button className={`action-btn replay-btn${showGraph?' active':''}`}
+                    style={{padding:'3px 10px'}} onClick={() => setShowGraph(f => !f)}>Graph</button>
                   <button className={`action-btn replay-btn${showCharge?' active':''}`}
                     style={{padding:'3px 10px'}} onClick={() => setShowCharge(f => !f)}>Charge</button>
                   <button className={`action-btn replay-btn${effectiveShowField?' active':''}`}
@@ -2102,11 +2117,11 @@ export default function GlassViewer() {
       <div className="main">
 
         {/* Left visuals panel — shown when any toggle is active */}
-        {(bondView || showCharge || effectiveShowField || showDev) && (
-          <div className="viz-panel">
+        {(showGraph || showCount || showCharge || effectiveShowField || showDev) && (
+          <div className="viz-panel" style={{ overflowY: 'auto', overflowX: 'hidden', minHeight: 0, maxHeight: '100%' }}>
 
-            {/* Particle key — always visible at top */}
-            {(() => {
+            {/* Particle key — Particles tab only (hidden on Bulk Material) */}
+            {tab === 'melt' && (() => {
               const labelStyle = { fontSize: 22, color: darkMode ? '#999' : '#666', fontFamily: 'system-ui, sans-serif' }
               const sio2Atoms = [
                 { iconR: 6,   type: 'Si', label: <><b>Si</b> <sup>δ+</sup></> },
@@ -2144,8 +2159,8 @@ export default function GlassViewer() {
               )
             })()}
 
-            {/* Bond strain gradient — field legend */}
-            {effectiveShowField && (
+            {/* Bond strain gradient — field legend (Particles tab only) */}
+            {tab === 'melt' && effectiveShowField && (
               <svg viewBox="0 0 200 50" width="100%" style={{ display: 'block', flexShrink: 0 }}>
                 <defs>
                   <linearGradient id="gl-strain-grad" x1="0" x2="1" y1="0" y2="0">
@@ -2170,14 +2185,14 @@ export default function GlassViewer() {
             )}
 
             {/* Graph in sidebar */}
-            {bondView === 'graph' && (
+            {showGraph && (
               <canvas ref={graphCanvasRef}
                 style={{ display:'block', width:'100%', height:200, marginBottom:4 }}
               />
             )}
 
-            {/* Bond count table — mirrors concrete v4 layout */}
-            {bondView === 'count' && bondCounts && (() => {
+            {/* Bond count table — mirrors concrete v4 layout (Particles tab only) */}
+            {tab === 'melt' && showCount && bondCounts && (() => {
               const initial = initialBondCounts ?? bondCounts
               const tested  = initialBondCounts !== null
               const cols = [
@@ -2269,6 +2284,10 @@ export default function GlassViewer() {
               <label style={{display:'flex', alignItems:'center', gap:6, fontSize:12, color:'#ccc', marginBottom:8, cursor:'pointer'}}>
                 <input type="checkbox" checked={longerCooledBonds} onChange={e => setLongerCooledBonds(e.target.checked)} style={{accentColor:'#88ddaa'}} />
                 Longer cooled bonds
+              </label>
+              <label style={{display:'flex', alignItems:'center', gap:6, fontSize:12, color:'#ccc', marginBottom:8, cursor:'pointer'}}>
+                <input type="checkbox" checked={showGoBox} onChange={e => setShowGoBox(e.target.checked)} style={{accentColor:'#88ddaa'}} />
+                Temperature GO box
               </label>
 
               {/* ── Macro-vs-particle melt match ── tune onset/full so Macro tracks Particle. */}

@@ -339,6 +339,13 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
   useEffect(() => { onReplayReadyRef.current = onReplayReady }, [onReplayReady])
   useEffect(() => { onBondCountsRef.current = onBondCounts }, [onBondCounts])
   useEffect(() => { graphCanvasRefRef.current = graphCanvasRef }, [graphCanvasRef])
+  // Reset the energy graph when the material (composition) changes — clear the history and
+  // redraw the empty graph immediately, so stale curves don't linger even if the tab is hidden.
+  useEffect(() => {
+    histRef.current = []
+    const ext = graphCanvasRefRef.current?.current
+    if (ext) drawTEGraph(ext, [], darkModeRef.current, 4e-3, targetTempLineRef.current)
+  }, [sio2Pct, na2oPct, caoPct])
   useEffect(() => { cumulativeEnergyRefRef.current = cumulativeEnergyRef }, [cumulativeEnergyRef])
   useEffect(() => { na2oPctRef.current = na2oPct }, [na2oPct])
   useEffect(() => { targetTempLineRef.current = targetTempLine }, [targetTempLine])
