@@ -36,6 +36,7 @@ function allocGrid(HS) {
 }
 
 function rebuildGrid(grains, HS) {
+  if (!_gridH) allocGrid(HS)   // restored sims skip initSandParticles, so the grid may be unallocated
   // Grains grow past N_GRAINS as Na blobs add sub-circles; grow the node arrays to match or the
   // grid silently drops the overflow and later reads undefined grains (crash).
   if (!_nodeG || _nodeG.length < grains.length) {
@@ -613,11 +614,12 @@ export function snapshotSand(phys) {
   for (let i = 0; i < grains.length; i++) idx.set(grains[i], i)
   return {
     grains: grains.map(g => ({ ...g })),
+    // Springs are NOT stored — they're rebuilt from grain positions on restore (same geometry
+    // as makeNaBlob), which cuts the serialized size roughly in half for a bundled data file.
     blobs: (phys.naBlobs ?? []).map(b => ({
       id: b.id, blobR: b.blobR,
       partIdx: b.particles.map(p => idx.get(p)),
       orbIdx:  (b.orbs ?? b.particles.filter(p => p.type === 'na-sub')).map(p => idx.get(p)),
-      springs: b.springs.map(s => ({ a: idx.get(s.a), b: idx.get(s.b), rest: s.rest, k: s.k })),
     })),
     meldCount: phys.meldCount ?? 0,
     nNaOriginal: phys.nNaOriginal ?? 0,
@@ -627,10 +629,24 @@ export function snapshotSand(phys) {
 
 export function restoreSand(snap) {
   const grains = snap.grains.map(g => ({ ...g }))
+  const thresh2 = (NA_BLOB_PITCH * 1.5) ** 2
   const naBlobs = snap.blobs.map(b => {
     const particles = b.partIdx.map(i => grains[i])
     const orbs = b.orbIdx.map(i => grains[i])
-    const springs = b.springs.map(s => ({ a: grains[s.a], b: grains[s.b], rest: s.rest, k: s.k }))
+    const ctr = particles.find(p => p.type === 'na-ctr') ?? particles[0]
+    const springs = []
+    for (const p of particles) {        // radial springs: centre → each sub-circle
+      if (p === ctr) continue
+      const dx = p.x - ctr.x, dy = p.y - ctr.y
+      springs.push({ a: ctr, b: p, rest: Math.sqrt(dx * dx + dy * dy) || 0.001, k: NA_BLOB_K_RAD })
+    }
+    for (let i = 0; i < orbs.length; i++) {   // neighbour springs between nearby sub-circles
+      for (let j = i + 1; j < orbs.length; j++) {
+        const dx = orbs[j].x - orbs[i].x, dy = orbs[j].y - orbs[i].y
+        const d2 = dx * dx + dy * dy
+        if (d2 < thresh2) springs.push({ a: orbs[i], b: orbs[j], rest: Math.sqrt(d2), k: NA_BLOB_K_NBR })
+      }
+    }
     if (b.id >= _blobId) _blobId = b.id + 1   // keep future blob ids from colliding
     return { id: b.id, blobR: b.blobR, particles, springs, orbs }
   })

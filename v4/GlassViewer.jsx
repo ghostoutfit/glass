@@ -4,6 +4,7 @@ import { initParticles, stepPhysics, stepFloorPhysics, PARTICLE_R, FIXED_DT, T_R
 import { setSioHotMult, setFreeAttractSiOMult, setSioExclMult, setCrystJiggleMult, setBreakStrain, setReformStrain, setCrystAnchorK, setLiberateFrac, setSioK, setNaOK, setNaAnchorK, setNaLiberateFrac, setNaBreakStrain, setLatticeSpeedMult, setFreedSpeedMult, setReintBondN, setReintFrameM, setBreakStrainSpread, setSevTriggerDist, setFeedbackGainMult, setSiSiRepR0, setMotifStrength, setMotifAlign, setBondStiffMult, setFreedTau, setNaNaRepR0, setSevCooldown, setSevPullK } from './meltPhysics.js'
 import { setVisualScale, setMaxDpr, effectiveDpr } from './renderer.js'
 import { initSandParticles, stepSandPhysics, mergeSodaGrains, mergeSilicateGrains, convertLargeNaGrains, stepNaBlobSprings, checkNaBlobMerges, absorbNearbyGrains, snapshotSand, restoreSand, GRAIN_R as SAND_GRAIN_R, NA_BLOB_R_CTR } from './sandPhysics.js'
+import { BULK_CANDIDATES } from './candidates.generated.js'   // precomputed melt snapshots (dev-regenerated, bundled)
 import './GlassViewer.css'
 
 // ── ScrubSlider — machined-thumb horizontal scrubber (matches concrete v4) ──
@@ -628,7 +629,7 @@ export default function GlassViewer() {
   const boxLoadingRef     = useRef(false)
   const [boxMeltFrac,     setBoxMeltFrac]     = useState(0)       // macro melt fraction (dev stat)
   const lastMeltStatRef   = useRef(0)
-  const bulkCandidatesRef = useRef([])                            // precomputed Bulk melt snapshots
+  const bulkCandidatesRef = useRef(BULK_CANDIDATES[presetId] ?? [])   // bundled Bulk melt snapshots for the preset
   const [genProgress,     setGenProgress]     = useState(null)    // candidate generation 0..1 (null = idle)
   const [macroMeltOnset,  setMacroMeltOnset]  = useState(700)     // macro melt target curve: onset °C
   const [macroMeltFull,   setMacroMeltFull]   = useState(1300)    // macro melt target curve: full-melt °C
@@ -810,6 +811,9 @@ export default function GlassViewer() {
     glassDkRef.current = darkMode
     return () => document.body.removeAttribute('data-theme')
   }, [darkMode])
+
+  // Load the bundled candidate states for the active preset (instant catch-up, no generation).
+  useEffect(() => { bulkCandidatesRef.current = BULK_CANDIDATES[presetId] ?? [] }, [presetId])
 
   // Build marker: show it only when it fits to the right of the tab buttons without
   // running past the toolbar's right edge. The marker is absolutely positioned, so it is
@@ -1942,7 +1946,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 27</span>
+                  }}>Field Test Version 28</span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),
