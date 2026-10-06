@@ -4,9 +4,10 @@ import { initPhysics, stepPhysics, setSiOr0,
          buildRigidBondMap, setSioExclMult, setBreakStrain, setReformStrain, setCrystAnchorK, setLiberateFrac, setSioK, setNaOK,
          setNaAnchorK, setNaLiberateFrac, setNaBreakStrain, setLatticeSpeedMult, setFreedSpeedMult,
          resetLibStats, getLibStats, measureStrain95, meltStructure, setUseEmaStrain,
-         verifyHashPairs, setMeltHash, setCoolBondScale } from './meltPhysics.js'
+         verifyHashPairs, setMeltHash, setCoolBondScale, restoreMelt } from './meltPhysics.js'
 import { drawScene, setVisualScale, findAtomNear, getVisualScale, getLastHudLines, effectiveDpr } from './renderer.js'
 import { buildGrid, buildAllAtoms } from './meltGrid.js'
+import { MELT_CANDIDATES } from './candidates.melt.generated.js'   // precomputed catch-up states (bundled)
 
 
 // Cooling durations in SIM STEPS (not frames). With wall-clock pacing the ramp advances by
@@ -237,7 +238,7 @@ function countBonds(phys) {
   return counts
 }
 
-export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, attractK = 0, attractFalloff = 1, debug = false, bondNums = false, meltTemp = 50, simSpeed = 1, speedMult = 1, coolingMode = null, onTempUpdate = null, onEnergyUpdate = null, onBondCounts = null, replayFrame = null, onReplayReady = null, graphCanvasRef = null, cumulativeEnergyRef = null, graphXMaxRef = null, darkMode = true, showCharge = false, chargeLite = false, showField = true, fieldBlur = true, interpolate = false, longerCooledBonds = true, atomColorMode = 'normal', showBrokenBonds = false, showLiveStats = false, useEmaStrain = true, hcPlateau = 4, active = true, resetToken = 0, targetTempLine = null }) {
+export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, attractK = 0, attractFalloff = 1, debug = false, bondNums = false, meltTemp = 50, simSpeed = 1, speedMult = 1, coolingMode = null, onTempUpdate = null, onEnergyUpdate = null, onBondCounts = null, replayFrame = null, onReplayReady = null, graphCanvasRef = null, cumulativeEnergyRef = null, graphXMaxRef = null, darkMode = true, showCharge = false, chargeLite = false, showField = true, fieldBlur = true, interpolate = false, longerCooledBonds = true, atomColorMode = 'normal', showBrokenBonds = false, showLiveStats = false, useEmaStrain = true, hcPlateau = 4, active = true, resetToken = 0, targetTempLine = null, meltRestore = null }) {
   const types = useMemo(
     () => buildGrid(sio2Pct, na2oPct, caoPct),
     [sio2Pct, na2oPct, caoPct]
@@ -742,6 +743,32 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
     // rebuilds the melt from a fresh start state: initPhysics → 5 settling steps →
     // buildRigidBondMap → 20 warm-up steps at the current target temperature.
   }, [cellData, resetToken])  // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Candidate-state catch-up: when GlassViewer signals a stale melt-tab re-entry (energy or
+  // cooling track changed while we were hidden), restore the nearest precomputed snapshot for
+  // the current track + temperature instead of resuming the now-wrong frozen state. Soda-only
+  // (pure never melts); falls through to the resumed state if no matching candidate or the atom
+  // count doesn't match. This coexists with the normal frozen-resume (no energy change → no token).
+  const lastRestoreTokenRef = useRef(0)
+  useEffect(() => {
+    const r = meltRestore
+    if (!r || !r.token || r.token === lastRestoreTokenRef.current) return
+    lastRestoreTokenRef.current = r.token
+    const phys = physRef.current
+    if (!phys || na2oPct <= 0) return
+    const set = MELT_CANDIDATES.soda?.[r.track]
+    if (!set || !set.length) return
+    let best = set[0]
+    for (const c of set) if (Math.abs(c.temp - r.temp) < Math.abs(best.temp - r.temp)) best = c
+    if ((best.snap?.n ?? -1) !== phys.n) return        // composition mismatch guard
+    restoreMelt(phys, best.snap)
+    const nb = phys.rigidBonds.length                  // resize measurement-only arrays
+    phys.everBroken     = new Uint8Array(nb)
+    phys.wasIntact      = new Uint8Array(nb).fill(1)
+    phys.currentIntact  = new Int32Array(nb)
+    phys.lifetimeTotal  = new Float64Array(nb)
+    phys.lifetimeBreaks = new Int32Array(nb)
+  }, [meltRestore, na2oPct])
 
   // RAF loop
   useEffect(() => {

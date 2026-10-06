@@ -631,6 +631,7 @@ export default function GlassViewer() {
   const lastMeltStatRef   = useRef(0)
   const bulkCandidatesRef = useRef(BULK_CANDIDATES[presetId] ?? [])   // bundled Bulk melt snapshots for the preset
   const [genProgress,     setGenProgress]     = useState(null)    // candidate generation 0..1 (null = idle)
+  const [meltRestore,     setMeltRestore]     = useState(null)    // {token,track,temp} → Particles-tab candidate restore
   const [macroMeltOnset,  setMacroMeltOnset]  = useState(700)     // macro melt target curve: onset °C
   const [macroMeltFull,   setMacroMeltFull]   = useState(1300)    // macro melt target curve: full-melt °C
 
@@ -802,6 +803,14 @@ export default function GlassViewer() {
       } else {
         s.heatReplayPending = now.temp > 30
       }
+    }
+
+    // Particles tab: on a stale re-entry (energy/track changed while hidden), restore the
+    // nearest melt candidate for the current track; unchanged → resume the exact frozen state.
+    if (tab === 'melt' && stale && now.temp > 30) {
+      const cm = coolingModeRef.current
+      const track = cm === 'slow' ? 'slow' : cm === 'fast' ? 'fast' : 'heating'
+      setMeltRestore({ token: Date.now(), track, temp: now.temp })
     }
   }, [tab, currentCond])
 
@@ -1946,7 +1955,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 28</span>
+                  }}>Field Test Version 29</span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),
@@ -2528,7 +2537,7 @@ export default function GlassViewer() {
               replayFrame={replayFrame} onReplayReady={handleReplayReady}
               darkMode={darkMode} showCharge={showCharge} chargeLite={chargeLite} showField={effectiveShowField} fieldBlur={fieldBlur} interpolate={interpolate} longerCooledBonds={longerCooledBonds}
               atomColorMode={atomColorMode} showBrokenBonds={showBrokenBonds} showLiveStats={showLiveStats}
-              useEmaStrain={useEmaStrain} hcPlateau={hcPlateau} targetTempLine={gotoTargetTemp}
+              useEmaStrain={useEmaStrain} hcPlateau={hcPlateau} targetTempLine={gotoTargetTemp} meltRestore={meltRestore}
             />
           </div>
 
