@@ -4,7 +4,7 @@ import { initPhysics, stepPhysics, setSiOr0,
          buildRigidBondMap, setSioExclMult, setBreakStrain, setReformStrain, setCrystAnchorK, setLiberateFrac, setSioK, setNaOK,
          setNaAnchorK, setNaLiberateFrac, setNaBreakStrain, setLatticeSpeedMult, setFreedSpeedMult,
          resetLibStats, getLibStats, measureStrain95, meltStructure, setUseEmaStrain,
-         verifyHashPairs, setMeltHash } from './meltPhysics.js'
+         verifyHashPairs, setMeltHash, setCoolBondScale } from './meltPhysics.js'
 import { drawScene, setVisualScale, findAtomNear, getVisualScale, getLastHudLines, effectiveDpr } from './renderer.js'
 
 const VW      = 600
@@ -253,6 +253,35 @@ function tempForContent(target, na2oPct, plateau) {
   for (let x = 5; x <= 2000; x += 5) { c += heatCap(x, na2oPct, plateau) * 5 * ENERGY_UNIT; if (c >= target) return x }
   return 2000
 }
+
+// ── Cooling heat capacity (distinct from heating — different physics) ──────────
+// On cooling the substance RELEASES latent heat where bonds form, which on the T-vs-energy
+// graph is a shallower slope (less temperature drop per unit energy removed). Shape, matching
+// what's on screen:
+//   • T > 1100: no bonds forming yet → low heat capacity → STEEP (fast temp drop per energy)
+//   • 500–1100: bonds forming, lenses fading pink→white → high heat capacity → SHALLOW shelf
+//   • T < 500:  solid, energy just leaves the kinetic bucket → low heat capacity → STEEP again
+// Slow cool finds more/better bonds, so it releases MORE latent heat → an even taller hump
+// (even shallower shelf) than fast. Live-tunable via window._coolLatentSlow / _coolLatentFast.
+const COOL_BAND_LO = 500, COOL_BAND_HI = 1100, COOL_BAND_W = 60
+function coolHeatCap(T, slow) {
+  const amp = slow ? (window._coolLatentSlow ?? 7) : (window._coolLatentFast ?? 3)
+  const ss = (a, b, x) => { const u = Math.max(0, Math.min(1, (x - a) / (b - a))); return u * u * (3 - 2 * u) }
+  const band = ss(COOL_BAND_LO - COOL_BAND_W, COOL_BAND_LO + COOL_BAND_W, T) *
+               (1 - ss(COOL_BAND_HI - COOL_BAND_W, COOL_BAND_HI + COOL_BAND_W, T))
+  return 1 + (amp - 1) * band
+}
+function coolEnergyContent(T, slow) {
+  let c = 0
+  for (let x = 5; x <= T; x += 5) c += coolHeatCap(x, slow) * 5
+  return c * ENERGY_UNIT
+}
+function coolTempForContent(target, slow) {
+  if (target <= 0) return 0
+  let c = 0
+  for (let x = 5; x <= 2000; x += 5) { c += coolHeatCap(x, slow) * 5 * ENERGY_UNIT; if (c >= target) return x }
+  return 2000
+}
 // Ramp ePerParticle so that energy CONTENT moves linearly from the start temp to endTemp.
 function rampEnergyLinearInContent(startE, endTemp, t, na2oPct, plateau) {
   const Tstart = startE / ENERGY_UNIT - 273
@@ -391,7 +420,7 @@ function countBonds(phys) {
   return counts
 }
 
-export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, attractK = 0, attractFalloff = 1, debug = false, bondNums = false, meltTemp = 50, simSpeed = 1, speedMult = 1, coolingMode = null, onTempUpdate = null, onEnergyUpdate = null, onBondCounts = null, replayFrame = null, onReplayReady = null, graphCanvasRef = null, cumulativeEnergyRef = null, graphXMaxRef = null, darkMode = true, showCharge = false, chargeLite = false, showField = true, fieldBlur = true, interpolate = false, atomColorMode = 'normal', showBrokenBonds = false, showLiveStats = false, useEmaStrain = true, hcPlateau = 4, active = true, resetToken = 0, targetTempLine = null }) {
+export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, attractK = 0, attractFalloff = 1, debug = false, bondNums = false, meltTemp = 50, simSpeed = 1, speedMult = 1, coolingMode = null, onTempUpdate = null, onEnergyUpdate = null, onBondCounts = null, replayFrame = null, onReplayReady = null, graphCanvasRef = null, cumulativeEnergyRef = null, graphXMaxRef = null, darkMode = true, showCharge = false, chargeLite = false, showField = true, fieldBlur = true, interpolate = false, longerCooledBonds = true, atomColorMode = 'normal', showBrokenBonds = false, showLiveStats = false, useEmaStrain = true, hcPlateau = 4, active = true, resetToken = 0, targetTempLine = null }) {
   const types = useMemo(
     () => buildGrid(sio2Pct, na2oPct, caoPct),
     [sio2Pct, na2oPct, caoPct]
@@ -431,6 +460,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
   const frameAccRef         = useRef(0)   // fractional sim-step accumulator (wall-clock pacing)
   const lastTsRef           = useRef(0)   // previous frame timestamp, for elapsed-time pacing
   const lastRampSyncRef     = useRef(0)   // throttle for the ramp → parent temperature sync
+  const coolGraphERef       = useRef(null) // during cooling: energy to plot on the graph x-axis
   const stepCallCountRef    = useRef(0)   // diagnostic: total stepPhysics calls
   const diagDoneRef         = useRef(false)  // diagnostic: first-10-calls log emitted
   const smoothTempRef       = useRef(25)  // EMA of derivedTempC for stable readout
@@ -452,6 +482,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
   const fieldBlurRef        = useRef(fieldBlur)
   const chargeLiteRef       = useRef(chargeLite)
   const interpolateRef      = useRef(interpolate)
+  const longerBondsRef      = useRef(longerCooledBonds)
   const atomColorModeRef    = useRef(atomColorMode)
   const showBrokenBondsRef  = useRef(showBrokenBonds)
   const showLiveStatsRef    = useRef(showLiveStats)
@@ -481,6 +512,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
   useEffect(() => { fieldBlurRef.current = fieldBlur }, [fieldBlur])
   useEffect(() => { chargeLiteRef.current = chargeLite }, [chargeLite])
   useEffect(() => { interpolateRef.current = interpolate }, [interpolate])
+  useEffect(() => { longerBondsRef.current = longerCooledBonds }, [longerCooledBonds])
   useEffect(() => { atomColorModeRef.current = atomColorMode }, [atomColorMode])
   useEffect(() => { showBrokenBondsRef.current = showBrokenBonds }, [showBrokenBonds])
   useEffect(() => { showLiveStatsRef.current = showLiveStats }, [showLiveStats])
@@ -621,6 +653,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
     smoothTempRef.current = energyValRef.current  // seed EMA at known target (25°C)
     frameAccRef.current = 0
     lastTsRef.current = 0   // restart elapsed-time pacing cleanly after a rebuild
+    setCoolBondScale(1)     // reset "longer cooled bonds" on a fresh build
     histRef.current = []
 
     window.bondAudit = () => {
@@ -953,18 +986,32 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
       if (cm === 'fast' || cm === 'slow') {
         coolingFrameRef.current += rampAdvance
         const dur = cm === 'fast' ? FAST_COOL_FRAMES : SLOW_COOL_FRAMES
-        const t   = Math.min(1, coolingFrameRef.current / dur)
-        ePerParticle = rampEnergyLinearInContent(coolingStartERef.current, 200, t, na2oPctRef.current, hcPlateauRef.current)
+        const t   = Math.min(1, coolingFrameRef.current / dur)   // progress; advances at a constant rate
+        const slow  = cm === 'slow'
+        const Tstart = coolingStartERef.current / ENERGY_UNIT - 273
+        // Energy leaves at a CONSTANT rate: the graph x-axis moves linearly from where heating
+        // ended (energyContent(Tstart)) down to 0. Temperature is derived through the cooling
+        // heat-capacity curve, so the graph SLOPE carries the latent-heat physics (a shallow
+        // shelf 1100→500), and slow's taller hump makes that shelf even shallower than fast.
+        const eTop  = energyContent(Tstart, na2oPctRef.current, hcPlateauRef.current)
+        const cTop  = coolEnergyContent(Tstart, slow)
+        const scale = cTop > 0 ? eTop / cTop : 1   // normalise so the loop meets heating at the top
+        const graphE = eTop * (1 - t)              // linear in energy → constant rate on the x-axis
+        const Tnow   = coolTempForContent(graphE / scale, slow)
+        ePerParticle = (Tnow + 273) * ENERGY_UNIT
         effectiveERef.current = ePerParticle
+        coolGraphERef.current = graphE             // plot this on the graph (hysteresis path)
       } else if (cm === 'fastHeat' || cm === 'slowHeat') {
         coolingFrameRef.current += rampAdvance
         const dur = cm === 'fastHeat' ? FAST_COOL_FRAMES : SLOW_COOL_FRAMES
         const t   = Math.min(1, coolingFrameRef.current / dur)
         ePerParticle = rampEnergyLinearInContent(coolingStartERef.current, 1500, t, na2oPctRef.current, hcPlateauRef.current)
         effectiveERef.current = ePerParticle
+        coolGraphERef.current = null   // heating uses the normal energy axis
       } else {
         ePerParticle = (energyValRef.current + 273) * ENERGY_UNIT   // energyValRef tracks meltTemp
         effectiveERef.current = ePerParticle
+        coolGraphERef.current = null   // hold uses the normal energy axis
       }
 
       // Propagate slider-equivalent energy value to parent (throttled to ~10×/s by wall-clock)
@@ -972,6 +1019,18 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
         lastRampSyncRef.current = nowMs
         onTempUpdateRef.current(Math.round(ePerParticle / ENERGY_UNIT - 273))
       }
+
+      // "Longer cooled bonds": while cooling, ramp the rigid-bond rest length +10% over the first
+      // 300°C of the drop (9→9.9, 12→13.2), then hold it (latched). Reset to normal on reheat.
+      // The longer bonds expand the network into the voids so the solid reads as continuous.
+      if (longerBondsRef.current && (cm === 'fast' || cm === 'slow')) {
+        const startT = coolingStartERef.current / ENERGY_UNIT - 273
+        const curT   = ePerParticle / ENERGY_UNIT - 273
+        setCoolBondScale(1 + 0.1 * Math.max(0, Math.min(1, (startT - curT) / 300)))
+      } else if (cm === 'fastHeat' || cm === 'slowHeat' || !longerBondsRef.current) {
+        setCoolBondScale(1)   // reheating, or feature off → normal bond lengths
+      }
+      // (cm === null hold: leave the latched value in place)
 
       const phys = physRef.current
       // activeRef gate: everything above this point is cheap bookkeeping that must
@@ -1048,7 +1107,9 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
         if (histFrameRef.current >= 3) {
           histFrameRef.current = 0
           const targetTempC = Math.max(0, Math.round(ePerParticle / ENERGY_UNIT - 273))
-          const xVal = energyContent(targetTempC, na2oPctRef.current, hcPlateauRef.current)
+          // During cooling, plot the cooling-energy path (constant-rate x, latent-heat slope);
+          // otherwise the normal energy axis. This draws the heat-up/cool-down hysteresis loop.
+          const xVal = coolGraphERef.current ?? energyContent(targetTempC, na2oPctRef.current, hcPlateauRef.current)
           histRef.current.push({ e: xVal, t: targetTempC })
         }
 

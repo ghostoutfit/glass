@@ -442,15 +442,19 @@ export function stepNaBlobSprings(naBlobs, dt, boxAngle = 0, temp = 1000) {
 
 // Convert at most one eligible silicate grain per call to avoid batch-conversion
 // of many grains in a single frame, which causes a jarring visual volume jump.
-export function convertLargeNaGrains(grains, naBlobs) {
-  for (let i = grains.length - 1; i >= 0; i--) {
+// maxConvert: live callers pass 1 (one conversion per frame, spread over time). The heat-up
+// replay passes a larger number so one coarse pass stands in for many live frames — otherwise
+// the 1-per-call cap throttles the replay and mixed melting never catches up.
+export function convertLargeNaGrains(grains, naBlobs, maxConvert = 1) {
+  let converted = 0
+  for (let i = grains.length - 1; i >= 0 && converted < maxConvert; i--) {
     const g = grains[i]
     if (g.type !== 'silicate' || g.r < NA_BLOB_CONVERT_R) continue
     grains.splice(i, 1)
     const blob = makeNaBlob(g.x, g.y, g.vx, g.vy, g.r)
     for (const p of blob.particles) grains.push(p)
     naBlobs.push(blob)
-    return  // one per frame — spread the conversion over multiple frames
+    converted++
   }
 }
 
@@ -524,7 +528,10 @@ export function checkNaBlobMerges(naBlobs, mct, grains, temp = 1000) {
 // All types activate at 700°C; sand is slower (weaker Si-O bond probability).
 // Proximity is checked against the nearest sub-circle, not the phantom center, so
 // grains trapped inside the hull (where the center may have drifted) are caught.
-export function absorbNearbyGrains(grains, naBlobs, temp) {
+// maxPerBlob: live callers pass 1 (one absorption per blob per frame). The heat-up replay
+// passes a larger number so one coarse pass absorbs the grains many live frames would — the
+// 1-per-blob cap otherwise throttles the replay and the blobs never grow to the live size.
+export function absorbNearbyGrains(grains, naBlobs, temp, maxPerBlob = 1) {
   if (!naBlobs.length) return
   const tempF    = Math.max(0, Math.min(1, (temp - 700) / 500))
   const naSilProb = tempF * 0.008
@@ -532,11 +539,11 @@ export function absorbNearbyGrains(grains, naBlobs, temp) {
   if (naSilProb <= 0) return
 
   for (const blob of naBlobs) {
-    let absorbed = false
+    let absorbCount = 0
     const ctr0 = blob.particles[0]
     const aabbR = blob.blobR + NA_R + 3 + 2  // conservative AABB radius
 
-    for (let i = grains.length - 1; i >= 0 && !absorbed; i--) {
+    for (let i = grains.length - 1; i >= 0 && absorbCount < maxPerBlob; i--) {
       const g = grains[i]
       const isSand  = g.type === 'sand'
       const isNaSil = g.type === 'na' || g.type === 'silicate'
@@ -584,7 +591,7 @@ export function absorbNearbyGrains(grains, naBlobs, temp) {
         }
       }
 
-      absorbed = true
+      absorbCount++
     }
   }
 }

@@ -76,8 +76,12 @@ let _sevCooldown       = 60    // steps a severed Si-O bond can't reform (counts
 let _sevPullK          = 0.01  // ion→O pull strength after severance (0 = off)
 let _freedTau          = 0.01  // Langevin coupling for freed atoms; lower = longer straight runs, same temperature
 let _bondStiffMult     = 1.0   // multiplier on intact rigid-bond restoring spring (above projection cutoff)
+let _coolBondScale     = 1.0   // "Longer cooled bonds": scales rigid-bond rest length during cooling (1.0→1.1 over 300°C), latched. Set from CompositionView; reset to 1 on reheat.
 let _motifStrength    = 0.004 // max motif-bias spring k at full cooling ramp (see applyMotifBias)
-let _motifAlign       = 0.5   // slow cool: fraction of the neighbour-orientation offset each Si's slots adopt (0–1)
+let _motifAlign       = 0.85  // slow cool: fraction of the neighbour-orientation offset each Si's slots adopt (0–1). Higher = domains spread into a bigger hex crystal. (fast cool passes align=0)
+// Console-tunable knobs (crystallinity tuning). Guarded so headless Node (meltStructure after a
+// slow cool) doesn't throw on a missing `window`; defaults apply when unset.
+const _win = typeof window !== 'undefined' ? window : {}
 export const setSioHotMult         = v => { _sioHotMult = v }
 export const setFreeAttractSiOMult  = v => { _freeAttractSiOMult = v }
 export const setSioExclMult        = v => { _sioExclMult = v }
@@ -101,6 +105,7 @@ export const setSevCooldown        = v => { _sevCooldown = v }
 export const setSevPullK           = v => { _sevPullK = v }
 export const setFreedTau           = v => { _freedTau = v }
 export const setBondStiffMult      = v => { _bondStiffMult = v }
+export const setCoolBondScale      = v => { _coolBondScale = v }
 export const setMotifStrength      = v => { _motifStrength = v }
 export const setMotifAlign         = v => { _motifAlign = v }
 export const setSiSiRepR0          = v => { PAIR_TABLE[0][0].r0 = v }
@@ -375,6 +380,41 @@ function applyMotifForces(particles, motif, k, r0, fx, fy) {
     fx[o]  += kb * mx;        fy[o]  += kb * my
     fx[s1] -= kb * mx * 0.5;  fy[s1] -= kb * my * 0.5
     fx[s2] -= kb * mx * 0.5;  fy[s2] -= kb * my * 0.5
+  }
+}
+
+// Harmonic O–Si–O angle-bending toward 120° (the trigonal unit that tiles into the hex
+// network). Applied on slow cool with a stiffness that ramps up as the melt cools, so the
+// bonds progressively "lock" to crystal angles and hexagons emerge — the direct geometric
+// constraint the soft orientation motif only approximates. Standard angle force (forces on the
+// two O plus an equal-and-opposite reaction on the Si, so momentum and the thermostat stay
+// honest). `siO` maps each Si → its bonded O list. theta0 = 120°.
+const ANGLE_120 = (2 * Math.PI) / 3
+function applyAngleBend(particles, siO, k, fx, fy) {
+  for (const [s, os] of siO) {
+    if (os.length < 2) continue
+    const ps = particles[s]
+    for (let i = 0; i < os.length; i++) {
+      for (let j = i + 1; j < os.length; j++) {
+        const a = os[i], b = os[j]
+        const ax = miDx(particles[a].x - ps.x), ay = miDy(particles[a].y - ps.y)
+        const bx = miDx(particles[b].x - ps.x), by = miDy(particles[b].y - ps.y)
+        const l1 = Math.hypot(ax, ay), l2 = Math.hypot(bx, by)
+        if (l1 < 1e-4 || l2 < 1e-4) continue
+        const inv1 = 1 / l1, inv2 = 1 / l2
+        const u1x = ax * inv1, u1y = ay * inv1, u2x = bx * inv2, u2y = by * inv2
+        let c = u1x * u2x + u1y * u2y
+        if (c > 1) c = 1; else if (c < -1) c = -1
+        const sinT = Math.max(1e-3, Math.sqrt(1 - c * c))
+        const theta = Math.acos(c)
+        const coef = k * (theta - ANGLE_120) / sinT   // → pushes theta toward 120°
+        const fax = coef * inv1 * (u2x - c * u1x), fay = coef * inv1 * (u2y - c * u1y)
+        const fbx = coef * inv2 * (u1x - c * u2x), fby = coef * inv2 * (u1y - c * u2y)
+        fx[a] += fax;  fy[a] += fay
+        fx[b] += fbx;  fy[b] += fby
+        fx[s] -= fax + fbx;  fy[s] -= fay + fby
+      }
+    }
   }
 }
 
@@ -724,8 +764,15 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
   // Fast: half strength, no orientation alignment → amorphous. Slow: full + alignment → crystal.
   const isCooling = coolingMode === 'fast' || coolingMode === 'slow'
   const motifRamp = isCooling ? Math.max(0, Math.min(1, (1500 - totalEnergy) / 900)) : 0
-  const motifK    = motifRamp * _motifStrength * (coolingMode === 'slow' ? 1 : 0.5)
+  // Slow cool drives the Si hex motif harder than fast (× slowBoost vs × 0.5) so clean
+  // 6-ring crystal domains actually form instead of a slightly-tidier melt. Live-tunable via
+  // window._slowCrystBoost; lock the value here once dialed in.
+  const slowBoost = coolingMode === 'slow' ? (_win._slowCrystBoost ?? 4.0) : 0.5
+  const motifK    = motifRamp * _motifStrength * slowBoost
   let motif = null
+  let orderedSi = null
+  let crystalO = null   // O atoms belonging to the ordered Si network — the negative sites Na seeks
+  let siOMap = null   // Si → bonded-O list, reused by the slow-cool angle-bend
   if (motifK > 0) {
     const siO = new Map(), oSi = new Map()
     for (const key of siOPairs) {
@@ -735,9 +782,31 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
       if (!oSi.has(o)) oSi.set(o, []); oSi.get(o).push(s)
     }
     motif = buildMotif(particles, siO, oSi, coolingMode === 'slow' ? _motifAlign : 0)
+    // Si atoms that belong to an ordered motif site — the crystallising network that rejects Na.
+    orderedSi = motif.sites.map(st => st.s)
+    // The O atoms of that ordered network — the negatively-charged crystal sites Na is drawn to.
+    const crO = new Set()
+    for (const st of motif.sites) for (const o of st.os) crO.add(o)
+    crystalO = Array.from(crO)
+    siOMap = siO
   }
   phys.motifK = motifK
-
+  // Crystallisation lock temperature (°C): above it, no net bonds form (see reform/re-integration
+  // gates below) so the melt stays mobile; below it bonds form and the geometry builds.
+  const CRYST_LOCK = _win._crystLockTemp ?? 1050
+  // O–Si–O angle-bending stiffness for slow cool: zero above CRYST_LOCK, ramping to full by
+  // 650°C — the rigid hex geometry builds inside the mobile 1050→650 window and is set by 650.
+  // Live-tunable via window._angleBendK.
+  const geoRamp    = Math.max(0, Math.min(1, (CRYST_LOCK - totalEnergy) / (CRYST_LOCK - 650)))
+  const angleBendK = coolingMode === 'slow' ? (_win._angleBendK ?? 0.3) * geoRamp : 0
+  // Na-Na repulsion (normally r0=35, spreads Na through the melt) fades as the melt cools, so
+  // Na can cluster together against the crystal boundaries instead of staying apart. Scales the
+  // Na-Na repulsive force from full (hot, ≥CRYST_LOCK) down to _naNaCoolFloor (default 0) by
+  // ~500°C. Slow cool only. Live-tunable via window._naNaCoolFloor.
+  const naNaFloor  = _win._naNaCoolFloor ?? 0.0
+  const naNaScale  = coolingMode === 'slow'
+    ? naNaFloor + (1 - naNaFloor) * Math.max(0, Math.min(1, (totalEnergy - 500) / (CRYST_LOCK - 500)))
+    : 1
   // Freed atoms' extra thermal kick fades to lattice level as cooling passes 1300 → 600°C,
   // otherwise freed atoms run ~12× hotter than the target and can never freeze.
   const coolFrac     = isCooling ? Math.max(0, Math.min(1, (1300 - totalEnergy) / 700)) : 0
@@ -778,7 +847,9 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
         // Na/Ca ions disperse. Gate on coolingMode so ions can re-bond during cooling.
         // Si-O is always exempt — freed Si must be able to re-bond with freed O.
         if (!(isFreedPair && d >= spec.r0 && !isSiOSpec && coolingMode === null)) {
-          const f = spec.k * (d - spec.r0)
+          // Na-Na repulsion fades on cooling (naNaScale) so Na can cluster near the crystal.
+          const naNaMul = (spec.repOnly && pi.typeId === 2 && pj.typeId === 2) ? naNaScale : 1
+          const f = spec.k * (d - spec.r0) * naNaMul
           fx[i] += f * nx;  fy[i] += f * ny
           fx[j] -= f * nx;  fy[j] -= f * ny
         }
@@ -881,6 +952,70 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
   for (let sub = 0; sub < SUBSTEPS; sub++) {
     fx.fill(0); fy.fill(0)
     if (motif) applyMotifForces(particles, motif, motifK, PREFERRED['O-Si'].r0, fx, fy)
+    if (angleBendK > 0 && siOMap) applyAngleBend(particles, siOMap, angleBendK, fx, fy)
+
+    // ── Na rejection (slow cool) ──────────────────────────────────
+    // A growing silica crystal expels the Na modifier, which doesn't fit the hex lattice.
+    // Each freed Na is pushed away from nearby ORDERED Si (motif-site Si) so it migrates to
+    // grain boundaries while the hex rings form. The push RAMPS DOWN as the melt cools (full
+    // near CRYST_LOCK, zero by ~500°C) so that once the Si crystal is built, Na is free to
+    // drift back in and grab onto the crystal's edge O atoms — the structure tightens up as it
+    // cools instead of Na being held off forever. Live-tunable via window._naRejectK / _naRejectRange.
+    if (coolingMode === 'slow' && orderedSi && orderedSi.length) {
+      const rejectRamp = Math.max(0, Math.min(1, (totalEnergy - 500) / (CRYST_LOCK - 500)))
+      const kR    = (_win._naRejectK ?? 0.08) * rejectRamp
+      const range = _win._naRejectRange ?? 26
+      if (kR > 0) {
+        for (let a = 0; a < n; a++) {
+          const pa = particles[a]
+          if (pa.typeId !== 2 || !latticeFreed[a]) continue   // freed Na only
+          for (let s = 0; s < orderedSi.length; s++) {
+            const j = orderedSi[s], pj = particles[j]
+            const dx = miDx(pa.x - pj.x)
+            if (dx > range || dx < -range) continue
+            const dy = miDy(pa.y - pj.y)
+            if (dy > range || dy < -range) continue
+            const d2 = dx * dx + dy * dy
+            if (d2 >= range * range || d2 < 1e-6) continue
+            const d  = Math.sqrt(d2), nx = dx / d, ny = dy / d
+            const f  = kR * (range - d) / range   // push Na out, equal-opposite on Si
+            fx[a] += f * nx;  fy[a] += f * ny
+            fx[j] -= f * nx;  fy[j] -= f * ny
+          }
+        }
+      }
+    }
+
+    // ── Na → crystal-O attraction (slow cool) ─────────────────────
+    // Na⁺ is drawn to the negatively-charged O of the already-formed crystal (charge balance at
+    // the non-bridging oxygens). This grows as the melt cools (zero near CRYST_LOCK, full by
+    // ~500°C — the inverse of the rejection above), so once the Si hex is built Na migrates in
+    // and decorates the crystal's O sites. Longer range than the plain Na-O spring so Na can
+    // actually find the crystal. Live-tunable via window._naAttractK / window._naAttractRange.
+    if (coolingMode === 'slow' && crystalO && crystalO.length) {
+      const attrRamp = Math.max(0, Math.min(1, (CRYST_LOCK - totalEnergy) / (CRYST_LOCK - 500)))
+      const kA    = (_win._naAttractK ?? 0.03) * attrRamp
+      const rangeA = _win._naAttractRange ?? 32
+      if (kA > 0) {
+        for (let a = 0; a < n; a++) {
+          const pa = particles[a]
+          if (pa.typeId !== 2 || !latticeFreed[a]) continue   // freed Na only
+          for (let s = 0; s < crystalO.length; s++) {
+            const j = crystalO[s], pj = particles[j]
+            const dx = miDx(pj.x - pa.x)   // toward the O
+            if (dx > rangeA || dx < -rangeA) continue
+            const dy = miDy(pj.y - pa.y)
+            if (dy > rangeA || dy < -rangeA) continue
+            const d2 = dx * dx + dy * dy
+            if (d2 >= rangeA * rangeA || d2 < 1e-6) continue
+            const d  = Math.sqrt(d2), nx = dx / d, ny = dy / d
+            const f  = kA * (rangeA - d) / rangeA   // pull Na toward crystal O
+            fx[a] += f * nx;  fy[a] += f * ny
+            fx[j] -= f * nx;  fy[j] -= f * ny
+          }
+        }
+      }
+    }
     // Severance pull-off: the ion that severed a Si-O bond drags that bond's O out of the
     // network (Na⁺/Ca²⁺ grabbing a non-bridging O). Stops once they're at ion-O bond length.
     if (_sevPullK > 0 && phys.sevPulls?.size) {
@@ -916,13 +1051,14 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
         const pi = particles[rb.i], pj = particles[rb.j]
         const spec = PAIR_TABLE[pi.typeId][pj.typeId]
         if (!spec) continue
+        const r0e = rb.r0 * _coolBondScale   // "Longer cooled bonds" lengthens the rest length
         const dx = miDx(pj.x - pi.x), dy = miDy(pj.y - pi.y)
         const d  = Math.hypot(dx, dy)
-        if (d <= rb.r0 || d < 0.01) continue   // stretch only; compression handled by hard-sphere
+        if (d <= r0e || d < 0.01) continue   // stretch only; compression handled by hard-sphere
         const stiff   = _bondStiffMult
-        const capture = spec.r0 * (spec === PAIR_TABLE[0][1] ? sioMult : spec.mult)
+        const capture = spec.r0 * _coolBondScale * (spec === PAIR_TABLE[0][1] ? sioMult : spec.mult)
         const kEff    = d < capture ? spec.k * Math.max(0, stiff - 1) : spec.k * stiff
-        const f = kEff * (d - rb.r0)
+        const f = kEff * (d - r0e)
         const nx = dx / d, ny = dy / d
         fx[rb.i] += f * nx;  fy[rb.i] += f * ny
         fx[rb.j] -= f * nx;  fy[rb.j] -= f * ny
@@ -1050,11 +1186,12 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
         if (rb.broken) continue
         if (totalEnergy > rb.projectionCutoff) continue
         const pi = particles[rb.i], pj = particles[rb.j]
+        const r0e = rb.r0 * _coolBondScale   // "Longer cooled bonds" lengthens the rest length
         const dx = miDx(pj.x - pi.x), dy = miDy(pj.y - pi.y)
         const d  = Math.hypot(dx, dy)
-        if (d < 0.01 || d > rb.r0 * 3) continue
+        if (d < 0.01 || d > r0e * 3) continue
         const nx   = dx / d,       ny   = dy / d
-        const half = (d - rb.r0) * 0.5
+        const half = (d - r0e) * 0.5
         pi.x += nx * half;  pi.y += ny * half
         pj.x -= nx * half;  pj.y -= ny * half
         const dvn = (pi.vx - pj.vx) * nx + (pi.vy - pj.vy) * ny
@@ -1172,7 +1309,10 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
       if (!rb.broken) {
         if (rb.avgStrain > effThreshold) rb.broken = true
       } else {
-        if (strain <= _reformStrain && !(rb.severFrames > 0)) rb.broken = false
+        // No net bond formation above the crystallisation lock temperature during cooling —
+        // keeps the melt mobile until it is cool enough to crystallise (see CRYST_LOCK).
+        const allowReform = coolingMode === null || totalEnergy < CRYST_LOCK
+        if (allowReform && strain <= _reformStrain && !(rb.severFrames > 0)) rb.broken = false
       }
       if (rb.broken !== wasBroken) {
         const half = (rb.bondDepth ?? 0) / 2
@@ -1238,7 +1378,11 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
   // ratchets freed-atom count upward forever: every transient full-break frees an atom permanently
   // (latticeFreed is sticky) with no path back. The ≥N-bonds-for-M-frames test self-regulates —
   // genuinely molten atoms never hold N bonds that long, so they stay freed above the cutoff.
-  const reintActive = coolingMode !== null || totalEnergy < sioProjCutoff(phys.sio2Pct ?? 70)
+  // Re-integration (locking atoms into the solid) is gated to the crystallisation window: during
+  // cooling it only fires below CRYST_LOCK, so atoms stay mobile above it and don't freeze the
+  // scrambled melt layout at high T (the bug that made slow look like fast).
+  const reintGate = coolingMode !== null ? CRYST_LOCK : sioProjCutoff(phys.sio2Pct ?? 70)
+  const reintActive = totalEnergy < reintGate
   if (phys.latticeFreed && phys.rigidBonds && phys.stableBondFrames && reintActive) {
     const sbf = phys.stableBondFrames
     const rrf = phys.reintRampFrames
@@ -1247,7 +1391,11 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
       if (!phys.latticeFreed[i]) continue
       // Live bonds (rigid or dynamic) — rigid bonds only reform with original partners,
       // which are long gone after a melt, so intactCount alone never re-integrates anyone.
-      const need = Math.min(_reintBondN, COORD_TARGET[particles[i].typeId])
+      // Slow cool demands FULL coordination before an atom locks (Si needs its 3rd O, not
+      // just 2), so rings actually close into hexagons instead of freezing under-coordinated.
+      // Other modes keep _reintBondN. Live-tunable via window._slowReintBondN.
+      const reintN = coolingMode === 'slow' ? (_win._slowReintBondN ?? 3) : _reintBondN
+      const need = Math.min(reintN, COORD_TARGET[particles[i].typeId])
       if (liveCount[i] >= need) {
         sbf[i]++
         if (sbf[i] >= _reintFrameM) {

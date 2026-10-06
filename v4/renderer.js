@@ -391,7 +391,9 @@ export function drawScene(canvas, phys, {
         : (() => { const r0s = Math.hypot(pj.x0 - pi.x0, pj.y0 - pi.y0); return r0s > 0.5 ? (Math.hypot(sdx, sdy) - r0s) / r0s : (bond.strain ?? 0) })()
       // Thermal fade: the pink shows bond energy, which falls with temperature. Fade to grey
       // across 750→500°C (gray below 500), independent of strain, so a cooled solid is grey.
-      const thermPink = Math.max(0, Math.min(1, ((targetTempC ?? 999) - 500) / 250))
+      // Bonds fade from pink (energetic) to grey across 650→500°C — the window where the
+      // slow-cool structure is already built and just settles into the cold solid.
+      const thermPink = Math.max(0, Math.min(1, ((targetTempC ?? 999) - 500) / 150))
       const [cr, cg, cb] = strainColorRGB(smoothStrain * thermPink, bond.currentBreakStrain ?? 0.25, darkMode)
       fctx.fillStyle = `rgb(${cr},${cg},${cb})`
       // Adjust pj to the minimum-image position relative to pi for lens drawing

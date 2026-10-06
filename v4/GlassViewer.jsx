@@ -291,57 +291,75 @@ function energyContentKJ(T, na2oPct, plateau) {
 // temperature steps (one pass standing in for `probMult` live frames) and still reach the same
 // melt degree ~10× faster — the O(n²) merge pass is the bottleneck. Live callers omit it (=1),
 // so live behaviour is unchanged.
+// Macro melt fraction (0–1): share of the original grains now molten (absorbed into blobs).
+// This is the Bulk-tab counterpart to the particle tab's broken-bond fraction (fBroken).
+function macroMeltFrac(phys) {
+  if (!phys?.sandParticles || !phys.nGrainOriginal) return 0
+  let sub = 0
+  for (const g of phys.sandParticles) if (g.type === 'na-sub') sub++
+  return sub / phys.nGrainOriginal
+}
+// Target macro melt fraction at temperature T — a tunable curve meant to OVERLAY the particle
+// tab's fBroken(T) so the two tabs agree. Macro melt is driven TOWARD this and then stops (it
+// doesn't creep), so a paused temperature holds a fixed, matched melt degree. Live-tunable via
+// window._macroMeltOnset / _macroMeltFull.
+function macroMeltTarget(T) {
+  const onset = window._macroMeltOnset ?? 700
+  const full  = window._macroMeltFull  ?? 1300
+  const u = Math.max(0, Math.min(1, (T - onset) / Math.max(1, full - onset)))
+  return u * u * (3 - 2 * u)   // smoothstep
+}
+
 function meldSandFrame(phys, temp, isSoda, probMult = 1) {
   if (!(isSoda && phys.sandParticles && phys.nNaOriginal > 0)) return
   const tempFactor = Math.max(0, Math.min(1, (temp - 700) / 500))
   const meldFrac   = Math.min(1, phys.meldCount / phys.nNaOriginal)
   const meldProb   = Math.min(1, (tempFactor >= 1 ? 1 : tempFactor * 0.015 * (1 + meldFrac * 5)) * probMult)
+  // Scale the per-call ABSOLUTE caps by probMult so one coarse replay pass does the work of
+  // ~probMult live frames — without this the 1-per-frame/3-per-frame caps throttle the replay
+  // and mixed melting never catches up (live-callers pass probMult=1, so caps stay 1/3/1).
+  const cap = Math.max(1, Math.round(probMult))
   if (meldProb > 0) phys.meldCount += mergeSodaGrains(phys.sandParticles, meldProb)
-  convertLargeNaGrains(phys.sandParticles, phys.naBlobs)
-  absorbNearbyGrains(phys.sandParticles, phys.naBlobs, temp)
+  convertLargeNaGrains(phys.sandParticles, phys.naBlobs, cap)
+  absorbNearbyGrains(phys.sandParticles, phys.naBlobs, temp, cap)
   const siFactor  = Math.max(0, Math.min(1, (temp - 1000) / 200))
   const silFactor = Math.max(0, Math.min(1, (temp - 1200) / 200))
-  mergeSilicateGrains(phys.sandParticles, Math.min(1, siFactor * 0.004 * probMult), Math.min(1, silFactor * 0.004 * probMult), 3)
+  mergeSilicateGrains(phys.sandParticles, Math.min(1, siFactor * 0.004 * probMult), Math.min(1, silFactor * 0.004 * probMult), Math.max(3, Math.round(3 * probMult)))
 }
 
-// Secret heat-up catch-up: when the bulk tab becomes visible after heating happened on the
-// (frozen) Particles tab, replay a canonical 25→target ramp so the sand reaches the melt
-// state it WOULD have if heated live. Ramp rate matches the live integrator
-// (BOX_HEAT_RATE/60 °C per merge frame ÷ heat capacity). Settling (the expensive 10-pass
-// PBD) runs only every `settleEvery` merges; a short burst settles at the end. Chunked at
-// `meldsPerTick` per visual frame so the UI stays responsive (~a few tenths of a second).
-const BOX_HEAT_RATE = 200   // matches meltSim/boxSim baseRate (°C·frames/sec equivalent)
-function runHeatReplayChunk(phys, s, HS, box, isSoda) {
+// Heat-up catch-up: when the Bulk tab becomes visible after the temperature changed on the
+// (frozen) Particles tab, fast-forward the melt to the degree it WOULD have reached — melting
+// toward macroMeltTarget(targetTemp) behind the loading overlay, then revealing the result.
+// Internal temperature the meld chain runs at during catch-up. Melt PROGRESSION is decoupled
+// from the actual temperature (the chain's own 700/1000/1200 °C gates would otherwise stall it
+// at moderate temps); macroMeltTarget(T) alone decides HOW MUCH melts, so the catch-up reaches
+// exactly the same melt degree the live loop targets at that temperature.
+const MELT_DRIVE_TEMP = 1500
+function runHeatReplayChunk(phys, s, HS, box, isSoda, fast = false) {
   const R = s.heatReplay
-  // Coarse temperature steps (`stepDeg` °C per merge pass) with probability scaling — the
-  // O(n²) merge pass is the bottleneck, so one scaled pass stands in for ~`k` live frames,
-  // cutting a full 25→1500 catch-up from ~3 s to ~0.3 s with the same melt degree (verified
-  // headless). Time-boxed per tick so the few hundred ms spread smoothly over a handful of
-  // frames. Settle (the 10-pass PBD) runs every `settleEvery` passes to keep positions sane.
-  const stepDeg     = window._replayStepDeg    ?? 10
   const settleEvery = window._replaySettleEvery ?? 4
-  const budgetMs    = window._replayMsPerTick   ?? 12
+  // Hidden behind the loading overlay → run flat-out (big budget) so it finishes in 1–2 frames.
+  const budgetMs    = fast ? (window._replayFastMsPerTick ?? 90) : (window._replayMsPerTick ?? 12)
+  const soakK       = window._replaySoakK   ?? 5
+  const soakCap     = window._replaySoakCap ?? 8000   // safety iteration cap (frame-equivalents)
+  const goal = isSoda ? macroMeltTarget(R.target) : 0  // melt to the temperature's matched degree
+  if (R.soak === undefined) R.soak = 0
   const deadline = performance.now() + budgetMs
-  while (R.t < R.target && performance.now() < deadline) {
-    const dT = Math.min(stepDeg, R.target - R.t)
-    R.t += dT
-    const liveDegPerFrame = (BOX_HEAT_RATE / 60) / meltHeatCapacity(R.t, R.na2o, R.plateau)
-    const k = liveDegPerFrame > 0 ? dT / liveDegPerFrame : 1
-    meldSandFrame(phys, R.t, isSoda, k)
+  while (goal > 0 && macroMeltFrac(phys) < goal && R.soak < soakCap && performance.now() < deadline) {
+    meldSandFrame(phys, MELT_DRIVE_TEMP, isSoda, soakK)
     if (R.frame % settleEvery === 0) {
-      stepNaBlobSprings(phys.naBlobs, FIXED_DT, box.boxAngle, R.t)
+      stepNaBlobSprings(phys.naBlobs, FIXED_DT, box.boxAngle, R.target)
       stepSandPhysics(phys.sandParticles, FIXED_DT, HS, box.boxAngle)
-      checkNaBlobMerges(phys.naBlobs, phys.blobMct, phys.sandParticles, R.t)
+      checkNaBlobMerges(phys.naBlobs, phys.blobMct, phys.sandParticles, R.target)
     }
     R.frame++
+    R.soak += soakK
   }
-  if (R.t >= R.target) {
+  if (goal <= 0 || macroMeltFrac(phys) >= goal || R.soak >= soakCap) {
     for (let i = 0; i < 12; i++) stepSandPhysics(phys.sandParticles, FIXED_DT, HS, box.boxAngle)
     s.temp = R.target
     s.heatReplay = null
-  } else {
-    s.temp = R.t   // so the render shows the catch-up melting in progress
-  }
+  }  // else: still melting — stays hidden behind the loading overlay until it reaches the goal
 }
 
 const COOL_MIN_TEMP = 1500   // Slow/Fast Cool only engage from a full melt
@@ -442,6 +460,7 @@ export default function GlassViewer() {
   const [showCharge, setShowCharge] = useState(false)
   const [showField,  setShowField]  = useState(true)
   const [showDev,    setShowDev]    = useState(false)
+  const [longerCooledBonds, setLongerCooledBonds] = useState(true)   // dev: lengthen bonds +10% while cooling
 
   // Performance tier. detectPerformanceTier() is a stub returning null until the
   // real speed test is dropped in (see the top of this file), so this currently
@@ -555,6 +574,12 @@ export default function GlassViewer() {
   const [boxState,        setBoxState]        = useState('sand')
   const [sandPaused,      setSandPaused]      = useState(false)
   const [sandDevMode,     setSandDevMode]     = useState(false)
+  const [boxLoading,      setBoxLoading]      = useState(false)   // loading overlay during heat-up replay
+  const boxLoadingRef     = useRef(false)
+  const [boxMeltFrac,     setBoxMeltFrac]     = useState(0)       // macro melt fraction (dev stat)
+  const lastMeltStatRef   = useRef(0)
+  const [macroMeltOnset,  setMacroMeltOnset]  = useState(700)     // macro melt target curve: onset °C
+  const [macroMeltFull,   setMacroMeltFull]   = useState(1300)    // macro melt target curve: full-melt °C
 
   const boxCanvasRef  = useRef(null)
   const miniCanvasRef = useRef(null)
@@ -1034,6 +1059,7 @@ export default function GlassViewer() {
             const _grains = Math.round((pr.nGrains ?? 1800) * (capsRef.current.sandGrainScale ?? 1))
             phys.sandParticles = initSandParticles(HS, s.multiRadius, pr.na2o, _grains)
             phys.nNaOriginal = phys.sandParticles.filter(g => g.type === 'na').length
+            phys.nGrainOriginal = phys.sandParticles.length   // denominator for macroMeltFrac
             phys.meldCount = 0
             phys.naBlobs = []
             phys.blobMct = {}
@@ -1078,7 +1104,16 @@ export default function GlassViewer() {
             for (let i = 0; i < 20; i++) stepSandPhysics(phys.sandParticles, FIXED_DT, HS, box.boxAngle)
           }
           if (s.heatReplay) {
-            runHeatReplayChunk(phys, s, HS, box, presetIdRef.current === 'soda')
+            // Hide the catch-up melt behind a "Melting…" overlay and run it flat-out, then
+            // reveal the finished result. The first frame only turns the overlay ON (and skips
+            // the heavy compute) so it paints before we block the thread melting.
+            if (!boxLoadingRef.current) {
+              boxLoadingRef.current = true
+              setBoxLoading(true)
+            } else {
+              runHeatReplayChunk(phys, s, HS, box, presetIdRef.current === 'soda', true)
+              if (!s.heatReplay) { boxLoadingRef.current = false; setBoxLoading(false) }
+            }
           } else if (!s.sandPaused) {
             phys.accumulator += elapsed
             while (phys.accumulator >= FIXED_DT) {
@@ -1087,9 +1122,16 @@ export default function GlassViewer() {
               checkNaBlobMerges(phys.naBlobs, phys.blobMct, phys.sandParticles, s.temp)
               phys.accumulator -= FIXED_DT
             }
-            // Na₂O grain merging — once per visual frame, only for soda preset.
-            // Shared with the heat-up replay so both paths melt identically.
-            meldSandFrame(phys, s.temp, presetIdRef.current === 'soda')
+            // Na₂O grain merging — only while the macro melt is BELOW the temperature's target,
+            // so it melts up to the matched degree and then holds (no creeping when paused).
+            if (macroMeltFrac(phys) < macroMeltTarget(s.temp)) {
+              meldSandFrame(phys, MELT_DRIVE_TEMP, presetIdRef.current === 'soda')
+            }
+            // Throttled stats for the dev panel (compare against particle fBroken to calibrate).
+            if (ts - lastMeltStatRef.current > 200) {
+              lastMeltStatRef.current = ts
+              setBoxMeltFrac(macroMeltFrac(phys))
+            }
           }
         } else {
           // Freeze/unfreeze transition
@@ -1812,7 +1854,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 08</span>
+                  }}>Field Test Version 26</span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),
@@ -2118,6 +2160,27 @@ export default function GlassViewer() {
             {showDev && <>
               <div className="viz-section-title">Dev (type "dev" to hide)</div>
               <label style={{display:'flex', alignItems:'center', gap:6, fontSize:12, color:'#ccc', marginBottom:8, cursor:'pointer'}}>
+                <input type="checkbox" checked={longerCooledBonds} onChange={e => setLongerCooledBonds(e.target.checked)} style={{accentColor:'#88ddaa'}} />
+                Longer cooled bonds
+              </label>
+
+              {/* ── Macro-vs-particle melt match ── tune onset/full so Macro tracks Particle. */}
+              <div style={{fontSize:11, color:'#aaa', marginBottom:4, letterSpacing:'0.06em'}}>── Melt match ──</div>
+              <div style={{fontFamily:'monospace', fontSize:11, background:'rgba(255,220,80,0.06)', border:'1px solid rgba(255,220,80,0.18)', borderRadius:4, padding:'5px 8px', marginBottom:6}}>
+                <div>particle (fBroken): <span style={{color:'#88ddaa'}}>{(fBroken * 100).toFixed(0)}%</span></div>
+                <div>macro (melted):     <span style={{color:'#e0a060'}}>{(boxMeltFrac * 100).toFixed(0)}%</span></div>
+                <div style={{color:'#888'}}>target @ {Math.round(meltLocalTemp)}°C: {(macroMeltTarget(meltLocalTemp) * 100).toFixed(0)}%</div>
+              </div>
+              <div style={{fontSize:11, color:'#888', marginBottom:2}}>Macro melt onset °C: <span style={{color:'#a090d0'}}>{macroMeltOnset}</span></div>
+              <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                min={400} max={1100} step={10} value={macroMeltOnset}
+                onChange={e => { const v = +e.target.value; setMacroMeltOnset(v); window._macroMeltOnset = v }} />
+              <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Macro melt full °C: <span style={{color:'#a090d0'}}>{macroMeltFull}</span></div>
+              <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                min={900} max={1800} step={10} value={macroMeltFull}
+                onChange={e => { const v = +e.target.value; setMacroMeltFull(v); window._macroMeltFull = v }} />
+
+              <label style={{display:'flex', alignItems:'center', gap:6, fontSize:12, color:'#ccc', marginBottom:8, cursor:'pointer'}}>
                 <input type="checkbox" checked={showMiniView} onChange={e => setShowMiniView(e.target.checked)} style={{accentColor:'#88ddaa'}} />
                 Mini photo view
               </label>
@@ -2365,15 +2428,31 @@ export default function GlassViewer() {
               cumulativeEnergyRef={meltCumulativeEnergyRef}
               graphXMaxRef={graphXMaxRef}
               replayFrame={replayFrame} onReplayReady={handleReplayReady}
-              darkMode={darkMode} showCharge={showCharge} chargeLite={chargeLite} showField={effectiveShowField} fieldBlur={fieldBlur} interpolate={interpolate}
+              darkMode={darkMode} showCharge={showCharge} chargeLite={chargeLite} showField={effectiveShowField} fieldBlur={fieldBlur} interpolate={interpolate} longerCooledBonds={longerCooledBonds}
               atomColorMode={atomColorMode} showBrokenBonds={showBrokenBonds} showLiveStats={showLiveStats}
               useEmaStrain={useEmaStrain} hcPlateau={hcPlateau} targetTempLine={gotoTargetTemp}
             />
           </div>
 
           {/* Glass canvas — always mounted so RAF never restarts */}
-          <div style={{ display: tab==='glass' ? 'flex' : 'none', flexDirection:'column', width:'100%', height:'100%' }}>
+          <div style={{ display: tab==='glass' ? 'flex' : 'none', flexDirection:'column', width:'100%', height:'100%', position:'relative' }}>
             <canvas ref={boxCanvasRef} style={{ flex:1, width:'100%', display:'block' }} />
+            {/* Catch-up melt runs hidden behind this; it clears when the melt is ready. */}
+            {boxLoading && (
+              <div style={{
+                position:'absolute', inset:0, display:'flex', flexDirection:'column',
+                alignItems:'center', justifyContent:'center', gap:14,
+                background: darkMode ? '#0a0806' : '#e8e3da', zIndex:5,
+              }}>
+                <div style={{
+                  width:34, height:34, borderRadius:'50%',
+                  border:'3px solid rgba(200,140,60,0.25)', borderTopColor:'#e08030',
+                  animation:'glassspin 0.8s linear infinite',
+                }} />
+                <div style={{ fontSize:13, letterSpacing:'0.08em', textTransform:'uppercase', color:'#c8945a' }}>Loading…</div>
+                <style>{`@keyframes glassspin { to { transform: rotate(360deg) } }`}</style>
+              </div>
+            )}
           </div>
         </div>
         {/* Right spacer: matches blob-box visual column below the toolbar */}
