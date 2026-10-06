@@ -36,6 +36,12 @@ function allocGrid(HS) {
 }
 
 function rebuildGrid(grains, HS) {
+  // Grains grow past N_GRAINS as Na blobs add sub-circles; grow the node arrays to match or the
+  // grid silently drops the overflow and later reads undefined grains (crash).
+  if (!_nodeG || _nodeG.length < grains.length) {
+    _nodeG   = new Int32Array(grains.length)
+    _nodeNxt = new Int32Array(grains.length)
+  }
   _gridH.fill(-1)
   for (let i = 0; i < grains.length; i++) {
     const g  = grains[i]
@@ -593,5 +599,43 @@ export function absorbNearbyGrains(grains, naBlobs, temp, maxPerBlob = 1) {
 
       absorbCount++
     }
+  }
+}
+
+// ── Candidate-state snapshots ─────────────────────────────────────────────────
+// Serialize/restore the full sand state (grains + Na blobs) so precomputed "candidate
+// states" at benchmark temperatures can be loaded instantly instead of re-melting. Blob
+// particle/spring references are stored as INDICES into the grain array, so the result is
+// plain JSON (survives localStorage) and rebuilds into a live, identity-correct graph.
+export function snapshotSand(phys) {
+  const grains = phys.sandParticles ?? []
+  const idx = new Map()
+  for (let i = 0; i < grains.length; i++) idx.set(grains[i], i)
+  return {
+    grains: grains.map(g => ({ ...g })),
+    blobs: (phys.naBlobs ?? []).map(b => ({
+      id: b.id, blobR: b.blobR,
+      partIdx: b.particles.map(p => idx.get(p)),
+      orbIdx:  (b.orbs ?? b.particles.filter(p => p.type === 'na-sub')).map(p => idx.get(p)),
+      springs: b.springs.map(s => ({ a: idx.get(s.a), b: idx.get(s.b), rest: s.rest, k: s.k })),
+    })),
+    meldCount: phys.meldCount ?? 0,
+    nNaOriginal: phys.nNaOriginal ?? 0,
+    nGrainOriginal: phys.nGrainOriginal ?? grains.length,
+  }
+}
+
+export function restoreSand(snap) {
+  const grains = snap.grains.map(g => ({ ...g }))
+  const naBlobs = snap.blobs.map(b => {
+    const particles = b.partIdx.map(i => grains[i])
+    const orbs = b.orbIdx.map(i => grains[i])
+    const springs = b.springs.map(s => ({ a: grains[s.a], b: grains[s.b], rest: s.rest, k: s.k }))
+    if (b.id >= _blobId) _blobId = b.id + 1   // keep future blob ids from colliding
+    return { id: b.id, blobR: b.blobR, particles, springs, orbs }
+  })
+  return {
+    sandParticles: grains, naBlobs, blobMct: {},
+    meldCount: snap.meldCount, nNaOriginal: snap.nNaOriginal, nGrainOriginal: snap.nGrainOriginal,
   }
 }

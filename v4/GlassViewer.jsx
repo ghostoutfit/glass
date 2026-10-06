@@ -3,7 +3,7 @@ import CompositionView from './CompositionView'
 import { initParticles, stepPhysics, stepFloorPhysics, PARTICLE_R, FIXED_DT, T_RIGID, freezeParticles, syncParticlesToRigidBody, stepRigidBody } from './glassPhysics.js'
 import { setSioHotMult, setFreeAttractSiOMult, setSioExclMult, setCrystJiggleMult, setBreakStrain, setReformStrain, setCrystAnchorK, setLiberateFrac, setSioK, setNaOK, setNaAnchorK, setNaLiberateFrac, setNaBreakStrain, setLatticeSpeedMult, setFreedSpeedMult, setReintBondN, setReintFrameM, setBreakStrainSpread, setSevTriggerDist, setFeedbackGainMult, setSiSiRepR0, setMotifStrength, setMotifAlign, setBondStiffMult, setFreedTau, setNaNaRepR0, setSevCooldown, setSevPullK } from './meltPhysics.js'
 import { setVisualScale, setMaxDpr, effectiveDpr } from './renderer.js'
-import { initSandParticles, stepSandPhysics, mergeSodaGrains, mergeSilicateGrains, convertLargeNaGrains, stepNaBlobSprings, checkNaBlobMerges, absorbNearbyGrains, GRAIN_R as SAND_GRAIN_R, NA_BLOB_R_CTR } from './sandPhysics.js'
+import { initSandParticles, stepSandPhysics, mergeSodaGrains, mergeSilicateGrains, convertLargeNaGrains, stepNaBlobSprings, checkNaBlobMerges, absorbNearbyGrains, snapshotSand, restoreSand, GRAIN_R as SAND_GRAIN_R, NA_BLOB_R_CTR } from './sandPhysics.js'
 import './GlassViewer.css'
 
 // ── ScrubSlider — machined-thumb horizontal scrubber (matches concrete v4) ──
@@ -362,6 +362,56 @@ function runHeatReplayChunk(phys, s, HS, box, isSoda, fast = false) {
   }  // else: still melting — stays hidden behind the loading overlay until it reaches the goal
 }
 
+// ── Candidate states (Bulk tab) ───────────────────────────────────────────────
+// Benchmark temperatures at which we store a precomputed melted sand state. Dense through the
+// melt band (700–1600), sparse at the cold end. Because macro melt is irreversible, these are
+// a HEATING track: each is melted to macroMeltTarget(T). Cooling reuses the peak-temperature
+// snapshot (melt doesn't reverse; only the blob rigidity changes, and that's applied live).
+const BULK_BENCH_TEMPS = [25, 700, 850, 1000, 1150, 1300, 1450, 1600]
+const GEN_MELD_K = 20   // coarse meld during generation (the grid grows to fit, so this is safe)
+// Resumable generator state so the work can be time-boxed across frames with a progress bar.
+function makeBulkGenState(HS, na2o, nGrains, multiRadius) {
+  const phys = { sandParticles: initSandParticles(HS, multiRadius, na2o, nGrains), naBlobs: [], blobMct: {}, meldCount: 0 }
+  phys.nNaOriginal    = phys.sandParticles.filter(g => g.type === 'na').length
+  phys.nGrainOriginal = phys.sandParticles.length
+  for (let i = 0; i < 20; i++) stepSandPhysics(phys.sandParticles, FIXED_DT, HS, 0)
+  return { phys, HS, na2o, benchIdx: 0, frame: 0, out: [], done: false }
+}
+// Advance generation for up to budgetMs; snapshots each benchmark once its melt goal is reached
+// OR the melt saturates (a benchmark's goal can exceed the physical ceiling, e.g. 100% target
+// vs ~90% achievable — stall detection snapshots the saturated state and moves on so it can't hang).
+function stepBulkGen(G, budgetMs = 60) {
+  const deadline = performance.now() + budgetMs
+  while (!G.done && performance.now() < deadline) {
+    const T = BULK_BENCH_TEMPS[G.benchIdx]
+    const goal = G.na2o > 0 ? macroMeltTarget(T) : 0
+    const frac = macroMeltFrac(G.phys)
+    if (frac > (G.benchBest ?? -1) + 0.002) { G.benchBest = frac; G.benchStall = 0 }
+    else G.benchStall = (G.benchStall ?? 0) + 1
+    if (frac >= goal || G.benchStall > 150) {       // reached target, or saturated
+      for (let i = 0; i < 12; i++) stepSandPhysics(G.phys.sandParticles, FIXED_DT, G.HS, 0)
+      G.out.push({ temp: T, snap: snapshotSand(G.phys) })
+      G.benchBest = -1; G.benchStall = 0
+      if (++G.benchIdx >= BULK_BENCH_TEMPS.length) G.done = true
+      continue
+    }
+    meldSandFrame(G.phys, MELT_DRIVE_TEMP, G.na2o > 0, GEN_MELD_K)
+    if (G.frame % 6 === 0) {
+      stepNaBlobSprings(G.phys.naBlobs, FIXED_DT, 0, T)
+      stepSandPhysics(G.phys.sandParticles, FIXED_DT, G.HS, 0)
+      checkNaBlobMerges(G.phys.naBlobs, G.phys.blobMct, G.phys.sandParticles, T)
+    }
+    G.frame++
+  }
+  return G.benchIdx / BULK_BENCH_TEMPS.length   // progress 0..1
+}
+// Nearest candidate at or below `temp` (melt is irreversible, so never pick a hotter one).
+function pickBulkCandidate(cands, temp) {
+  let best = cands[0]
+  for (const c of cands) if (c.temp <= temp && c.temp >= best.temp) best = c
+  return best
+}
+
 const COOL_MIN_TEMP = 1500   // Slow/Fast Cool only engage from a full melt
 const ENERGY_KJ_MULT = 0.2   // arbitrary display scale: energy content × this → kJ readout
 
@@ -578,6 +628,8 @@ export default function GlassViewer() {
   const boxLoadingRef     = useRef(false)
   const [boxMeltFrac,     setBoxMeltFrac]     = useState(0)       // macro melt fraction (dev stat)
   const lastMeltStatRef   = useRef(0)
+  const bulkCandidatesRef = useRef([])                            // precomputed Bulk melt snapshots
+  const [genProgress,     setGenProgress]     = useState(null)    // candidate generation 0..1 (null = idle)
   const [macroMeltOnset,  setMacroMeltOnset]  = useState(700)     // macro melt target curve: onset °C
   const [macroMeltFull,   setMacroMeltFull]   = useState(1300)    // macro melt target curve: full-melt °C
 
@@ -679,6 +731,24 @@ export default function GlassViewer() {
     heat:    meltHeatModeRef.current,
   }), [])
 
+  // Regenerate the Bulk candidate states (melted snapshots at benchmark temps). Time-boxed
+  // across frames with a progress bar so it never freezes the tab. In-memory (too large for
+  // localStorage); rerun this after tweaking the melt physics.
+  const regenCandidates = useCallback(() => {
+    if (genProgress !== null) return
+    const pr = PRESETS.find(x => x.id === presetIdRef.current) ?? PRESETS[0]
+    const HS = BOX_SIZE / 2
+    const grains = Math.round((pr.nGrains ?? 1800) * (capsRef.current.sandGrainScale ?? 1))
+    const G = makeBulkGenState(HS, pr.na2o, grains, boxSimRef.current.multiRadius)
+    setGenProgress(0)
+    const tick = () => {
+      const p = stepBulkGen(G, 60)
+      if (G.done) { bulkCandidatesRef.current = G.out; setGenProgress(null) }
+      else { setGenProgress(p); requestAnimationFrame(tick) }
+    }
+    requestAnimationFrame(tick)
+  }, [genProgress])
+
   const prevTabRef = useRef('melt')
   useEffect(() => {
     const prev = prevTabRef.current
@@ -719,12 +789,18 @@ export default function GlassViewer() {
         phys.prevTime      = null
       }
       // Heating happened on the (frozen) Particles tab, so the freshly-rebuilt sand
-      // starts cold and un-melted. Flag a secret heat-up replay: frame() fast-forwards a
-      // 25→current-temp ramp so the sand arrives melted to the right degree. (Cooling is
-      // handled separately later.)
+      // Catch-up for the freshly-rebuilt cold sand. If candidate states exist, restore the
+      // nearest precomputed snapshot instantly (frame() picks it up). Otherwise fall back to
+      // the heat-up replay that melts from cold behind the loading overlay.
       const s = boxSimRef.current
       s.heatReplay = null
-      s.heatReplayPending = now.temp > 30
+      s.heatReplayPending = false
+      s.restoreTemp = null
+      if (bulkCandidatesRef.current.length && now.temp > 30) {
+        s.restoreTemp = now.temp           // instant: load nearest candidate at/below this temp
+      } else {
+        s.heatReplayPending = now.temp > 30
+      }
     }
   }, [tab, currentCond])
 
@@ -1051,6 +1127,18 @@ export default function GlassViewer() {
         const bcx = canvas.width / 2, bcy = canvas.height / 2
 
         if (s.boxState === 'sand') {
+          // Instant candidate-state catch-up: restore the nearest precomputed melted snapshot
+          // at/below the current (peak) temperature, rather than melting from cold.
+          if (s.restoreTemp != null && bulkCandidatesRef.current.length) {
+            const cand = pickBulkCandidate(bulkCandidatesRef.current, s.restoreTemp)
+            const r = restoreSand(cand.snap)
+            phys.sandParticles = r.sandParticles
+            phys.naBlobs = r.naBlobs; phys.blobMct = r.blobMct
+            phys.meldCount = r.meldCount; phys.nNaOriginal = r.nNaOriginal; phys.nGrainOriginal = r.nGrainOriginal
+            phys.accumulator = 0; phys.prevTime = ts
+            s.temp = s.restoreTemp; s.restoreTemp = null
+            s.heatReplay = null; s.heatReplayPending = false
+          }
           if (!phys.sandParticles) {
             const pr = PRESETS.find(x => x.id === presetIdRef.current) ?? PRESETS[0]
             // Grain count is scaled by the quality tier. stepSandPhysics' 10-pass PBD
@@ -1854,7 +1942,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 26</span>
+                  }}>Field Test Version 27</span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),
@@ -2159,6 +2247,12 @@ export default function GlassViewer() {
 
             {showDev && <>
               <div className="viz-section-title">Dev (type "dev" to hide)</div>
+              <button onClick={regenCandidates} disabled={genProgress !== null}
+                style={{width:'100%', padding:'6px 8px', marginBottom:8, fontSize:12, cursor: genProgress!==null?'default':'pointer',
+                  background: genProgress!==null ? '#3a3a2a' : '#4a3a6a', color:'#e0d0ff',
+                  border:'1px solid #6a5a9a', borderRadius:4}}>
+                {genProgress !== null ? `Generating candidate states… ${Math.round(genProgress*100)}%` : 'Regenerate candidate states'}
+              </button>
               <label style={{display:'flex', alignItems:'center', gap:6, fontSize:12, color:'#ccc', marginBottom:8, cursor:'pointer'}}>
                 <input type="checkbox" checked={longerCooledBonds} onChange={e => setLongerCooledBonds(e.target.checked)} style={{accentColor:'#88ddaa'}} />
                 Longer cooled bonds
@@ -2438,7 +2532,7 @@ export default function GlassViewer() {
           <div style={{ display: tab==='glass' ? 'flex' : 'none', flexDirection:'column', width:'100%', height:'100%', position:'relative' }}>
             <canvas ref={boxCanvasRef} style={{ flex:1, width:'100%', display:'block' }} />
             {/* Catch-up melt runs hidden behind this; it clears when the melt is ready. */}
-            {boxLoading && (
+            {(boxLoading || genProgress !== null) && (
               <div style={{
                 position:'absolute', inset:0, display:'flex', flexDirection:'column',
                 alignItems:'center', justifyContent:'center', gap:14,
@@ -2449,7 +2543,9 @@ export default function GlassViewer() {
                   border:'3px solid rgba(200,140,60,0.25)', borderTopColor:'#e08030',
                   animation:'glassspin 0.8s linear infinite',
                 }} />
-                <div style={{ fontSize:13, letterSpacing:'0.08em', textTransform:'uppercase', color:'#c8945a' }}>Loading…</div>
+                <div style={{ fontSize:13, letterSpacing:'0.08em', textTransform:'uppercase', color:'#c8945a' }}>
+                  {genProgress !== null ? `Generating… ${Math.round(genProgress*100)}%` : 'Loading…'}
+                </div>
                 <style>{`@keyframes glassspin { to { transform: rotate(360deg) } }`}</style>
               </div>
             )}
