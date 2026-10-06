@@ -1775,3 +1775,39 @@ export function meltStructure(phys) {
   console.table(Object.fromEntries(Object.entries(row).map(([k, v]) => [k, { value: v }])))
   return row
 }
+
+// ── Candidate-state snapshots (melt tab) ──────────────────────────────────────
+// Capture/restore the melt physics so precomputed crystalline / amorphous / partially-melted
+// states can be loaded instantly for cross-tab catch-up. Static per-atom fields (type, r,
+// chunk) are left in place; only the dynamic physics is written. Transient per-step data
+// (phys.bonds, intactCount) rebuilds on the next step.
+export function snapshotMelt(phys) {
+  const P = phys.particles
+  return {
+    n: phys.n,
+    pos: P.map(p => [p.x, p.y, p.vx, p.vy, p.x0, p.y0, p.px, p.py]),
+    latticeFreed:      Array.from(phys.latticeFreed ?? []),
+    stableBondFrames:  Array.from(phys.stableBondFrames ?? []),
+    reintRampFrames:   Array.from(phys.reintRampFrames ?? []),
+    originalBondCount: Array.from(phys.originalBondCount ?? []),
+    rigidBonds: (phys.rigidBonds ?? []).map(b => ({ ...b })),
+    hasBeenMelted: phys.hasBeenMelted, sioMult: phys.sioMult,
+  }
+}
+// Restore a snapshot into an existing phys of the SAME composition (static fields already match).
+export function restoreMelt(phys, snap) {
+  const P = phys.particles
+  for (let i = 0; i < P.length && i < snap.pos.length; i++) {
+    const a = snap.pos[i], p = P[i]
+    p.x = a[0]; p.y = a[1]; p.vx = a[2]; p.vy = a[3]; p.x0 = a[4]; p.y0 = a[5]; p.px = a[6]; p.py = a[7]
+  }
+  phys.latticeFreed      = Uint8Array.from(snap.latticeFreed)
+  phys.stableBondFrames  = Int16Array.from(snap.stableBondFrames)
+  phys.reintRampFrames   = Int16Array.from(snap.reintRampFrames)
+  phys.originalBondCount = Uint8Array.from(snap.originalBondCount)
+  phys.rigidBonds = snap.rigidBonds.map(b => ({ ...b }))
+  phys.rigidKeys  = new Set(phys.rigidBonds.map(b => b.i * phys.n + b.j))
+  phys.hasBeenMelted = snap.hasBeenMelted
+  phys.sioMult = snap.sioMult
+  phys.bonds = []   // rebuilt on the next step
+}
