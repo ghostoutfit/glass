@@ -107,14 +107,24 @@ function GlassAtomIcon({ type, iconR, showCharge = false, darkMode = true }) {
   return (
     <div style={{ width: total, height: total, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
       <div style={{
+        position: 'relative',
         width: diam, height: diam, borderRadius: '50%',
         background: fill,
         boxShadow: [
           `0 0 0 0.5px ${darkMode ? 'rgba(255,255,255,0.40)' : 'rgba(0,0,0,0.25)'}`,
           `0 0 ${iconR * 1.5}px ${fill}99`,
-          showCharge && rgb ? `0 0 ${iconR * 2.5}px rgba(${rgb},0.55)` : null,
-        ].filter(Boolean).join(', '),
-      }} />
+        ].join(', '),
+      }}>
+        {/* Charge halo drawn ON TOP of the atom (matches the particle-canvas charge overlay),
+            not as an outer box-shadow behind it. */}
+        {showCharge && rgb && (
+          <div style={{
+            position: 'absolute', inset: `-${iconR * 0.6}px`, borderRadius: '50%',
+            background: `radial-gradient(circle, rgba(${rgb},0.80) 0%, rgba(${rgb},0.45) 42%, rgba(${rgb},0) 72%)`,
+            pointerEvents: 'none',
+          }} />
+        )}
+      </div>
     </div>
   )
 }
@@ -2028,7 +2038,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 37</span>
+                  }}>Field Test Version 38</span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),
@@ -2138,26 +2148,31 @@ export default function GlassViewer() {
                 </div>
               </div>
               <span style={{fontSize:11, fontWeight:700, letterSpacing:'0.09em', textTransform:'uppercase', color:'rgba(30,45,60,0.65)'}}>Visuals</span>
-              {/* Particles: Count / Graph / Charge / Field. Bulk: Graph / Rotate. */}
-              <div style={{display:'flex', alignItems:'center', gap:3}}>
+              {/* 2×2 grid, fixed cell size so positions are stable across tabs:
+                     [ Count  ] [ Graph ]          [        ] [ Graph  ]
+                     [ Charge ] [ Field ]   →Bulk  [ Rotate ] [        ]
+                  Graph stays top-right on both tabs; Charge's cell becomes Rotate on Bulk. */}
+              <div style={{display:'grid', gridTemplateColumns:'repeat(2, 60px)', gap:3}}>
                 {tab === 'glass' ? (<>
+                  <span />
                   <button className={`action-btn replay-btn${showGraph?' active':''}`}
-                    style={{padding:'3px 10px'}} onClick={() => setShowGraph(f => !f)}>Graph</button>
+                    style={{padding:'3px 0', width:'100%'}} onClick={() => setShowGraph(f => !f)}>Graph</button>
                   <button className={`action-btn replay-btn${autoRotate?' active':''}`}
-                    style={{padding:'3px 10px'}}
+                    style={{padding:'3px 0', width:'100%'}}
                     onClick={() => {
                       const v = !autoRotate; setAutoRotate(v); boxSimRef.current.autoRotate = v
                       if (!v && boxSimRef.current.box) boxSimRef.current.box.boxAngularVel = 0
                     }}>Rotate</button>
+                  <span />
                 </>) : (<>
                   <button className={`action-btn replay-btn${showCount?' active':''}`}
-                    style={{padding:'3px 10px'}} onClick={() => setShowCount(f => !f)}>Count</button>
+                    style={{padding:'3px 0', width:'100%'}} onClick={() => setShowCount(f => !f)}>Count</button>
                   <button className={`action-btn replay-btn${showGraph?' active':''}`}
-                    style={{padding:'3px 10px'}} onClick={() => setShowGraph(f => !f)}>Graph</button>
+                    style={{padding:'3px 0', width:'100%'}} onClick={() => setShowGraph(f => !f)}>Graph</button>
                   <button className={`action-btn replay-btn${showCharge?' active':''}`}
-                    style={{padding:'3px 10px'}} onClick={() => setShowCharge(f => !f)}>Charge</button>
+                    style={{padding:'3px 0', width:'100%'}} onClick={() => setShowCharge(f => !f)}>Charge</button>
                   <button className={`action-btn replay-btn${effectiveShowField?' active':''}`}
-                    style={{padding:'3px 10px'}}
+                    style={{padding:'3px 0', width:'100%'}}
                     title={fieldBlur ? undefined : 'Simple quality: strain field drawn crisp (no blur)'}
                     onClick={() => setShowField(f => !f)}>Field</button>
                 </>)}
