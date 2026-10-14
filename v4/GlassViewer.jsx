@@ -1310,8 +1310,20 @@ export default function GlassViewer() {
           ctx.fillRect(-HS, -HS, BOX_SIZE, BOX_SIZE)
 
           const _isSoda   = presetIdRef.current === 'soda'
-          // Na grains switch to metaball rendering at 700°C so they merge visually
-          const _naAsMeta = _isSoda && s.temp >= 700
+          // Unified-glass crossfade. Driven by macroMeltFrac (fraction of grains absorbed into Na
+          // blobs), which PERSISTS through cooling — so the glass stays unified once formed instead
+          // of reverting to discrete grains below 700 °C the way the old `temp >= 700` gate did.
+          //   unify     — fades discrete grains out and the single metaball body in (Plan A)
+          //   glassLook  — adds translucency + a refractive rim/specular, only as it cools (Plan B)
+          // Tunables (window): _glassFull melt-frac for full unify; _glassFadeLate 0 = unify during
+          // melt, 1 = unify only on cooling (keeps grains visibly dissolving); _glassHalo metaball
+          // source radius ×; _glassClear max transparency when cold.
+          const _mMelt    = Math.min(1, macroMeltFrac(phys) / (window._glassFull ?? 0.35))
+          const _coolness = Math.max(0, Math.min(1, (900 - s.temp) / 700))
+          const _late     = window._glassFadeLate ?? 0.7
+          const _uRaw     = _mMelt * (1 - _late + _late * _coolness)
+          const unify     = _isSoda ? _uRaw * _uRaw * (3 - 2 * _uRaw) : 0  // smoothstep
+          const glassLook = unify * _coolness
 
           // Heat glow pass — pure sand only. Decorative; dropped on 'simple' (a
           // full-canvas blur up to 12 px plus a per-grain arc fill, every frame).
@@ -1327,12 +1339,14 @@ export default function GlassViewer() {
             }
           }
 
-          // Individual grain render — sand hexagons, plus Na circles when below melt temp
+          // Individual grain render — all grains (sand hexagons, Na/silicate circles). Faded out
+          // by `unify` as the mass turns to glass, so the cooled solid stops showing drips. Silicate
+          // is drawn here too, so it no longer vanishes on cooling below 700 °C.
+          ctx.save()
+          ctx.globalAlpha = Math.max(0, 1 - unify)
           ctx.lineWidth = 0.5
           for (const g of phys.sandParticles) {
             if (g.type === 'na-sub' || g.type === 'na-ctr') continue
-            if (_naAsMeta && g.type === 'na') continue
-            if (g.type === 'silicate') continue
             if (heatT > 0) {
               const blend = heatT * heatT * 0.6
               ctx.fillStyle = `rgb(${Math.round(g._cr + (hotR - g._cr) * blend)},${Math.round(g._cg + (hotG - g._cg) * blend)},${Math.round(g._cb + (hotB - g._cb) * blend)})`
@@ -1340,7 +1354,7 @@ export default function GlassViewer() {
               ctx.fillStyle = g.color
             }
             ctx.beginPath()
-            if (g.type === 'na') {
+            if (g.type === 'na' || g.type === 'silicate') {
               ctx.arc(g.x, g.y, g.r, 0, Math.PI * 2)
               ctx.closePath(); ctx.fill()
               ctx.strokeStyle = 'rgba(160,210,240,0.35)'; ctx.stroke()
@@ -1354,6 +1368,7 @@ export default function GlassViewer() {
               ctx.strokeStyle = `rgba(0,0,0,0.35)`; ctx.stroke()
             }
           }
+          ctx.restore()
 
           if (heatT > 0 && !_isSoda && capsRef.current.blobGlowBlur) {
             ctx.filter = `blur(${Math.round(heatT * 12)}px)`
@@ -1363,54 +1378,45 @@ export default function GlassViewer() {
             ctx.globalCompositeOperation = 'source-over'
           }
 
-          // Na and silicate grains: hard-edged solid circles, same gradual heat tint as sand
-          if (_naAsMeta) {
-            if (heatT > 0) {
-              const blend = heatT * heatT * 0.6
-              ctx.fillStyle = `rgb(${Math.round(220 + (hotR - 220) * blend)},${Math.round(238 + (hotG - 238) * blend)},${Math.round(248 * (1 - blend))})`
-            } else {
-              ctx.fillStyle = '#dceef8'
-            }
-            for (const g of phys.sandParticles) {
-              if (g.type !== 'na' && g.type !== 'silicate') continue
-              ctx.beginPath(); ctx.arc(g.x, g.y, g.r, 0, Math.PI * 2); ctx.fill()
-            }
-          }
+          // ── Unified glass body (Plan A + B) ──────────────────────────────────────────────
+          // One metaball over ALL grains (not just Na sub-circles), faded in by `unify`, so the
+          // cooled solid reads as a single continuous mass instead of a scatter of grains. Reuses
+          // the existing contrast+threshold pipeline — still exactly one getImageData per frame.
+          // As it cools (glassLook→1) the body turns translucent (the tinted background shows
+          // through) and grows a bright refractive rim + specular highlight. Hot molten mass keeps
+          // the glowing opaque look.
+          if (_isSoda && unify > 0.001) {
+            const _halo = window._glassHalo ?? 7
 
-          // Na₂O blobs — solid fill + separate transparent glow overlay (same as sand)
-          if (phys.naBlobs?.length) {
-            const t = Math.max(0, Math.min(1, (s.temp - 700) / 500))
-
-            // Pass 1A: sub-circle halos (additive) → crisp binary mask in smctx2
+            // Pass 1A: additive halos from EVERY grain → blobby field in smctx
             smctx.globalCompositeOperation = 'source-over'
             smctx.clearRect(0, 0, BOX_SIZE, BOX_SIZE)
             smctx.globalCompositeOperation = 'lighter'
-            for (const blob of phys.naBlobs) {
-              for (const p of blob.particles) {
-                if (p.type !== 'na-sub') continue
-                const px = p.x + HS, py = p.y + HS
-                const br = p.r * 8
-                const grad = smctx.createRadialGradient(px, py, 0, px, py, br)
-                grad.addColorStop(0,   'rgba(255,255,255,1.0)')
-                grad.addColorStop(0.3, 'rgba(220,220,220,0.65)')
-                grad.addColorStop(1,   'rgba(0,0,0,0)')
-                smctx.fillStyle = grad
-                smctx.beginPath(); smctx.arc(px, py, br, 0, Math.PI * 2); smctx.fill()
-              }
+            for (const g of phys.sandParticles) {
+              if (g.type === 'na-ctr') continue
+              const gx = g.x + HS, gy = g.y + HS
+              const br = g.r * _halo
+              const grad = smctx.createRadialGradient(gx, gy, 0, gx, gy, br)
+              grad.addColorStop(0,   'rgba(255,255,255,1.0)')
+              grad.addColorStop(0.3, 'rgba(220,220,220,0.65)')
+              grad.addColorStop(1,   'rgba(0,0,0,0)')
+              smctx.fillStyle = grad
+              smctx.beginPath(); smctx.arc(gx, gy, br, 0, Math.PI * 2); smctx.fill()
             }
             smctx.globalCompositeOperation = 'source-over'
 
-            // Pass 1B: contrast → near-binary mask, then hard-threshold alpha to true binary
+            // Pass 1B: contrast → near-binary, then hard-threshold alpha → crisp mask (sandMeltCrisp)
             smctx2.clearRect(0, 0, BOX_SIZE, BOX_SIZE)
             smctx2.filter = 'contrast(9999)'
             smctx2.drawImage(sandMeltOff, 0, 0)
             smctx2.filter = 'none'
             const imgD = smctx2.getImageData(0, 0, BOX_SIZE, BOX_SIZE)
-            const px = imgD.data
-            for (let i = 3; i < px.length; i += 4) px[i] = px[i] > 64 ? 255 : 0
+            const pxd = imgD.data
+            for (let i = 3; i < pxd.length; i += 4) pxd[i] = pxd[i] > 64 ? 255 : 0
             smctx2.putImageData(imgD, 0, 0)
 
-            // Pass 1C: colorize mask with solid fill color → draw onto scene
+            // Pass 1C: body — colorize the mask, translucent as it cools, draw at `unify`.
+            const bodyAlpha = 1 - (window._glassClear ?? 0.5) * glassLook
             smctx.clearRect(0, 0, BOX_SIZE, BOX_SIZE)
             smctx.drawImage(sandMeltCrisp, 0, 0)
             smctx.save()
@@ -1418,15 +1424,16 @@ export default function GlassViewer() {
             smctx.fillStyle = blobFillColor(s.temp)
             smctx.fillRect(0, 0, BOX_SIZE, BOX_SIZE)
             smctx.restore()
+            ctx.save()
+            ctx.globalAlpha = unify * bodyAlpha
             ctx.drawImage(sandMeltOff, -HS, -HS, BOX_SIZE, BOX_SIZE)
+            ctx.restore()
 
-            // Pass 2: soft glow overlay — blur the crisp mask, tint at low alpha, draw
-            // lighter. Decorative; dropped on 'simple'. The crisp metaball mask itself is
-            // kept, so the melt still reads as a blob.
-            if (capsRef.current.blobGlowBlur) {
-              const glowBlur = Math.round(4 + 6 * t)
+            // Molten heat glow — only while hot; fades out as it solidifies. Decorative ('simple' skips).
+            if (capsRef.current.blobGlowBlur && _coolness < 0.98) {
+              const gt = 1 - _coolness
               smctx.clearRect(0, 0, BOX_SIZE, BOX_SIZE)
-              smctx.filter = `blur(${glowBlur}px)`
+              smctx.filter = `blur(${Math.round(4 + 6 * gt)}px)`
               smctx.drawImage(sandMeltCrisp, 0, 0)
               smctx.filter = 'none'
               smctx.save()
@@ -1434,31 +1441,51 @@ export default function GlassViewer() {
               smctx.fillStyle = blobGlowColor(s.temp)
               smctx.fillRect(0, 0, BOX_SIZE, BOX_SIZE)
               smctx.restore()
+              ctx.save()
               ctx.globalCompositeOperation = 'lighter'
+              ctx.globalAlpha = unify * gt
               ctx.drawImage(sandMeltOff, -HS, -HS, BOX_SIZE, BOX_SIZE)
-              ctx.globalCompositeOperation = 'source-over'
+              ctx.restore()
             }
 
-            // Pass 3: same heat glow as pure sand, using blob sub-circles as sources.
-            // Decorative; dropped on 'simple'.
-            if (heatT > 0 && capsRef.current.blobGlowBlur) {
-              const gc = sandGlowOff.getContext('2d')
-              gc.clearRect(0, 0, BOX_SIZE, BOX_SIZE)
-              gc.globalCompositeOperation = 'lighter'
-              gc.fillStyle = `rgba(255,${glowG},0,${heatT * heatT * 0.35})`
-              for (const blob of phys.naBlobs) {
-                for (const p of blob.particles) {
-                  if (p.type !== 'na-sub') continue
-                  gc.beginPath()
-                  gc.arc(p.x + HS, p.y + HS, p.r * 1.8, 0, Math.PI * 2)
-                  gc.fill()
-                }
-              }
-              ctx.filter = `blur(${Math.round(heatT * 12)}px)`
+            // Glassy edge (Plan B): a bright refractive rim + a specular highlight, both from the
+            // crisp mask, scaled by glassLook so they only appear as the melt cools into clear
+            // glass. Detailed tier only. sandGlowOff is free here (soda skips the pure-sand glow).
+            if (capsRef.current.blobGlowBlur && glassLook > 0.02) {
+              // Rim = crisp mask minus a ~2 px erosion (mask re-drawn offset with destination-out).
+              const rc = sandGlowOff.getContext('2d')
+              rc.globalCompositeOperation = 'source-over'
+              rc.clearRect(0, 0, BOX_SIZE, BOX_SIZE)
+              rc.drawImage(sandMeltCrisp, 0, 0)
+              rc.globalCompositeOperation = 'destination-out'
+              for (const [dx, dy] of [[-2,0],[2,0],[0,-2],[0,2],[-1,-1],[1,1],[1,-1],[-1,1]]) rc.drawImage(sandMeltCrisp, dx, dy)
+              rc.globalCompositeOperation = 'source-in'
+              rc.fillStyle = 'rgba(255,255,255,1)'
+              rc.fillRect(0, 0, BOX_SIZE, BOX_SIZE)
+              rc.globalCompositeOperation = 'source-over'
+              ctx.save()
               ctx.globalCompositeOperation = 'lighter'
+              ctx.globalAlpha = glassLook * 0.85
               ctx.drawImage(sandGlowOff, -HS, -HS, BOX_SIZE, BOX_SIZE)
-              ctx.filter = 'none'
-              ctx.globalCompositeOperation = 'source-over'
+              ctx.restore()
+
+              // Specular: one soft radial sprite clipped to the body, upper-left (fixed light dir).
+              smctx.clearRect(0, 0, BOX_SIZE, BOX_SIZE)
+              smctx.drawImage(sandMeltCrisp, 0, 0)
+              smctx.save()
+              smctx.globalCompositeOperation = 'source-in'
+              const sg = smctx.createRadialGradient(BOX_SIZE * 0.36, BOX_SIZE * 0.30, 0, BOX_SIZE * 0.36, BOX_SIZE * 0.30, BOX_SIZE * 0.30)
+              sg.addColorStop(0,   'rgba(255,255,255,0.9)')
+              sg.addColorStop(0.5, 'rgba(255,255,255,0.18)')
+              sg.addColorStop(1,   'rgba(255,255,255,0)')
+              smctx.fillStyle = sg
+              smctx.fillRect(0, 0, BOX_SIZE, BOX_SIZE)
+              smctx.restore()
+              ctx.save()
+              ctx.globalCompositeOperation = 'lighter'
+              ctx.globalAlpha = glassLook * 0.7
+              ctx.drawImage(sandMeltOff, -HS, -HS, BOX_SIZE, BOX_SIZE)
+              ctx.restore()
             }
 
             window._naBlobs = phys.naBlobs
@@ -2001,7 +2028,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 36</span>
+                  }}>Field Test Version 37</span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),
