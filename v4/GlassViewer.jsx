@@ -212,6 +212,27 @@ function glassColor(tempC) {
   return `rgb(${r},${g},${b})`
 }
 
+// Tint the box's whole background by the active energy flow: slightly reddish while heating,
+// light bluish while cooling, settling back to the neutral base (gray for the blob, dark for
+// sand) as it fully cools or goes idle. The wash grows with temperature, so a cooling solid
+// fades from bluish back to gray as it reaches the floor. `heat`/`cool` are the mode strings
+// (truthy while that flow is active), already gated off at the temperature limits by the caller.
+function boxBgTint(baseR, baseG, baseB, heat, cool, tempC) {
+  let r = baseR, g = baseG, b = baseB
+  if (heat) {
+    const k = 0.12 + 0.20 * Math.max(0, Math.min(1, (tempC - 300) / 1200))
+    r = baseR + (255 - baseR) * k
+    g = baseG * (1 - k * 0.5)
+    b = baseB * (1 - k * 0.6)
+  } else if (cool) {
+    const k = 0.10 + 0.22 * Math.max(0, Math.min(1, (tempC - 35) / 1200))
+    r = baseR * (1 - k * 0.45)
+    g = baseG + (235 - baseG) * k * 0.45
+    b = baseB + (255 - baseB) * k
+  }
+  return `rgb(${Math.round(r)},${Math.round(g)},${Math.round(b)})`
+}
+
 // ── Na₂O blob outline helpers ─────────────────────────────────────────────
 function convexHull(pts) {
   if (pts.length < 3) return pts
@@ -1268,6 +1289,12 @@ export default function GlassViewer() {
         // Visual scale: fill the available canvas with the box
         const drawScale = getDrawScale()
 
+        // Active energy flow drives both the background wash and the border glow below. Only
+        // while energy is actually flowing: heating stops at the 1800 ceiling, cooling at the
+        // floor — at the limit the input is zero, so both return to neutral.
+        const _heat = (s.temp < 1799) ? meltHeatModeRef.current : null
+        const _cool = (s.temp > 35)   ? coolingModeRef.current  : null
+
         // Box clip (no pre-fill — background drawn behind blob after colorize)
         ctx.save()
         ctx.translate(bcx, bcy); ctx.rotate(box.boxAngle); ctx.scale(drawScale, drawScale)
@@ -1279,7 +1306,7 @@ export default function GlassViewer() {
           const hotR = 255, hotG = Math.round(80 * Math.pow(heatT, 2)), hotB = 0
           const glowG = Math.round(140 * Math.pow(heatT, 2.5))
 
-          ctx.fillStyle = '#161210'
+          ctx.fillStyle = boxBgTint(22, 18, 16, _heat, _cool, s.temp)
           ctx.fillRect(-HS, -HS, BOX_SIZE, BOX_SIZE)
 
           const _isSoda   = presetIdRef.current === 'soda'
@@ -1473,8 +1500,9 @@ export default function GlassViewer() {
           mctx.restore()
           mctx.globalCompositeOperation = 'source-over'
 
-          // Step 4: gray background — filled before the blob, never touches colorize
-          ctx.fillStyle = '#888888'
+          // Step 4: background — filled before the blob, never touches colorize. Neutral gray
+          // at rest, washed reddish while heating and bluish while cooling, back to gray cold.
+          ctx.fillStyle = boxBgTint(136, 136, 136, _heat, _cool, s.temp)
           ctx.fillRect(-HS, -HS, BOX_SIZE, BOX_SIZE)
 
           // Step 5: draw colored blob over gray with glow halo
@@ -1490,10 +1518,7 @@ export default function GlassViewer() {
         // Container border — colour + glow announces the active heat/cool RATE:
         //   fast heat → hot glowing red; slow heat → dim red; fast cool → icy glowing blue;
         //   slow cool → muted blue; idle → the subtle neutral border.
-        // Only glow while energy is actually flowing: heating stops at the 1800 ceiling, cooling
-        // at the floor — at the limit the input is zero, so the border returns to neutral.
-        const _heat = (s.temp < 1799) ? meltHeatModeRef.current : null
-        const _cool = (s.temp > 35)   ? coolingModeRef.current  : null
+        // Uses the same _heat/_cool flow computed above the box fill.
         let _stroke = 'rgba(180,200,220,0.22)', _lw = 1.5, _glow = 0, _glowCol = 'transparent'
         if (_cool === 'fast')      { _stroke = 'rgba(70,170,255,0.98)';  _lw = 3; _glow = 22; _glowCol = 'rgba(40,150,255,0.95)' }
         else if (_cool === 'slow') { _stroke = 'rgba(120,160,205,0.60)'; _lw = 2; _glow = 5;  _glowCol = 'rgba(100,150,210,0.40)' }
@@ -1976,7 +2001,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 35</span>
+                  }}>Field Test Version 36</span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),
