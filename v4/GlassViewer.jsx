@@ -345,11 +345,11 @@ function macroMeltFrac(phys) {
 // doesn't creep), so a paused temperature holds a fixed, matched melt degree. Live-tunable via
 // window._macroMeltOnset / _macroMeltFull.
 function macroMeltTarget(T) {
-  // Bulk melt is deliberately LAGGED behind the shared landmarks so less melts at each temp:
-  // ~900 °C looks like 700 did, 1000 like 800, … reaching full melt at 1500. Tunable: _bulkMeltLag.
-  const lag   = window._bulkMeltLag   ?? 200
-  const onset = window._macroMeltOnset ?? (GT.MELT_ONSET + lag)   // 900
-  const full  = window._macroMeltFull  ?? (GT.MELT_FULL  + lag)   // 1500
+  // Bulk melt trickles in from MELT_ONSET (700) — a few particles — and ramps gradually to full
+  // at 1500. Only the FULL point is pushed out (wider range = gentler ramp, no sudden onset jump).
+  // Tunable: window._macroMeltOnset / _macroMeltFull.
+  const onset = window._macroMeltOnset ?? GT.MELT_ONSET            // 700: first few particles
+  const full  = window._macroMeltFull  ?? (GT.MELT_FULL + 200)     // 1500: full melt
   const u = Math.max(0, Math.min(1, (T - onset) / Math.max(1, full - onset)))
   return u * u * (3 - 2 * u)   // smoothstep
 }
@@ -2052,7 +2052,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 51</span>
+                  }}>Field Test Version 52</span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),
