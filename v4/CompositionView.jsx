@@ -884,6 +884,28 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
       }
       // (cm === null hold: leave the latched value in place)
 
+      // ── Energy graph: record + draw ABOVE the activeRef gate ──────
+      // The graph plots the ramp's target temperature vs energy, which comes entirely from the
+      // energy ramp above (ePerParticle / coolGraphERef) — not from stepPhysics. Running it here,
+      // outside the gate, means the Bulk Material tab drives the SAME graph identically (the
+      // temperature is shared), and switching tabs or scrubbing benchmarks stays continuous.
+      histFrameRef.current++
+      if (histFrameRef.current >= 3) {
+        histFrameRef.current = 0
+        const targetTempC = Math.max(0, Math.round(ePerParticle / ENERGY_UNIT - 273))
+        // During cooling, plot the cooling-energy path (constant-rate x, latent-heat slope);
+        // otherwise the normal energy axis. This draws the heat-up/cool-down hysteresis loop.
+        const xVal = coolGraphERef.current ?? energyContent(targetTempC, na2oPctRef.current, hcPlateauRef.current)
+        histRef.current.push({ e: xVal, t: targetTempC })
+      }
+      {
+        const extCanvas = graphCanvasRefRef.current?.current
+        if (extCanvas) {
+          const eMax = energyContent(1800, na2oPctRef.current, hcPlateauRef.current) * 1.05
+          drawTEGraph(extCanvas, histRef.current, darkModeRef.current, eMax, targetTempLineRef.current)
+        }
+      }
+
       const phys = physRef.current
       // activeRef gate: everything above this point is cheap bookkeeping that must
       // keep running while the other tab is showing — the energy-content ramp above
@@ -952,24 +974,6 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
           }
           phys.totalEnergyAdded += ePerParticle * phys.n
           phys.cumulativeKE     += ke
-        }
-
-        // Record into ring buffer (every 3 frames to avoid redundancy)
-        histFrameRef.current++
-        if (histFrameRef.current >= 3) {
-          histFrameRef.current = 0
-          const targetTempC = Math.max(0, Math.round(ePerParticle / ENERGY_UNIT - 273))
-          // During cooling, plot the cooling-energy path (constant-rate x, latent-heat slope);
-          // otherwise the normal energy axis. This draws the heat-up/cool-down hysteresis loop.
-          const xVal = coolGraphERef.current ?? energyContent(targetTempC, na2oPctRef.current, hcPlateauRef.current)
-          histRef.current.push({ e: xVal, t: targetTempC })
-        }
-
-        // ── Draw energy graph into sidebar canvas when provided ───────
-        const extCanvas = graphCanvasRefRef.current?.current
-        if (extCanvas) {
-          const eMax = energyContent(1800, na2oPctRef.current, hcPlateauRef.current) * 1.05
-          drawTEGraph(extCanvas, histRef.current, darkModeRef.current, eMax, targetTempLineRef.current)
         }
 
         // ── Record replay snapshot ────────────────────────────────────

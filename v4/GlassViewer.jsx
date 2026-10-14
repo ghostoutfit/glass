@@ -726,7 +726,7 @@ export default function GlassViewer() {
   const sharedTempRef = useRef({ temp: 25, lastTs: 0, cumulativeEnergy: 0 })
 
   // Melt tab has its own independent temperature driven by its own energy input
-  const meltTempRef             = useRef({ temp: 50, lastTs: 0, cumulativeEnergy: 0 })
+  const meltTempRef             = useRef({ temp: 100, lastTs: 0, cumulativeEnergy: 0 })  // page-load start temp; matches meltLocalTemp so heating doesn't snap the graph down
   const gotoTargetRef           = useRef(null)   // GO target temp; integrator ramps to it then stops
   const [gotoTargetTemp, setGotoTargetTemp] = useState(null)   // shown as a dotted line on the graph
   const meltCumulativeEnergyRef = useRef(0)  // raw energy accumulated (x-axis for T-E graph)
@@ -1976,7 +1976,7 @@ export default function GlassViewer() {
     const box = boxSimRef.current.box
     if (box) { box.boxAngle = 0; box.boxAngularVel = 0 }
     meltSimRef.current.energyInput = 0
-    meltTempRef.current.temp = 50
+    meltTempRef.current.temp = 500   // match the display below so a subsequent heat doesn't snap
     meltCumulativeEnergyRef.current = 0
     setMeltLocalTemp(500)
   }
@@ -2030,7 +2030,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 46</span>
+                  }}>Field Test Version 47</span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),
