@@ -227,14 +227,15 @@ function glassColor(tempC) {
 // sand) as it fully cools or goes idle. The wash grows with temperature, so a cooling solid
 // fades from bluish back to gray as it reaches the floor. `heat`/`cool` are the mode strings
 // (truthy while that flow is active), already gated off at the temperature limits by the caller.
-function boxBgTint(baseR, baseG, baseB, heat, cool, tempC) {
-  // Cooling lifts the background toward a light neutral gray so the cooled solid is visible
-  // against it (hot stays dark for the glow). Live-tunable: window._glassBgGray.
-  const coldLift = Math.max(0, Math.min(1, (700 - tempC) / 675))  // 0 hot .. 1 cold (≤25 °C)
+function boxBgTint(baseR, baseG, baseB, heat, cool, grayAmt) {
+  // grayAmt (0..1) lifts the background from its dark base toward a light neutral gray. The caller
+  // ramps it in only while COOLING, so the box is black through heating/hot holds (gray looks bad
+  // behind raw grains) and gray once cooled (so the cooled glass is visible). Gray: window._glassBgGray.
+  const lift = Math.max(0, Math.min(1, grayAmt))
   const LG = window._glassBgGray ?? 150
-  const bR = baseR + (LG - baseR) * coldLift
-  const bG = baseG + (LG - baseG) * coldLift
-  const bB = baseB + (LG - baseB) * coldLift
+  const bR = baseR + (LG - baseR) * lift
+  const bG = baseG + (LG - baseG) * lift
+  const bB = baseB + (LG - baseB) * lift
   let r = bR, g = bG, b = bB
   if (heat) {
     const k = 0.12 + 0.20 * Math.max(0, Math.min(1, (tempC - 300) / 1200))
@@ -677,6 +678,7 @@ export default function GlassViewer() {
 
   const boxCanvasRef  = useRef(null)
   const miniCanvasRef = useRef(null)
+  const bgGrayRef     = useRef(0)   // box background: 0 = black (heating/idle-hot), ramps to 1 (gray) while cooling
   const boxSimRef = useRef({
     autoRotate: true, boxState: 'sand', multiRadius: true,
     sandPaused: false, showMiniView: false,
@@ -1311,6 +1313,15 @@ export default function GlassViewer() {
         // floor — at the limit the input is zero, so both return to neutral.
         const _heat = (s.temp < 1799) ? meltHeatModeRef.current : null
         const _cool = (s.temp > 35)   ? coolingModeRef.current  : null
+        // Background stays BLACK through heating and hot holds (gray looks bad behind raw grains);
+        // it fades to gray only while cooling, then holds gray (so the cooled glass is visible) and
+        // fades back to black if reheated. Latched ramp, not a temperature lookup.
+        {
+          const _gTarget = _cool ? 1 : (_heat ? 0 : bgGrayRef.current)
+          const _gRate   = window._glassBgFade ?? 0.03
+          bgGrayRef.current += (_gTarget - bgGrayRef.current) * _gRate
+        }
+        const _bgGray = bgGrayRef.current
 
         // Box clip (no pre-fill — background drawn behind blob after colorize)
         ctx.save()
@@ -1323,7 +1334,7 @@ export default function GlassViewer() {
           const hotR = 255, hotG = Math.round(80 * Math.pow(heatT, 2)), hotB = 0
           const glowG = Math.round(140 * Math.pow(heatT, 2.5))
 
-          ctx.fillStyle = boxBgTint(22, 18, 16, _heat, _cool, s.temp)
+          ctx.fillStyle = boxBgTint(22, 18, 16, _heat, _cool, _bgGray)
           ctx.fillRect(-HS, -HS, BOX_SIZE, BOX_SIZE)
 
           const _isSoda   = presetIdRef.current === 'soda'
@@ -1519,7 +1530,7 @@ export default function GlassViewer() {
 
           // Step 4: background — filled before the blob, never touches colorize. Neutral gray
           // at rest, washed reddish while heating and bluish while cooling, back to gray cold.
-          ctx.fillStyle = boxBgTint(136, 136, 136, _heat, _cool, s.temp)
+          ctx.fillStyle = boxBgTint(136, 136, 136, _heat, _cool, _bgGray)
           ctx.fillRect(-HS, -HS, BOX_SIZE, BOX_SIZE)
 
           // Step 5: draw colored blob over gray with glow halo
@@ -2018,7 +2029,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 43</span>
+                  }}>Field Test Version 44</span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),
