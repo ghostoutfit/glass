@@ -188,7 +188,9 @@ export function mergeSilicateGrains(grains, naSandProb, silSilProb, maxMerges = 
       const b = grains[bi]
 
       let prob = 0
-      if (naSandProb > 0 && ((isNa && b.type === 'sand') || (isSi && b.type === 'na') || (isSil && b.type === 'sand'))) {
+      if (naSandProb > 0 && ((isNa && b.type === 'sand') || (isSi && b.type === 'na') || (isSil && b.type === 'sand') || (isSi && b.type === 'sand'))) {
+        // sand+sand now merges too: without it, sand grains with only sand neighbours never
+        // coalesce, never reach the blob-convert radius, and drop out of the cooled solid.
         prob = naSandProb
       } else if (silSilProb > 0 && isSil && b.type === 'silicate') {
         prob = silSilProb

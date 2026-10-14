@@ -228,17 +228,24 @@ function glassColor(tempC) {
 // fades from bluish back to gray as it reaches the floor. `heat`/`cool` are the mode strings
 // (truthy while that flow is active), already gated off at the temperature limits by the caller.
 function boxBgTint(baseR, baseG, baseB, heat, cool, tempC) {
-  let r = baseR, g = baseG, b = baseB
+  // Cooling lifts the background toward a light neutral gray so the cooled solid is visible
+  // against it (hot stays dark for the glow). Live-tunable: window._glassBgGray.
+  const coldLift = Math.max(0, Math.min(1, (700 - tempC) / 675))  // 0 hot .. 1 cold (≤25 °C)
+  const LG = window._glassBgGray ?? 150
+  const bR = baseR + (LG - baseR) * coldLift
+  const bG = baseG + (LG - baseG) * coldLift
+  const bB = baseB + (LG - baseB) * coldLift
+  let r = bR, g = bG, b = bB
   if (heat) {
     const k = 0.12 + 0.20 * Math.max(0, Math.min(1, (tempC - 300) / 1200))
-    r = baseR + (255 - baseR) * k
-    g = baseG * (1 - k * 0.5)
-    b = baseB * (1 - k * 0.6)
+    r = bR + (255 - bR) * k
+    g = bG * (1 - k * 0.5)
+    b = bB * (1 - k * 0.6)
   } else if (cool) {
     const k = 0.10 + 0.22 * Math.max(0, Math.min(1, (tempC - 35) / 1200))
-    r = baseR * (1 - k * 0.45)
-    g = baseG + (235 - baseG) * k * 0.45
-    b = baseB + (255 - baseB) * k
+    r = bR * (1 - k * 0.45)
+    g = bG + (235 - bG) * k * 0.45
+    b = bB + (255 - bB) * k
   }
   return `rgb(${Math.round(r)},${Math.round(g)},${Math.round(b)})`
 }
@@ -2011,7 +2018,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 42</span>
+                  }}>Field Test Version 43</span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),
