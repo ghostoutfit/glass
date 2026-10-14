@@ -2,6 +2,9 @@
 // Uses Position-Based Dynamics (PBD): velocity is derived from actual displacement
 // after constraint solving, so settled grains naturally get zero velocity.
 
+import { T as GT } from './glassTemps.js'
+const MELT_SPAN = GT.MELT_FULL - GT.MELT_ONSET  // merge/absorb ramp width (onset → fully molten)
+
 export const GRAIN_R     = 2.25   // average; used for packing layout
 export const GRAIN_R_MIN = 1.6
 export const GRAIN_R_MAX = 3.2
@@ -396,7 +399,7 @@ export function stepNaBlobSprings(naBlobs, dt, boxAngle = 0, temp = 1000) {
 
   // v2-style continuous stiffening: both factors are cubic in (1-t)
   // so they're near-zero above ~800°C and ramp sharply below 400°C.
-  const tFull     = Math.max(0, Math.min(1, (temp - 25) / (1200 - 25)))
+  const tFull     = Math.max(0, Math.min(1, (temp - 25) / (GT.MELT_FULL - 25)))
   const velDamp   = 0.15 * Math.pow(1 - tFull, 3)  // kills inertia per step
   const rigidFrac = 0.90 * Math.pow(1 - tFull, 3)  // projects toward CM velocity
 
@@ -430,7 +433,7 @@ export function stepNaBlobSprings(naBlobs, dt, boxAngle = 0, temp = 1000) {
       }
     }
 
-    if (orbs.length < 3 || temp < 700) continue
+    if (orbs.length < 3 || temp < GT.MELT_ONSET) continue
     let avgSpd = 0
     for (const p of orbs) avgSpd += Math.hypot(p.vx, p.vy)
     avgSpd /= orbs.length
@@ -505,7 +508,7 @@ function mergeNaBlobs(b1, b2, grains) {
 // Call once per physics tick (inside the accumulator loop).
 // temp controls how many consecutive ticks of contact are required before merge.
 export function checkNaBlobMerges(naBlobs, mct, grains, temp = 1000) {
-  const tempFactor  = Math.max(0.05, Math.min(1, (temp - 700) / 500))
+  const tempFactor  = Math.max(0.05, Math.min(1, (temp - GT.MELT_ONSET) / MELT_SPAN))
   const frameTarget = Math.max(5, Math.round(20 / tempFactor))
 
   let didMerge = false
@@ -534,7 +537,7 @@ export function checkNaBlobMerges(naBlobs, mct, grains, temp = 1000) {
 }
 
 // Call once per visual frame. Absorbs nearby na/silicate/sand grains into sil blobs.
-// All types activate at 700°C; sand is slower (weaker Si-O bond probability).
+// All types activate at MELT_ONSET; sand is slower (weaker Si-O bond probability).
 // Proximity is checked against the nearest sub-circle, not the phantom center, so
 // grains trapped inside the hull (where the center may have drifted) are caught.
 // maxPerBlob: live callers pass 1 (one absorption per blob per frame). The heat-up replay
@@ -542,7 +545,7 @@ export function checkNaBlobMerges(naBlobs, mct, grains, temp = 1000) {
 // 1-per-blob cap otherwise throttles the replay and the blobs never grow to the live size.
 export function absorbNearbyGrains(grains, naBlobs, temp, maxPerBlob = 1) {
   if (!naBlobs.length) return
-  const tempF    = Math.max(0, Math.min(1, (temp - 700) / 500))
+  const tempF    = Math.max(0, Math.min(1, (temp - GT.MELT_ONSET) / MELT_SPAN))
   const naSilProb = tempF * 0.008
   const sandProb  = tempF * 0.002  // sand dissolves ~4× slower than Na/silicate
   if (naSilProb <= 0) return

@@ -4,6 +4,7 @@ import { initParticles, stepPhysics, stepFloorPhysics, PARTICLE_R, FIXED_DT, T_R
 import { setSioHotMult, setFreeAttractSiOMult, setSioExclMult, setCrystJiggleMult, setBreakStrain, setReformStrain, setCrystAnchorK, setLiberateFrac, setSioK, setNaOK, setNaAnchorK, setNaLiberateFrac, setNaBreakStrain, setLatticeSpeedMult, setFreedSpeedMult, setReintBondN, setReintFrameM, setBreakStrainSpread, setSevTriggerDist, setFeedbackGainMult, setSiSiRepR0, setMotifStrength, setMotifAlign, setBondStiffMult, setFreedTau, setNaNaRepR0, setSevCooldown, setSevPullK } from './meltPhysics.js'
 import { setVisualScale, setMaxDpr, effectiveDpr } from './renderer.js'
 import { initSandParticles, stepSandPhysics, mergeSodaGrains, mergeSilicateGrains, convertLargeNaGrains, stepNaBlobSprings, checkNaBlobMerges, absorbNearbyGrains, snapshotSand, restoreSand, GRAIN_R as SAND_GRAIN_R, NA_BLOB_R_CTR } from './sandPhysics.js'
+import { T as GT } from './glassTemps.js'
 import { BULK_CANDIDATES } from './candidates.generated.js'   // precomputed melt snapshots (dev-regenerated, bundled)
 import './GlassViewer.css'
 
@@ -344,15 +345,15 @@ function macroMeltFrac(phys) {
 // doesn't creep), so a paused temperature holds a fixed, matched melt degree. Live-tunable via
 // window._macroMeltOnset / _macroMeltFull.
 function macroMeltTarget(T) {
-  const onset = window._macroMeltOnset ?? 700
-  const full  = window._macroMeltFull  ?? 1300
+  const onset = window._macroMeltOnset ?? GT.MELT_ONSET
+  const full  = window._macroMeltFull  ?? GT.MELT_FULL
   const u = Math.max(0, Math.min(1, (T - onset) / Math.max(1, full - onset)))
   return u * u * (3 - 2 * u)   // smoothstep
 }
 
 function meldSandFrame(phys, temp, isSoda, probMult = 1) {
   if (!(isSoda && phys.sandParticles && phys.nNaOriginal > 0)) return
-  const tempFactor = Math.max(0, Math.min(1, (temp - 700) / 500))
+  const tempFactor = Math.max(0, Math.min(1, (temp - GT.MELT_ONSET) / (GT.MELT_FULL - GT.MELT_ONSET)))
   const meldFrac   = Math.min(1, phys.meldCount / phys.nNaOriginal)
   const meldProb   = Math.min(1, (tempFactor >= 1 ? 1 : tempFactor * 0.015 * (1 + meldFrac * 5)) * probMult)
   // Scale the per-call ABSOLUTE caps by probMult so one coarse replay pass does the work of
@@ -2029,7 +2030,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 44</span>
+                  }}>Field Test Version 45</span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),

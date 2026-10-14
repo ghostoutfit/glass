@@ -1,5 +1,7 @@
 // meltPhysics.js — KMT hard-sphere + charge-based pairwise interaction physics
 
+import { T as GT } from './glassTemps.js'
+
 export const PHYSICS_START_TEMP = 0
 export const SIM_W = 600
 export const SIM_H = 350   // grid area only
@@ -65,7 +67,7 @@ let _sevTriggerDist   = 13   // px — freed modifier ion must be within this di
 const FEEDBACK_GAIN_SODA   = 0.437  // 70% SiO2 / 30% Na2O: f=0 at 500°C, f=1 at 1322°C
 // Si-O XPBD projection holds grains rigid up to this temperature. Pure sand (100% SiO₂) is set
 // above the model's reach so it never melts; any modifier content drops it so grains dissolve.
-const sioProjCutoff = sio2Pct => sio2Pct >= 100 ? 1800 : 1300
+const sioProjCutoff = sio2Pct => sio2Pct >= 100 ? 1800 : GT.MELT_FULL
 const FEEDBACK_GAIN_SILICA = 0.112  // 100% SiO2:             f=0 at 1500°C, f=1 at 1920°C
 let _feedbackGainMult = 40          // scalar multiplier on GAIN — dial up/down feedback ramp speed
 let _latticeSpeedMult = 1.0  // kick-sigma multiplier for bonded (non-freed) atoms
@@ -795,7 +797,7 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
   phys.motifK = motifK
   // Crystallisation lock temperature (°C): above it, no net bonds form (see reform/re-integration
   // gates below) so the melt stays mobile; below it bonds form and the geometry builds.
-  const CRYST_LOCK = _win._crystLockTemp ?? 1050
+  const CRYST_LOCK = _win._crystLockTemp ?? GT.CRYST_LOCK
   // O–Si–O angle-bending stiffness for slow cool: zero above CRYST_LOCK, ramping to full by
   // 650°C — the rigid hex geometry builds inside the mobile 1050→650 window and is set by 650.
   // Live-tunable via window._angleBendK.

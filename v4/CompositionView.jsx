@@ -7,6 +7,7 @@ import { initPhysics, stepPhysics, setSiOr0,
          verifyHashPairs, setMeltHash, setCoolBondScale, restoreMelt } from './meltPhysics.js'
 import { drawScene, setVisualScale, findAtomNear, getVisualScale, getLastHudLines, effectiveDpr } from './renderer.js'
 import { buildGrid, buildAllAtoms } from './meltGrid.js'
+import { T as GT } from './glassTemps.js'
 import { MELT_CANDIDATES } from './candidates.melt.generated.js'   // precomputed catch-up states (bundled)
 
 
@@ -81,7 +82,7 @@ function tempForContent(target, na2oPct, plateau) {
 //   • T < 500:  solid, energy just leaves the kinetic bucket → low heat capacity → STEEP again
 // Slow cool finds more/better bonds, so it releases MORE latent heat → an even taller hump
 // (even shallower shelf) than fast. Live-tunable via window._coolLatentSlow / _coolLatentFast.
-const COOL_BAND_LO = 500, COOL_BAND_HI = 1100, COOL_BAND_W = 60
+const COOL_BAND_LO = GT.LATENT_LO, COOL_BAND_HI = GT.CRYST_LOCK, COOL_BAND_W = 60
 function coolHeatCap(T, slow) {
   const amp = slow ? (window._coolLatentSlow ?? 7) : (window._coolLatentFast ?? 3)
   const ss = (a, b, x) => { const u = Math.max(0, Math.min(1, (x - a) / (b - a))); return u * u * (3 - 2 * u) }
