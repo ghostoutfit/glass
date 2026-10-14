@@ -2038,7 +2038,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 39</span>
+                  }}>Field Test Version 40</span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),
@@ -2149,12 +2149,11 @@ export default function GlassViewer() {
               </div>
               <span style={{fontSize:11, fontWeight:700, letterSpacing:'0.09em', textTransform:'uppercase', color:'rgba(30,45,60,0.65)'}}>Visuals</span>
               {/* 2×2 grid, fixed cell size so positions are stable across tabs:
-                     [ Count  ] [ Graph ]          [        ] [ Graph  ]
-                     [ Charge ] [ Field ]   →Bulk  [ Rotate ] [        ]
-                  Graph stays top-right on both tabs; Charge's cell becomes Rotate on Bulk. */}
+                     [ Graph ] [ Charge ]          [ Graph ] [ Rotate ]
+                     [ Count ] [ Field  ]   →Bulk  [       ] [        ]
+                  Graph stays top-left on both tabs; Charge's cell becomes Rotate on Bulk. */}
               <div style={{display:'grid', gridTemplateColumns:'repeat(2, 78px)', gap:3, transform:'translateX(-50px)'}}>
                 {tab === 'glass' ? (<>
-                  <span />
                   <button className={`action-btn replay-btn${showGraph?' active':''}`}
                     style={{padding:'3px 0', width:'100%'}} onClick={() => setShowGraph(f => !f)}>Graph</button>
                   <button className={`action-btn replay-btn${autoRotate?' active':''}`}
@@ -2164,13 +2163,14 @@ export default function GlassViewer() {
                       if (!v && boxSimRef.current.box) boxSimRef.current.box.boxAngularVel = 0
                     }}>Rotate</button>
                   <span />
+                  <span />
                 </>) : (<>
-                  <button className={`action-btn replay-btn${showCount?' active':''}`}
-                    style={{padding:'3px 0', width:'100%'}} onClick={() => setShowCount(f => !f)}>Count</button>
                   <button className={`action-btn replay-btn${showGraph?' active':''}`}
                     style={{padding:'3px 0', width:'100%'}} onClick={() => setShowGraph(f => !f)}>Graph</button>
                   <button className={`action-btn replay-btn${showCharge?' active':''}`}
                     style={{padding:'3px 0', width:'100%'}} onClick={() => setShowCharge(f => !f)}>Charge</button>
+                  <button className={`action-btn replay-btn${showCount?' active':''}`}
+                    style={{padding:'3px 0', width:'100%'}} onClick={() => setShowCount(f => !f)}>Count</button>
                   <button className={`action-btn replay-btn${effectiveShowField?' active':''}`}
                     style={{padding:'3px 0', width:'100%'}}
                     title={fieldBlur ? undefined : 'Simple quality: strain field drawn crisp (no blur)'}
