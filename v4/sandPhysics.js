@@ -553,13 +553,11 @@ export function checkNaBlobMerges(naBlobs, mct, grains, temp = 1000) {
 // maxPerBlob: live callers pass 1 (one absorption per blob per frame). The heat-up replay
 // passes a larger number so one coarse pass absorbs the grains many live frames would — the
 // 1-per-blob cap otherwise throttles the replay and the blobs never grow to the live size.
-export function absorbNearbyGrains(grains, naBlobs, temp, maxPerBlob = 1, sandBoost = 1) {
+export function absorbNearbyGrains(grains, naBlobs, temp, maxPerBlob = 1) {
   if (!naBlobs.length) return
   const tempF    = Math.max(0, Math.min(1, (temp - GT.MELT_ONSET) / MELT_SPAN))
   const naSilProb = tempF * 0.008
-  // sandBoost (>1 only above 1600 °C in the mix) lets the main blob eat crystal-shaped sand
-  // stragglers fast; 1 everywhere else. sand normally dissolves ~4× slower than Na/silicate.
-  const sandProb  = Math.min(1, tempF * 0.002 * sandBoost)
+  const sandProb  = tempF * 0.002  // sand dissolves ~4× slower than Na/silicate
   if (naSilProb <= 0) return
 
   for (const blob of naBlobs) {
