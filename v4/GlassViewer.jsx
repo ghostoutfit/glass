@@ -362,10 +362,16 @@ function meldSandFrame(phys, temp, isSoda, probMult = 1) {
   const cap = Math.max(1, Math.round(probMult))
   if (meldProb > 0) phys.meldCount += mergeSodaGrains(phys.sandParticles, meldProb)
   convertLargeNaGrains(phys.sandParticles, phys.naBlobs, cap)
-  absorbNearbyGrains(phys.sandParticles, phys.naBlobs, temp, cap)
+  // Mix only (this fn is soda-gated): above 1600 °C the few crystal-shaped sand stragglers that
+  // never merged should break down fast. hotBreak ramps 1600→1800; hb boosts the sand-merge
+  // probability + per-frame merge cap, sandBoost does the same for blob absorption. Below 1600
+  // hotBreak=0 → hb=1 → unchanged. Tunable: window._sandHotBreak.
+  const hotBreak  = Math.max(0, Math.min(1, (temp - 1600) / 200))
+  const hb        = 1 + hotBreak * (window._sandHotBreak ?? 12)
+  absorbNearbyGrains(phys.sandParticles, phys.naBlobs, temp, Math.round(cap * hb), hb)
   const siFactor  = Math.max(0, Math.min(1, (temp - 1000) / 200))
   const silFactor = Math.max(0, Math.min(1, (temp - 1200) / 200))
-  mergeSilicateGrains(phys.sandParticles, Math.min(1, siFactor * 0.004 * probMult), Math.min(1, silFactor * 0.004 * probMult), Math.max(3, Math.round(3 * probMult)))
+  mergeSilicateGrains(phys.sandParticles, Math.min(1, siFactor * 0.004 * probMult * hb), Math.min(1, silFactor * 0.004 * probMult), Math.max(3, Math.round((3 + hotBreak * 15) * probMult)))
 }
 
 // Heat-up catch-up: when the Bulk tab becomes visible after the temperature changed on the
@@ -2049,7 +2055,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 49</span>
+                  }}>Field Test Version 50</span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),
