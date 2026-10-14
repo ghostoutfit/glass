@@ -2038,7 +2038,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 38</span>
+                  }}>Field Test Version 39</span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),
@@ -2128,7 +2128,7 @@ export default function GlassViewer() {
                 "Visuals" label, and (because the left flex:1 column then stays put) the tab
                 buttons all in exactly the same place when switching tabs. */}
             <div style={{flexShrink:0, width:196, display:'flex', flexDirection:'column', alignItems:'center', gap:3}}>
-              <div style={{display:'flex', alignItems:'center', gap:6}}>
+              <div style={{display:'flex', alignItems:'center', gap:6, transform:'translateX(-50px)'}}>
                 <span style={{fontSize:15, lineHeight:1, userSelect:'none', color:'#ffc020', display:'inline-block', width:18, textAlign:'center'}}>
                   {darkMode ? '☽' : '☀'}
                 </span>
@@ -2152,7 +2152,7 @@ export default function GlassViewer() {
                      [ Count  ] [ Graph ]          [        ] [ Graph  ]
                      [ Charge ] [ Field ]   →Bulk  [ Rotate ] [        ]
                   Graph stays top-right on both tabs; Charge's cell becomes Rotate on Bulk. */}
-              <div style={{display:'grid', gridTemplateColumns:'repeat(2, 60px)', gap:3}}>
+              <div style={{display:'grid', gridTemplateColumns:'repeat(2, 78px)', gap:3, transform:'translateX(-50px)'}}>
                 {tab === 'glass' ? (<>
                   <span />
                   <button className={`action-btn replay-btn${showGraph?' active':''}`}
