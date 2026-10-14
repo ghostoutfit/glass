@@ -52,6 +52,7 @@ let _sioExclMult    = 1.4    // XPBD exclusion multiplier for freed Si-O pairs (
 let _crystJiggleMult = 1.0   // kick multiplier for crystAnchor/naAnchor atoms (vs base kickSigma)
 let _breakStrain     = 0.04  // strain threshold for bond breaking: bond breaks when (d−r₀)/r₀ > _breakStrain
 let _reformStrain    = 0.0   // strain threshold for bond reform: bond reforms when (d−r₀)/r₀ ≤ _reformStrain
+let _bondFreezeTemp  = 400   // °C: below this target temp, intact bonds can't break (kills cold break/reform jitter)
 let _crystAnchorK    = 0.06  // crystAnchor spring constant for SiO2 network atoms
 let _liberateFrac    = 0.5   // liberation fraction for SiO2 atoms (1.0 = all broken, 0.5 = majority broken)
 let _naAnchorK       = 0.06  // naAnchor spring constant for Na2O atoms (independent of _crystAnchorK)
@@ -88,6 +89,7 @@ export const setSioExclMult        = v => { _sioExclMult = v }
 export const setCrystJiggleMult    = v => { _crystJiggleMult = v }
 export const setBreakStrain        = v => { _breakStrain = v }
 export const setReformStrain       = v => { _reformStrain = v }
+export const setBondFreezeTemp     = v => { _bondFreezeTemp = v }
 export const setCrystAnchorK       = v => { _crystAnchorK = v }
 export const setLiberateFrac       = v => { _liberateFrac = v }
 export const setNaAnchorK          = v => { _naAnchorK = v }
@@ -1291,6 +1293,12 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
 
   let breakKERemoved = 0, breakKEReturned = 0
   let strainSum = 0, thrSum = 0, strainCount = 0, maxAvgStrain = 0
+  // Below the freeze temp, a bond that is currently intact can't break — once the melt has cooled
+  // this far the network is solid, and letting thermal jitter trip the strain threshold only to
+  // reform the same bond next step produces a visible flicker. Freezing the break (reform still
+  // runs, so broken bonds can still heal) holds the structure steady. Gated on the target temp
+  // (totalEnergy) like every other threshold, so it responds to the slider immediately.
+  const bondsFrozen = totalEnergy < (_win._bondFreezeTemp ?? _bondFreezeTemp)
   if (phys.rigidBonds) {
     for (const rb of phys.rigidBonds) {
       if (!rb.breakable) continue
@@ -1307,7 +1315,7 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
       }
       const wasBroken = rb.broken
       if (!rb.broken) {
-        if (rb.avgStrain > effThreshold) rb.broken = true
+        if (!bondsFrozen && rb.avgStrain > effThreshold) rb.broken = true
       } else {
         // No net bond formation above the crystallisation lock temperature during cooling —
         // keeps the melt mobile until it is cool enough to crystallise (see CRYST_LOCK).
