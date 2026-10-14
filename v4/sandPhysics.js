@@ -400,8 +400,18 @@ export function stepNaBlobSprings(naBlobs, dt, boxAngle = 0, temp = 1000) {
   // v2-style continuous stiffening: both factors are cubic in (1-t)
   // so they're near-zero above ~800°C and ramp sharply below 400°C.
   const tFull     = Math.max(0, Math.min(1, (temp - 25) / (GT.MELT_FULL - 25)))
-  const velDamp   = 0.15 * Math.pow(1 - tFull, 3)  // kills inertia per step
-  const rigidFrac = 0.90 * Math.pow(1 - tFull, 3)  // projects toward CM velocity
+  const baseVel   = 0.15 * Math.pow(1 - tFull, 3)  // baseline inertia kill per step
+  const baseRigid = 0.90 * Math.pow(1 - tFull, 3)  // baseline projection toward CM velocity
+  // Hard-solid lock: the baseline alone leaves ~10% deformation even when cold. Below solidHi the
+  // cooled Na₂O solid stiffens to a hard body, reaching a FULL rigid lock (zero deformation) at
+  // solidLo. rigidFrac → 1 zeroes all relative velocity (no shape change); velDamp → 1 kills
+  // residual motion. Tunable: window._naSolidHi (400 °C) / _naSolidLo (100 °C).
+  const _w        = typeof window !== 'undefined' ? window : {}
+  const solidHi   = _w._naSolidHi ?? 400
+  const solidLo   = _w._naSolidLo ?? 100
+  const solidFrac = Math.max(0, Math.min(1, (solidHi - temp) / Math.max(1, solidHi - solidLo)))
+  const velDamp   = Math.min(1, baseVel   + (1 - baseVel)   * solidFrac)  // → 1 at solidLo
+  const rigidFrac = Math.min(1, baseRigid + (1 - baseRigid) * solidFrac)  // → 1 at solidLo: zero deformation
 
   for (const blob of naBlobs) {
     for (const s of blob.springs) {
