@@ -1963,22 +1963,41 @@ export default function GlassViewer() {
 
 
   const p            = PRESETS.find(x => x.id === presetId)
+  // Composition buttons are a HARD RESET: temperature, particle arrangement, rotation, the graph,
+  // particle/bond counts, replay, overlays and the background all return to the page-load state.
+  // Always bumps meltResetToken so even re-clicking the current preset fully rebuilds.
+  const MELT_START_TEMP = 100   // page-load start temp — same for every preset (incl. Pure SiO₂)
   const switchPreset = id => {
-    setCoolingMode(null); setPresetId(id)
-    presetIdRef.current = id
-    glassVisualTypesRef.current = null
+    setPresetId(id); presetIdRef.current = id
+    // modes / energy flow off
+    setCoolingMode(null); setMeltHeatMode(null)
+    meltSimRef.current.energyInput = 0
+    setMeltEnergyIn(0); setGlassEnergyIn(0)
+    gotoTargetRef.current = null; setGotoTargetTemp(null)
+    // temperature → start temp (every ref the heat integrator / box / graph read from)
+    meltTempRef.current.temp = MELT_START_TEMP
+    sharedTempRef.current.temp = MELT_START_TEMP
+    boxSimRef.current.temp = MELT_START_TEMP
+    meltCumulativeEnergyRef.current = 0
+    setMeltLocalTemp(MELT_START_TEMP); setDerivedTemp(MELT_START_TEMP)
+    // particle counts / bonds
     setBondCounts(null); setInitialBondCounts(null); setModeBondCounts(null)
     initialBondCapturedRef.current = false
     bondCountsRef.current = null
+    // box particle arrangement → rebuild; rotation → home
+    glassVisualTypesRef.current = null
     physRef.current.sandParticles = null
     physRef.current.naBlobs = []
     physRef.current.blobMct = {}
     const box = boxSimRef.current.box
     if (box) { box.boxAngle = 0; box.boxAngularVel = 0 }
-    meltSimRef.current.energyInput = 0
-    meltTempRef.current.temp = 500   // match the display below so a subsequent heat doesn't snap
-    meltCumulativeEnergyRef.current = 0
-    setMeltLocalTemp(500)
+    // replay scrubber / overlays / macro-melt stat / candidate restore
+    setReplayFrame(null); setReplayFrameCount(0); setReplayPlaying(false)
+    setBoxLoading(false); setBoxMeltFrac(0); setMeltRestore(null)
+    // background back to black (gray fade latch)
+    bgGrayRef.current = 0
+    // rebuild the melt-tab particle arrangement + clear the graph history (even on same preset)
+    setMeltResetToken(t => t + 1)
   }
 
   const lcdStyle = { position:'relative', background:'#909e77', border:'1px solid rgba(100,90,70,0.5)', borderRadius:3, fontFamily:'"DSEG7","Courier New",monospace', fontSize:15, letterSpacing:'0.05em', lineHeight:1, userSelect:'none', flexShrink:0 }
@@ -2030,7 +2049,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 47</span>
+                  }}>Field Test Version 48</span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),
