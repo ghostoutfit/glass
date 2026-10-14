@@ -884,7 +884,13 @@ export default function GlassViewer() {
         const input      = s.energyInput
         const atFloor    = st.temp <= 0    && input < 0
         const atCeiling  = st.temp >= 1800 && input > 0
-        if (!atFloor && !atCeiling) {
+        if (atCeiling || atFloor) {
+          // Reached the limit: snap to exactly 1800 / 0, stop adding energy, and clear the heat
+          // mode so the Bulk border glow turns off (energy input is now zero).
+          st.temp = atCeiling ? 1800 : 0
+          s.energyInput = 0; gotoTargetRef.current = null
+          setMeltLocalTemp(st.temp); setMeltHeatMode(null)
+        } else {
           const rawDelta = (input / 100) * s.baseRate * elapsed
           meltCumulativeEnergyRef.current += rawDelta
           const pr       = PRESETS.find(x => x.id === presetIdRef.current) ?? PRESETS[0]
@@ -1484,7 +1490,10 @@ export default function GlassViewer() {
         // Container border — colour + glow announces the active heat/cool RATE:
         //   fast heat → hot glowing red; slow heat → dim red; fast cool → icy glowing blue;
         //   slow cool → muted blue; idle → the subtle neutral border.
-        const _heat = meltHeatModeRef.current, _cool = coolingModeRef.current
+        // Only glow while energy is actually flowing: heating stops at the 1800 ceiling, cooling
+        // at the floor — at the limit the input is zero, so the border returns to neutral.
+        const _heat = (s.temp < 1799) ? meltHeatModeRef.current : null
+        const _cool = (s.temp > 35)   ? coolingModeRef.current  : null
         let _stroke = 'rgba(180,200,220,0.22)', _lw = 1.5, _glow = 0, _glowCol = 'transparent'
         if (_cool === 'fast')      { _stroke = 'rgba(70,170,255,0.98)';  _lw = 3; _glow = 22; _glowCol = 'rgba(40,150,255,0.95)' }
         else if (_cool === 'slow') { _stroke = 'rgba(120,160,205,0.60)'; _lw = 2; _glow = 5;  _glowCol = 'rgba(100,150,210,0.40)' }
@@ -1967,7 +1976,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 33</span>
+                  }}>Field Test Version 34</span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),
