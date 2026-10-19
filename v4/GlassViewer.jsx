@@ -1331,13 +1331,18 @@ export default function GlassViewer() {
         const _bgGray = bgGrayRef.current
         // Red/blue wash strength eases toward 1 while that flow is on and 0 once it stops, so when
         // heating/cooling auto-shuts off (ceiling, ramp target, GO arrival, floor) the box fades
-        // back to neutral instead of cutting off. Rate: window._bgTintFade (per frame).
+        // back to neutral instead of cutting off. The refs hold LINEAR progress (constant step per
+        // frame); the wash strength is its smoothstep, so the fade starts gently, speeds through
+        // the middle and settles softly — no abrupt first drop. window._bgTintFade sets the pace
+        // (0.03 ≈ 100 frames end to end).
         {
-          const _tRate = window._bgTintFade ?? 0.04
-          bgHeatTintRef.current += ((_heat ? 1 : 0) - bgHeatTintRef.current) * _tRate
-          bgCoolTintRef.current += ((_cool ? 1 : 0) - bgCoolTintRef.current) * _tRate
+          const _tStep = (window._bgTintFade ?? 0.03) / 3
+          const _toward = (cur, tgt) => cur + Math.sign(tgt - cur) * Math.min(_tStep, Math.abs(tgt - cur))
+          bgHeatTintRef.current = _toward(bgHeatTintRef.current, _heat ? 1 : 0)
+          bgCoolTintRef.current = _toward(bgCoolTintRef.current, _cool ? 1 : 0)
         }
-        const _heatTint = bgHeatTintRef.current, _coolTint = bgCoolTintRef.current
+        const _ease = u => u * u * (3 - 2 * u)
+        const _heatTint = _ease(bgHeatTintRef.current), _coolTint = _ease(bgCoolTintRef.current)
 
         // Box clip (no pre-fill — background drawn behind blob after colorize)
         ctx.save()
@@ -2064,7 +2069,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 53</span>
+                  }}>Field Test Version 54</span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),
