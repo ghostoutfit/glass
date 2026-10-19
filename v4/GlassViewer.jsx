@@ -226,9 +226,10 @@ function glassColor(tempC) {
 // Tint the box's whole background by the active energy flow: slightly reddish while heating,
 // light bluish while cooling, settling back to the neutral base (gray for the blob, dark for
 // sand) as it fully cools or goes idle. The wash grows with temperature, so a cooling solid
-// fades from bluish back to gray as it reaches the floor. `heat`/`cool` are the mode strings
-// (truthy while that flow is active), already gated off at the temperature limits by the caller.
-function boxBgTint(baseR, baseG, baseB, heat, cool, grayAmt, tempC) {
+// fades from bluish back to gray as it reaches the floor. `heatAmt`/`coolAmt` are 0..1 wash
+// strengths the caller eases toward 1 while that flow is active and 0 once it stops, so the wash
+// fades out when heating/cooling auto-shuts off at a limit instead of snapping off in one frame.
+function boxBgTint(baseR, baseG, baseB, heatAmt, coolAmt, grayAmt, tempC) {
   // grayAmt (0..1) lifts the background from its dark base toward a light neutral gray. The caller
   // ramps it in only while COOLING, so the box is black through heating/hot holds (gray looks bad
   // behind raw grains) and gray once cooled (so the cooled glass is visible). Gray: window._glassBgGray.
@@ -238,13 +239,13 @@ function boxBgTint(baseR, baseG, baseB, heat, cool, grayAmt, tempC) {
   const bG = baseG + (LG - baseG) * lift
   const bB = baseB + (LG - baseB) * lift
   let r = bR, g = bG, b = bB
-  if (heat) {
-    const k = 0.12 + 0.20 * Math.max(0, Math.min(1, (tempC - 300) / 1200))
+  if (heatAmt > 0.002) {
+    const k = (0.12 + 0.20 * Math.max(0, Math.min(1, (tempC - 300) / 1200))) * Math.min(1, heatAmt)
     r = bR + (255 - bR) * k
     g = bG * (1 - k * 0.5)
     b = bB * (1 - k * 0.6)
-  } else if (cool) {
-    const k = 0.10 + 0.22 * Math.max(0, Math.min(1, (tempC - 35) / 1200))
+  } else if (coolAmt > 0.002) {
+    const k = (0.10 + 0.22 * Math.max(0, Math.min(1, (tempC - 35) / 1200))) * Math.min(1, coolAmt)
     r = bR * (1 - k * 0.45)
     g = bG + (235 - bG) * k * 0.45
     b = bB + (255 - bB) * k
@@ -683,6 +684,8 @@ export default function GlassViewer() {
   const boxCanvasRef  = useRef(null)
   const miniCanvasRef = useRef(null)
   const bgGrayRef     = useRef(0)   // box background: 0 = black (heating/idle-hot), ramps to 1 (gray) while cooling
+  const bgHeatTintRef = useRef(0)   // eased 0..1 strength of the red heating wash (fades out at auto-shutoff)
+  const bgCoolTintRef = useRef(0)   // eased 0..1 strength of the blue cooling wash
   const boxSimRef = useRef({
     autoRotate: true, boxState: 'sand', multiRadius: true,
     sandPaused: false, showMiniView: false,
@@ -1326,6 +1329,15 @@ export default function GlassViewer() {
           bgGrayRef.current += (_gTarget - bgGrayRef.current) * _gRate
         }
         const _bgGray = bgGrayRef.current
+        // Red/blue wash strength eases toward 1 while that flow is on and 0 once it stops, so when
+        // heating/cooling auto-shuts off (ceiling, ramp target, GO arrival, floor) the box fades
+        // back to neutral instead of cutting off. Rate: window._bgTintFade (per frame).
+        {
+          const _tRate = window._bgTintFade ?? 0.04
+          bgHeatTintRef.current += ((_heat ? 1 : 0) - bgHeatTintRef.current) * _tRate
+          bgCoolTintRef.current += ((_cool ? 1 : 0) - bgCoolTintRef.current) * _tRate
+        }
+        const _heatTint = bgHeatTintRef.current, _coolTint = bgCoolTintRef.current
 
         // Box clip (no pre-fill — background drawn behind blob after colorize)
         ctx.save()
@@ -1338,7 +1350,7 @@ export default function GlassViewer() {
           const hotR = 255, hotG = Math.round(80 * Math.pow(heatT, 2)), hotB = 0
           const glowG = Math.round(140 * Math.pow(heatT, 2.5))
 
-          ctx.fillStyle = boxBgTint(22, 18, 16, _heat, _cool, _bgGray, s.temp)
+          ctx.fillStyle = boxBgTint(22, 18, 16, _heatTint, _coolTint, _bgGray, s.temp)
           ctx.fillRect(-HS, -HS, BOX_SIZE, BOX_SIZE)
 
           const _isSoda   = presetIdRef.current === 'soda'
@@ -1534,7 +1546,7 @@ export default function GlassViewer() {
 
           // Step 4: background — filled before the blob, never touches colorize. Neutral gray
           // at rest, washed reddish while heating and bluish while cooling, back to gray cold.
-          ctx.fillStyle = boxBgTint(136, 136, 136, _heat, _cool, _bgGray, s.temp)
+          ctx.fillStyle = boxBgTint(136, 136, 136, _heatTint, _coolTint, _bgGray, s.temp)
           ctx.fillRect(-HS, -HS, BOX_SIZE, BOX_SIZE)
 
           // Step 5: draw colored blob over gray with glow halo
@@ -1998,7 +2010,7 @@ export default function GlassViewer() {
     setReplayFrame(null); setReplayFrameCount(0); setReplayPlaying(false)
     setBoxLoading(false); setBoxMeltFrac(0); setMeltRestore(null)
     // background back to black (gray fade latch)
-    bgGrayRef.current = 0
+    bgGrayRef.current = 0; bgHeatTintRef.current = 0; bgCoolTintRef.current = 0
     // rebuild the melt-tab particle arrangement + clear the graph history (even on same preset)
     setMeltResetToken(t => t + 1)
   }
@@ -2052,7 +2064,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 52</span>
+                  }}>Field Test Version 53</span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),
