@@ -640,6 +640,10 @@ export default function GlassViewer() {
   const [visualScale, setVisualScaleState]     = useState(3.3)
   const [coolingMode, setCoolingMode] = useState(null)
   const [meltHeatMode, setMeltHeatMode] = useState(null)  // 'slow' | 'fast' | null
+  // One-way trip: once a cool run starts, heating is locked out until a hard reset (Reset /
+  // composition button). Ref mirrors the state so the stable callbacks can read it.
+  const [heatLocked, setHeatLocked] = useState(false)
+  const heatLockedRef = useRef(false)
   const [bondNums, setBondNums]       = useState(false)
   const [atomColorMode,   setAtomColorMode]   = useState('normal')
   const [showBrokenBonds, setShowBrokenBonds] = useState(false)
@@ -964,6 +968,7 @@ export default function GlassViewer() {
   const onGoTemp = useCallback(() => {
     const v = Math.max(0, Math.min(1800, Math.round(+gotoTemp)))
     if (!Number.isFinite(v)) return
+    if (heatLockedRef.current && v > meltTempRef.current.temp) return   // no heating after cooling
     setMeltHeatMode(null); setCoolingMode(null)
     // Ramp to the target via the heat-capacity integrator (same rate as Fast Heat / cool).
     gotoTargetRef.current = v; setGotoTargetTemp(v)
@@ -1001,6 +1006,7 @@ export default function GlassViewer() {
   }, [replayPlaying, replayFrameCount])
 
   const startCooling = useCallback(mode => {
+    heatLockedRef.current = true; setHeatLocked(true)   // cooling is one-way: heat stays off until reset
     setReplayFrameCount(0); setReplayFrame(null); setReplayPlaying(false)
     setMeltHeatMode(null)
     setCoolingMode(m => {
@@ -1013,6 +1019,7 @@ export default function GlassViewer() {
   }, [])
 
   const toggleMeltHeat = useCallback(mode => {
+    if (heatLockedRef.current) return
     setCoolingMode(prev => { if (prev) meltSimRef.current.energyInput = 0; return null })
     setMeltHeatMode(prev => {
       const next = prev === mode ? null : mode
@@ -1991,6 +1998,7 @@ export default function GlassViewer() {
     setPresetId(id); presetIdRef.current = id
     // modes / energy flow off
     setCoolingMode(null); setMeltHeatMode(null)
+    heatLockedRef.current = false; setHeatLocked(false)   // new trip: heating available again
     meltSimRef.current.energyInput = 0
     setMeltEnergyIn(0); setGlassEnergyIn(0)
     gotoTargetRef.current = null; setGotoTargetTemp(null)
@@ -2069,27 +2077,37 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 54</span>
+                  }}>Field Test Version 55</span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),
                     heat/cool, GO box, kJ/°C readouts. Only the right "Visuals" group differs. */}
                 {<>
                   {/* Presets — centered over the heat/cool cluster on the line below */}
-                  <div style={{ display:'flex', gap:3, order:-1, marginLeft:119 }}>
+                  <div style={{ display:'flex', gap:3, order:-1, marginLeft:119, position:'relative' }}>
                     {PRESETS.map(preset => (
                       <button key={preset.id}
                         className={`preset-btn ${presetId===preset.id?'active':''}`}
                         onClick={() => switchPreset(preset.id)}
                       >{preset.label}</button>
                     ))}
+                    {/* Reset — the same hard reset as picking a composition, for the current one.
+                        Absolutely positioned (like the version tag) so adding it doesn't change the
+                        preset group's width and nudge the centered tab buttons. */}
+                    <button className="preset-btn"
+                      style={{ position:'absolute', left:'100%', marginLeft:8, whiteSpace:'nowrap' }}
+                      title="Reset temperature, particles, rotation and graph"
+                      onClick={() => switchPreset(presetIdRef.current)}
+                    >Reset</button>
                   </div>
                   {/* Second line: heat/cool buttons + readouts (flexBasis 100% forces a wrap) */}
                   <div style={{ flexBasis:'100%', height:10 }} />
                   {/* Heat/cool buttons, then the readouts right next to them */}
                   <button className={`action-btn test-btn${meltHeatMode==='slow'?' active':''}`}
+                    disabled={heatLocked} title={heatLocked ? 'Cooling is one-way — press Reset to heat again' : undefined}
                     style={{padding:'3px 9px', fontSize:11}} onClick={() => toggleMeltHeat('slow')}>Slow Heat</button>
                   <button className={`action-btn test-btn${meltHeatMode==='fast'?' active':''}`}
+                    disabled={heatLocked} title={heatLocked ? 'Cooling is one-way — press Reset to heat again' : undefined}
                     style={{padding:'3px 9px', fontSize:11}} onClick={() => toggleMeltHeat('fast')}>Fast Heat</button>
                   <button className={`action-btn reset-btn${coolingMode==='slow'?' active':''}`}
                     disabled={coolingMode !== 'slow' && meltLocalTemp < COOL_MIN_TEMP}
