@@ -228,14 +228,28 @@ export function mergeSilicateGrains(grains, naSandProb, silSilProb, maxMerges = 
 // ── Step ─────────────────────────────────────────────────────────────────
 const LARGE_R = GRAIN_R_MAX * 1.5  // grains above this use linear-scan collision
 
-export function stepSandPhysics(grains, dt, HS, boxAngle) {
+export function stepSandPhysics(grains, dt, HS, boxAngle, naBlobs = null) {
   const gx = GRAVITY * Math.sin(boxAngle)
   const gy = GRAVITY * Math.cos(boxAngle)
   const n  = grains.length
+  // Cooled-solid blobs (frozen by stepNaBlobSprings below NA_RIGID_TEMP) — see fitRigidNaBlob.
+  let rigid = null
+  if (naBlobs) for (const b of naBlobs) if (b.rb) (rigid ??= []).push(b)
 
   // 1. Store pre-step positions for velocity derivation
   for (let i = 0; i < n; i++) {
     const g = grains[i]; g._px = g.x; g._py = g.y
+  }
+  // Rigid blobs: every orb starts the step on the body's rigid velocity field (v_cm + ω×r), so
+  // the predict step moves the solid as one piece; contacts are then resolved by the shape match.
+  if (rigid) for (const b of rigid) {
+    const rb = b.rb, c = Math.cos(rb.theta), s = Math.sin(rb.theta)
+    rb.pcx = rb.cx; rb.pcy = rb.cy; rb.ptheta = rb.theta
+    for (let i = 0; i < rb.n; i++) {
+      const rx = rb.refX[i] * c - rb.refY[i] * s, ry = rb.refX[i] * s + rb.refY[i] * c
+      b.orbs[i].vx = rb.vx - rb.omega * ry
+      b.orbs[i].vy = rb.vy + rb.omega * rx
+    }
   }
 
   // 2. Predict: integrate gravity onto velocity, then position
@@ -271,6 +285,7 @@ export function stepSandPhysics(grains, dt, HS, boxAngle) {
             const minD = a.r + b.r
             if (d2 >= minD * minD || d2 < 1e-6) continue
             if (a.type === 'na-ctr' || b.type === 'na-ctr') continue
+            if (a._rigid && b._rigid && a.blobId === b.blobId) continue   // same solid: no internal contacts
             const d    = Math.sqrt(d2)
             const nx   = dx / d, ny = dy / d
             const push = (minD - d) * 0.5
@@ -307,6 +322,10 @@ export function stepSandPhysics(grains, dt, HS, boxAngle) {
       if (g.y < -hi) g.y = -hi
       if (g.y >  hi)  g.y =  hi
     }
+
+    // Shape-match every rigid blob at the end of each pass, so the NEXT pass already sees the
+    // solid's corrected pose — contacts push the whole body rather than denting it.
+    if (rigid) for (const b of rigid) fitRigidNaBlob(b, HS)
   }
 
   // 4. Derive velocity from total displacement; apply wall restitution + damping.
@@ -326,6 +345,29 @@ export function stepSandPhysics(grains, dt, HS, boxAngle) {
     const d = DAMPING_SLOW + (DAMPING_FAST - DAMPING_SLOW) * t
     g.vx *= d
     g.vy *= d
+  }
+
+  // Rigid blobs: velocity from the body's own pose change this step (no slow-grain damping — that
+  // is what made the cooled glass drift down instead of fall), then the orbs follow that field.
+  if (rigid) for (const b of rigid) {
+    const rb = b.rb
+    let dTh = rb.theta - rb.ptheta
+    if (dTh >  Math.PI) dTh -= 2 * Math.PI
+    if (dTh < -Math.PI) dTh += 2 * Math.PI
+    rb.vx = (rb.cx - rb.pcx) / dt * RB_DAMP_LIN
+    rb.vy = (rb.cy - rb.pcy) / dt * RB_DAMP_LIN
+    rb.omega = dTh / dt * RB_DAMP_ROT
+    const spd = Math.hypot(rb.vx, rb.vy)
+    if (spd > RB_MAX_SPEED) { rb.vx *= RB_MAX_SPEED / spd; rb.vy *= RB_MAX_SPEED / spd }
+    rb.omega = Math.max(-RB_MAX_OMEGA, Math.min(RB_MAX_OMEGA, rb.omega))
+    const c = Math.cos(rb.theta), s = Math.sin(rb.theta)
+    for (let i = 0; i < rb.n; i++) {
+      const rx = rb.refX[i] * c - rb.refY[i] * s, ry = rb.refX[i] * s + rb.refY[i] * c
+      b.orbs[i].vx = rb.vx - rb.omega * ry
+      b.orbs[i].vy = rb.vy + rb.omega * rx
+    }
+    const ctr = b.particles[0]
+    if (ctr && ctr.type === 'na-ctr') { ctr.vx = rb.vx; ctr.vy = rb.vy }
   }
 }
 
@@ -393,6 +435,89 @@ export function makeNaBlob(cx, cy, vx, vy, blobR) {
   return { id, blobR, particles, springs, orbs }
 }
 
+// ── Cooled-solid Na₂O blobs: true rigid bodies (v2 glassPhysics freeze, ported to PBD) ──
+// Below NA_RIGID_TEMP a blob stops being a spring soft-body. Its shape is frozen (each orb's
+// offset from the CM, like v2's freezeParticles) and every PBD pass ends with a SHAPE MATCH:
+// fit the best rigid translation + rotation to wherever contacts pushed the orbs, then snap all
+// orbs onto it. A push on one edge therefore moves/turns the whole solid instead of denting it —
+// zero deformation — and the body falls at full gravity (no per-step velocity kill).
+// Tunable: window._naRigidTemp (°C).
+export const NA_RIGID_TEMP = 400
+const RB_DAMP_LIN  = 0.9995   // per step — near-frictionless, like v2
+const RB_DAMP_ROT  = 0.995    // per step — slight rotational drag
+const RB_MAX_SPEED = 1200     // px/s hard cap (v2)
+const RB_MAX_OMEGA = 14       // rad/s hard cap (v2)
+
+function freezeNaBlob(blob) {
+  const orbs = blob.orbs, n = orbs.length
+  let cx = 0, cy = 0, vx = 0, vy = 0
+  for (const p of orbs) { cx += p.x; cy += p.y; vx += p.vx; vy += p.vy }
+  cx /= n; cy /= n; vx /= n; vy /= n
+  const refX = new Float32Array(n), refY = new Float32Array(n)
+  let I = 0, L = 0
+  for (let i = 0; i < n; i++) {
+    const p = orbs[i]
+    refX[i] = p.x - cx; refY[i] = p.y - cy
+    I += refX[i] * refX[i] + refY[i] * refY[i]
+    L += refX[i] * (p.vy - vy) - refY[i] * (p.vx - vx)
+    p._rigid = true
+  }
+  blob.rb = { n, refX, refY, cx, cy, theta: 0, vx, vy, omega: I > 0 ? L / I : 0, pcx: cx, pcy: cy, ptheta: 0 }
+  // Re-rest the springs at the frozen shape so a later reheat starts soft from THIS shape
+  // instead of snapping back toward the hex pack the blob was created with.
+  for (const s of blob.springs) s.rest = Math.hypot(s.b.x - s.a.x, s.b.y - s.a.y) || 0.001
+}
+
+function thawNaBlob(blob) {
+  const rb = blob.rb
+  // Hand the rigid velocity field back to the orbs so the soft body continues the motion.
+  const c = Math.cos(rb.theta), s = Math.sin(rb.theta)
+  for (let i = 0; i < blob.orbs.length; i++) {
+    const p = blob.orbs[i]; p._rigid = false
+    if (i >= rb.n) continue
+    const rx = rb.refX[i] * c - rb.refY[i] * s, ry = rb.refX[i] * s + rb.refY[i] * c
+    p.vx = rb.vx - rb.omega * ry; p.vy = rb.vy + rb.omega * rx
+  }
+  blob.rb = null
+}
+
+// Shape match: best-fit rigid pose (CM + rotation) of the orbs vs the frozen reference, then
+// place every orb exactly on it. Equal-mass orbs, so the fit is the 2D Procrustes rotation.
+function fitRigidNaBlob(blob, HS) {
+  const rb = blob.rb, orbs = blob.orbs, n = rb.n
+  let cx = 0, cy = 0
+  for (let i = 0; i < n; i++) { cx += orbs[i].x; cy += orbs[i].y }
+  cx /= n; cy /= n
+  let sc = 0, ss = 0
+  for (let i = 0; i < n; i++) {
+    const qx = orbs[i].x - cx, qy = orbs[i].y - cy
+    sc += rb.refX[i] * qx + rb.refY[i] * qy
+    ss += rb.refX[i] * qy - rb.refY[i] * qx
+  }
+  const th = (sc === 0 && ss === 0) ? rb.theta : Math.atan2(ss, sc)
+  const c = Math.cos(th), s = Math.sin(th)
+  // Keep the whole solid inside the box: translate the CM (v2's position correction) so no
+  // orb is past a wall. Rotation from wall contact comes from the per-orb clamp + this fit.
+  let pushL = 0, pushR = 0, pushT = 0, pushB = 0
+  for (let i = 0; i < n; i++) {
+    const hi = HS - orbs[i].r
+    const wx = cx + rb.refX[i] * c - rb.refY[i] * s
+    const wy = cy + rb.refX[i] * s + rb.refY[i] * c
+    if (wx < -hi) pushL = Math.max(pushL, -hi - wx)
+    if (wx >  hi) pushR = Math.max(pushR,  wx - hi)
+    if (wy < -hi) pushT = Math.max(pushT, -hi - wy)
+    if (wy >  hi) pushB = Math.max(pushB,  wy - hi)
+  }
+  cx += pushL - pushR; cy += pushT - pushB
+  for (let i = 0; i < n; i++) {
+    orbs[i].x = cx + rb.refX[i] * c - rb.refY[i] * s
+    orbs[i].y = cy + rb.refX[i] * s + rb.refY[i] * c
+  }
+  const ctr = blob.particles[0]
+  if (ctr && ctr.type === 'na-ctr') { ctr.x = cx; ctr.y = cy }
+  rb.cx = cx; rb.cy = cy; rb.theta = th
+}
+
 export function stepNaBlobSprings(naBlobs, dt, boxAngle = 0, temp = 1000) {
   const gx = Math.sin(boxAngle)
   const gy = Math.cos(boxAngle)
@@ -400,20 +525,20 @@ export function stepNaBlobSprings(naBlobs, dt, boxAngle = 0, temp = 1000) {
   // v2-style continuous stiffening: both factors are cubic in (1-t)
   // so they're near-zero above ~800°C and ramp sharply below 400°C.
   const tFull     = Math.max(0, Math.min(1, (temp - 25) / (GT.MELT_FULL - 25)))
-  const baseVel   = 0.15 * Math.pow(1 - tFull, 3)  // baseline inertia kill per step
-  const baseRigid = 0.90 * Math.pow(1 - tFull, 3)  // baseline projection toward CM velocity
-  // Hard-solid lock: the baseline alone leaves ~10% deformation even when cold. Below solidHi the
-  // cooled Na₂O solid stiffens to a hard body, reaching a FULL rigid lock (zero deformation) at
-  // solidLo. rigidFrac → 1 zeroes all relative velocity (no shape change); velDamp → 1 kills
-  // residual motion. Tunable: window._naSolidHi (400 °C) / _naSolidLo (100 °C).
-  const _w        = typeof window !== 'undefined' ? window : {}
-  const solidHi   = _w._naSolidHi ?? 400
-  const solidLo   = _w._naSolidLo ?? 100
-  const solidFrac = Math.max(0, Math.min(1, (solidHi - temp) / Math.max(1, solidHi - solidLo)))
-  const velDamp   = Math.min(1, baseVel   + (1 - baseVel)   * solidFrac)  // → 1 at solidLo
-  const rigidFrac = Math.min(1, baseRigid + (1 - baseRigid) * solidFrac)  // → 1 at solidLo: zero deformation
+  const velDamp   = 0.15 * Math.pow(1 - tFull, 3)  // inertia kill per step (soft body only)
+  const rigidFrac = 0.90 * Math.pow(1 - tFull, 3)  // projection toward CM velocity (soft body only)
+  // Below rigidT the blob is a true rigid body (freezeNaBlob / fitRigidNaBlob, run inside
+  // stepSandPhysics) — no springs, no velocity kill. Small hysteresis so it can't flicker.
+  const _w     = typeof window !== 'undefined' ? window : {}
+  const rigidT = _w._naRigidTemp ?? NA_RIGID_TEMP
 
   for (const blob of naBlobs) {
+    const orbsR = blob.orbs ?? (blob.orbs = blob.particles.filter(p => p.type === 'na-sub'))
+    if (blob.rb && (temp > rigidT + 15 || blob.rb.n !== orbsR.length)) thawNaBlob(blob)
+    if (temp <= rigidT && orbsR.length > 0) {
+      if (!blob.rb) freezeNaBlob(blob)
+      continue
+    }
     for (const s of blob.springs) {
       const a = s.a, b = s.b
       const dx = b.x - a.x, dy = b.y - a.y
@@ -503,7 +628,7 @@ function mergeNaBlobs(b1, b2, grains) {
     angle: 0, color: '#fff', _cr: 255, _cg: 255, _cb: 255,
   }
   grains.push(newCtr)
-  for (const p of allOrbs) p.blobId = _blobId
+  for (const p of allOrbs) { p.blobId = _blobId; p._rigid = false }   // new blob starts soft
 
   return {
     id: _blobId++,
@@ -643,7 +768,7 @@ export function snapshotSand(phys) {
 }
 
 export function restoreSand(snap) {
-  const grains = snap.grains.map(g => ({ ...g }))
+  const grains = snap.grains.map(g => ({ ...g, _rigid: false }))   // blobs restore soft; rigid re-freezes if cold
   const thresh2 = (NA_BLOB_PITCH * 1.5) ** 2
   const naBlobs = snap.blobs.map(b => {
     const particles = b.partIdx.map(i => grains[i])

@@ -394,14 +394,14 @@ function runHeatReplayChunk(phys, s, HS, box, isSoda, fast = false) {
     meldSandFrame(phys, MELT_DRIVE_TEMP, isSoda, soakK)
     if (R.frame % settleEvery === 0) {
       stepNaBlobSprings(phys.naBlobs, FIXED_DT, box.boxAngle, R.target)
-      stepSandPhysics(phys.sandParticles, FIXED_DT, HS, box.boxAngle)
+      stepSandPhysics(phys.sandParticles, FIXED_DT, HS, box.boxAngle, phys.naBlobs)
       checkNaBlobMerges(phys.naBlobs, phys.blobMct, phys.sandParticles, R.target)
     }
     R.frame++
     R.soak += soakK
   }
   if (goal <= 0 || macroMeltFrac(phys) >= goal || R.soak >= soakCap) {
-    for (let i = 0; i < 12; i++) stepSandPhysics(phys.sandParticles, FIXED_DT, HS, box.boxAngle)
+    for (let i = 0; i < 12; i++) stepSandPhysics(phys.sandParticles, FIXED_DT, HS, box.boxAngle, phys.naBlobs)
     s.temp = R.target
     s.heatReplay = null
   }  // else: still melting — stays hidden behind the loading overlay until it reaches the goal
@@ -1271,7 +1271,7 @@ export default function GlassViewer() {
             const pr = PRESETS.find(x => x.id === presetIdRef.current) ?? PRESETS[0]
             s.heatReplay = { t: 25, target: Math.max(25, sharedTempRef.current.temp),
                              frame: 0, na2o: pr.na2o, plateau: hcPlateauRef.current }
-            for (let i = 0; i < 20; i++) stepSandPhysics(phys.sandParticles, FIXED_DT, HS, box.boxAngle)
+            for (let i = 0; i < 20; i++) stepSandPhysics(phys.sandParticles, FIXED_DT, HS, box.boxAngle, phys.naBlobs)
           }
           if (s.heatReplay) {
             // Hide the catch-up melt behind a "Melting…" overlay and run it flat-out, then
@@ -1288,7 +1288,7 @@ export default function GlassViewer() {
             phys.accumulator += elapsed
             while (phys.accumulator >= FIXED_DT) {
               stepNaBlobSprings(phys.naBlobs, FIXED_DT, box.boxAngle, s.temp)
-              stepSandPhysics(phys.sandParticles, FIXED_DT, HS, box.boxAngle)
+              stepSandPhysics(phys.sandParticles, FIXED_DT, HS, box.boxAngle, phys.naBlobs)
               checkNaBlobMerges(phys.naBlobs, phys.blobMct, phys.sandParticles, s.temp)
               phys.accumulator -= FIXED_DT
             }
@@ -2085,7 +2085,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 56</span>
+                  }}>Field Test Version 57</span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),

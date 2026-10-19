@@ -1102,6 +1102,14 @@ of `na-sub` circles. `na` grains also merge directly into each other.
   (`k` 100) springs. Spring integration, velocity kill, rigid-body projection and gravitational
   flattening are all cubic in `(1 − t)` and near zero above 800 °C. Conversion is rate-limited to
   one grain per frame.
+- **Cooled solid = true rigid body (v4)**: at or below `NA_RIGID_TEMP` (400 °C, `window._naRigidTemp`;
+  thaws above +15 °C) `stepNaBlobSprings` freezes each blob (`freezeNaBlob` — v2 `freezeParticles`
+  style ref offsets) and skips its springs. `stepSandPhysics(…, naBlobs)` then puts the orbs on the
+  rigid velocity field before predict, and **shape-matches** each frozen blob at the end of every PBD
+  pass (`fitRigidNaBlob`: Procrustes best-fit CM + rotation, snap orbs, CM-translate out of walls).
+  Velocity comes from the body's pose change, not the slow-grain damping, so it free-falls, tumbles
+  and lands with zero deformation (headless: 0.000 px). Because the body is ~1.6× denser per area
+  than the frictionless PBD sand, it sinks through loose sand to the floor rather than resting on top.
 - **Merge dwell time**: `checkNaBlobMerges` needs `max(5, round(20/tempFactor))` consecutive
   contact frames — 20 frames at 1200 °C, 400 at 700 °C. Stops hot collisions from merging.
 - **Absorption** (`absorbNearbyGrains`): checks proximity to sub-circles, not the centre.
