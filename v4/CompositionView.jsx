@@ -239,7 +239,7 @@ function countBonds(phys) {
   return counts
 }
 
-export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, attractK = 0, attractFalloff = 1, debug = false, bondNums = false, meltTemp = 50, simSpeed = 1, speedMult = 1, coolingMode = null, onTempUpdate = null, onEnergyUpdate = null, onBondCounts = null, replayFrame = null, onReplayReady = null, graphCanvasRef = null, cumulativeEnergyRef = null, graphXMaxRef = null, darkMode = true, showCharge = false, chargeLite = false, showField = true, fieldBlur = true, interpolate = false, longerCooledBonds = true, atomColorMode = 'normal', showBrokenBonds = false, showLiveStats = false, useEmaStrain = true, hcPlateau = 4, active = true, resetToken = 0, targetTempLine = null, meltRestore = null }) {
+export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, attractK = 0, attractFalloff = 1, debug = false, bondNums = false, meltTemp = 50, simSpeed = 1, speedMult = 1, coolingMode = null, onTempUpdate = null, onEnergyUpdate = null, onBondCounts = null, replayFrame = null, onReplayReady = null, graphCanvasRef = null, cumulativeEnergyRef = null, graphXMaxRef = null, darkMode = true, showCharge = false, chargeLite = false, showField = true, fieldBlur = true, interpolate = false, longerCooledBonds = true, atomColorMode = 'normal', showBrokenBonds = false, showLiveStats = false, useEmaStrain = true, hcPlateau = 4, active = true, resetToken = 0, targetTempLine = null, meltRestore = null, coolCommitted = null }) {
   const types = useMemo(
     () => buildGrid(sio2Pct, na2oPct, caoPct),
     [sio2Pct, na2oPct, caoPct]
@@ -288,6 +288,11 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
   const prevCoolingRef      = useRef(null)
   const coolingStartERef    = useRef((meltTemp + 273) * ENERGY_UNIT)
   const coolingFrameRef     = useRef(0)
+  // Committed cool run: the mode ('fast'|'slow') of the cool ramp in progress. Cooling is a
+  // single run — stopping it is a PAUSE, and pressing the same Cool again RESUMES the same ramp
+  // (same start, same progress, same rate, replay kept) instead of starting a new one. Cleared by
+  // a heat ramp or when the parent's coolCommitted lock is released (Reset / composition change).
+  const coolRunRef          = useRef(null)
   const onTempUpdateRef     = useRef(onTempUpdate)
   const onEnergyUpdateRef   = useRef(onEnergyUpdate)
   const attractKRef         = useRef(attractK)
@@ -427,6 +432,9 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
 
   useEffect(() => { speedRef.current = simSpeed }, [simSpeed])
   useEffect(() => { coolingRef.current = coolingMode }, [coolingMode])
+  // The committed cool run ends only when the parent releases it (Reset / composition change) —
+  // NOT on a tab-switch rebuild, so a paused run still resumes after the melt tab is rebuilt.
+  useEffect(() => { if (!coolCommitted) coolRunRef.current = null }, [coolCommitted])
 
   // Rebuild physics when composition changes
   useEffect(() => {
@@ -787,7 +795,12 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
 
       // ── Detect ramp mode change ───────────────────────────────────
       if (cm !== prevCoolingRef.current) {
-        if (cm === 'fast' || cm === 'slow' || cm === 'fastHeat' || cm === 'slowHeat') {
+        if ((cm === 'fast' || cm === 'slow') && coolRunRef.current === cm) {
+          // Resume the paused cool run: keep its start energy, progress and replay buffer, so
+          // it carries on at the same rate and the graph continues along the same cooling path.
+          replayNotifiedRef.current = false   // re-announce the (longer) replay when it next stops
+        } else if (cm === 'fast' || cm === 'slow' || cm === 'fastHeat' || cm === 'slowHeat') {
+          coolRunRef.current = (cm === 'fast' || cm === 'slow') ? cm : null
           coolingStartERef.current  = effectiveERef.current
           coolingFrameRef.current   = 0
           replayBufferRef.current   = []
@@ -863,7 +876,9 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
       } else {
         ePerParticle = (energyValRef.current + 273) * ENERGY_UNIT   // energyValRef tracks meltTemp
         effectiveERef.current = ePerParticle
-        coolGraphERef.current = null   // hold uses the normal energy axis
+        // Hold uses the normal energy axis — except a PAUSED cool run, which keeps its point on
+        // the cooling (hysteresis) path so the graph doesn't jump sideways while paused.
+        if (!coolRunRef.current) coolGraphERef.current = null
       }
 
       // Propagate slider-equivalent energy value to parent (throttled to ~10×/s by wall-clock)

@@ -644,6 +644,11 @@ export default function GlassViewer() {
   // composition button). Ref mirrors the state so the stable callbacks can read it.
   const [heatLocked, setHeatLocked] = useState(false)
   const heatLockedRef = useRef(false)
+  // The committed cool mode ('slow' | 'fast'): the first Cool pressed is the run. It can be
+  // stopped and restarted (resumes — see CompositionView coolRunRef) but not switched to the
+  // other speed. Cleared only by a hard reset.
+  const [coolLocked, setCoolLocked] = useState(null)
+  const coolLockedRef = useRef(null)
   const [bondNums, setBondNums]       = useState(false)
   const [atomColorMode,   setAtomColorMode]   = useState('normal')
   const [showBrokenBonds, setShowBrokenBonds] = useState(false)
@@ -968,7 +973,7 @@ export default function GlassViewer() {
   const onGoTemp = useCallback(() => {
     const v = Math.max(0, Math.min(1800, Math.round(+gotoTemp)))
     if (!Number.isFinite(v)) return
-    if (heatLockedRef.current && v > meltTempRef.current.temp) return   // no heating after cooling
+    if (coolLockedRef.current) return   // a committed cool run owns the temperature until reset
     setMeltHeatMode(null); setCoolingMode(null)
     // Ramp to the target via the heat-capacity integrator (same rate as Fast Heat / cool).
     gotoTargetRef.current = v; setGotoTargetTemp(v)
@@ -1006,6 +1011,8 @@ export default function GlassViewer() {
   }, [replayPlaying, replayFrameCount])
 
   const startCooling = useCallback(mode => {
+    if (coolLockedRef.current && coolLockedRef.current !== mode) return   // no switching speed mid-run
+    coolLockedRef.current = mode; setCoolLocked(mode)
     heatLockedRef.current = true; setHeatLocked(true)   // cooling is one-way: heat stays off until reset
     setReplayFrameCount(0); setReplayFrame(null); setReplayPlaying(false)
     setMeltHeatMode(null)
@@ -1999,6 +2006,7 @@ export default function GlassViewer() {
     // modes / energy flow off
     setCoolingMode(null); setMeltHeatMode(null)
     heatLockedRef.current = false; setHeatLocked(false)   // new trip: heating available again
+    coolLockedRef.current = null;  setCoolLocked(null)    // …and either cool speed
     meltSimRef.current.energyInput = 0
     setMeltEnergyIn(0); setGlassEnergyIn(0)
     gotoTargetRef.current = null; setGotoTargetTemp(null)
@@ -2077,7 +2085,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 55</span>
+                  }}>Field Test Version 56</span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),
@@ -2109,14 +2117,19 @@ export default function GlassViewer() {
                   <button className={`action-btn test-btn${meltHeatMode==='fast'?' active':''}`}
                     disabled={heatLocked} title={heatLocked ? 'Cooling is one-way — press Reset to heat again' : undefined}
                     style={{padding:'3px 9px', fontSize:11}} onClick={() => toggleMeltHeat('fast')}>Fast Heat</button>
-                  <button className={`action-btn reset-btn${coolingMode==='slow'?' active':''}`}
-                    disabled={coolingMode !== 'slow' && meltLocalTemp < COOL_MIN_TEMP}
-                    title={coolingMode !== 'slow' && meltLocalTemp < COOL_MIN_TEMP ? `Heat to ${COOL_MIN_TEMP}°C first` : undefined}
-                    style={{padding:'3px 9px', fontSize:11}} onClick={() => startCooling('slow')}>Slow Cool</button>
-                  <button className={`action-btn reset-btn${coolingMode==='fast'?' active':''}`}
-                    disabled={coolingMode !== 'fast' && meltLocalTemp < COOL_MIN_TEMP}
-                    title={coolingMode !== 'fast' && meltLocalTemp < COOL_MIN_TEMP ? `Heat to ${COOL_MIN_TEMP}°C first` : undefined}
-                    style={{padding:'3px 9px', fontSize:11}} onClick={() => startCooling('fast')}>Fast Cool</button>
+                  {/* Cool: the first speed pressed is the committed run — it stays clickable to
+                      stop/resume (even below the start gate once paused), the other is locked. */}
+                  {['slow', 'fast'].map(m => {
+                    const off = coolLocked ? coolLocked !== m : meltLocalTemp < COOL_MIN_TEMP
+                    const why = coolLocked ? 'One cooling run at a time — press Reset to change speed'
+                                           : `Heat to ${COOL_MIN_TEMP}°C first`
+                    return (
+                      <button key={m} className={`action-btn reset-btn${coolingMode===m?' active':''}`}
+                        disabled={off} title={off ? why : undefined}
+                        style={{padding:'3px 9px', fontSize:11}} onClick={() => startCooling(m)}
+                      >{m === 'slow' ? 'Slow Cool' : 'Fast Cool'}</button>
+                    )
+                  })}
                   {showGoBox && <>
                     <div className="toolbar-divider" />
                     <input type="number" min={0} max={1800} value={gotoTemp}
@@ -2124,7 +2137,8 @@ export default function GlassViewer() {
                       onKeyDown={e => { if (e.key === 'Enter') onGoTemp() }}
                       placeholder="°C"
                       style={{ width:68, padding:'3px 5px', fontSize:12, textAlign:'right', border:'1px solid rgba(100,90,70,0.5)', borderRadius:3, background:'#e8e3da', color:'#2a2620' }} />
-                    <button className="action-btn test-btn" style={{padding:'3px 10px', fontSize:11}} onClick={onGoTemp}>GO</button>
+                    <button className="action-btn test-btn" style={{padding:'3px 10px', fontSize:11}} onClick={onGoTemp}
+                      disabled={!!coolLocked} title={coolLocked ? 'Cooling run in progress — press Reset' : undefined}>GO</button>
                   </>}
                   <div className="toolbar-divider" />
                   <div style={lcdStyle}>
@@ -2671,7 +2685,7 @@ export default function GlassViewer() {
               and drawing while the Bulk Material tab is showing. */}
           <div style={{ display: tab==='melt' ? 'flex' : 'none', flexDirection:'column', width:'100%', height:'100%' }}>
             <CompositionView key="melt"
-              active={tab === 'melt'} resetToken={meltResetToken}
+              active={tab === 'melt'} resetToken={meltResetToken} coolCommitted={coolLocked}
               sio2Pct={p.sio2} na2oPct={p.na2o} caoPct={p.cao}
               sioR0={sioR0} attractK={attractK} attractFalloff={attractFalloff} debug={false}
               bondNums={bondNums}
