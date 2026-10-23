@@ -613,7 +613,7 @@ export default function GlassViewer() {
   const [motionCold,     setMotionColdState]  = useState(0.1)   // lattice jiggle at 0 °C (× full), render only
   const [motionFullT,    setMotionFullTState] = useState(500)   // °C where jiggle reaches full
   const [heatLeadSteps,  setHeatLeadSteps] = useState(30)
-  const [glassLook,      setGlassLookState]     = useState({ rim: 2.0, dark: 0.93, gain: 5, lightDeg: -50 })
+  const [glassLook,      setGlassLookState]     = useState({ rim: 2.0, dark: 0.18, gain: 5, lightDeg: -135 })
   const [naHardenT,      setNaHardenTState]     = useState(900)   // Bulk glass starts hardening
   const [naRigidT,       setNaRigidTState]      = useState(500)   // Bulk glass fully rigid
   const [bondLockTemp,   setBondLockTempState]  = useState(400)   // cooling: bonds lock in here (fast + slow)
@@ -722,7 +722,10 @@ export default function GlassViewer() {
   // Cooled-glass look (Bulk). Read by the box RAF loop; set by dev sliders ("Tune these").
   //   onT/fullT: crossfade old fill → glass; rim: rim brightness; dark: interior opacity (near-black);
   //   gain: edge curvature = blur radius of the height field (rim width, px); lightDeg: world light direction (for specular).
-  const glassLookRef  = useRef({ onT: 1000, fullT: 500, rim: 2.0, dark: 0.93, gain: 5, lightDeg: -50 })
+  const glassLookRef  = useRef({ onT: 1000, fullT: 500, rim: 2.0, dark: 0.18, gain: 5, lightDeg: -135 })
+  // Glass look only applies to glass that has been melted and is COOLING: eases to 1 once a cool
+  // run starts, back to 0 if heating resumes; reset with the composition. Never during heating.
+  const glassGateRef  = useRef(0)
   const bgGrayRef     = useRef(0)   // box background: 0 = black (heating/idle-hot), ramps to 1 (gray) while cooling
   const bgHeatTintRef = useRef(0)   // eased 0..1 strength of the red heating wash (fades out at auto-shutoff)
   const bgCoolTintRef = useRef(0)   // eased 0..1 strength of the blue cooling wash
@@ -1403,6 +1406,7 @@ export default function GlassViewer() {
           bgGrayRef.current += (_gTarget - bgGrayRef.current) * _gRate
         }
         const _bgGray = bgGrayRef.current
+        glassGateRef.current += ((_cool ? 1 : (_heat ? 0 : (glassGateRef.current > 0.5 ? 1 : 0))) - glassGateRef.current) * 0.08
         // Red/blue wash strength eases toward 1 while that flow is on and 0 once it stops, so when
         // heating/cooling auto-shuts off (ceiling, ramp target, GO arrival, floor) the box fades
         // back to neutral instead of cutting off. The refs hold LINEAR progress (constant step per
@@ -1537,15 +1541,16 @@ export default function GlassViewer() {
             // glassAmt crossfades the old self-lit fill → glass as the melt cools 1000 → 500 °C.
             // The crisp blob mask, BLURRED by GL.gain px, is treated as the blob's HEIGHT (a pillow:
             // 0.5 at the outline rising smoothly to 1 inside over the blur radius):
-            //  1. normal = from the field gradient (smooth + curved, works for merged/concave
-            //     blobs); light direction L is world-space (doesn't rotate with the box) — used by
-            //     the specular step, not yet here.
-            //  2. interior (flat field → surface faces the viewer) = nearly black, not a gray wash.
-            //  3. rim (steep field → surface tilts away from the viewer) = Fresnel-bright, faint
-            //     green-cyan. Edge alpha comes from the soft field too → anti-aliased curved outline.
+            //  1. normal = from the height gradient (smooth + curved, works for merged/concave
+            //     blobs), rotated from the box frame into SCREEN space, so the light L (GL.lightDeg)
+            //     stays fixed while the box spins.
+            //  2. body = a faint green-gray veil (clear glass), not a dark fill.
+            //  3. rim = Fresnel (peaks at the outline) × light: bright pale edge facing L, a darker
+            //     refracted edge on the shadow side, a faint exit glow opposite the light.
+            //     Edge alpha comes from the soft height too → anti-aliased curved outline.
             const GL = glassLookRef.current
             const gu = Math.max(0, Math.min(1, (GL.onT - s.temp) / Math.max(1, GL.onT - GL.fullT)))
-            const glassAmt = gu * gu * (3 - 2 * gu)
+            const glassAmt = gu * gu * (3 - 2 * gu) * glassGateRef.current   // cooling only
             if (glassAmt > 0) {
               gfctx.clearRect(0, 0, BOX_SIZE, BOX_SIZE)
               gfctx.filter = `blur(${GL.gain}px)`
@@ -1554,25 +1559,43 @@ export default function GlassViewer() {
               const F = gfctx.getImageData(0, 0, BOX_SIZE, BOX_SIZE).data
               const O = glassImg.data, W = BOX_SIZE
               const rimB = GL.rim, dark = GL.dark, gain = GL.gain * 11    // slope × blur width → tilt (≈4 at the outline)
-              const tr = 205, tg = 246, tb = 236          // faint green-cyan rim tint (mostly white)
-              const br = 4, bg = 8, bb = 9                // near-black interior
+              // World-fixed light: per-pixel normals are in the BOX frame, so rotate them by the box
+              // angle into screen space before lighting — the lit edge stays toward the light while
+              // the box spins.
+              const lA = GL.lightDeg * Math.PI / 180, Lx = Math.cos(lA), Ly = Math.sin(lA)
+              const bc = Math.cos(box.boxAngle), bs = Math.sin(box.boxAngle)
+              const AMB = 0.12                            // unlit edges keep a little rim
+              const tr = 215, tg = 248, tb = 238          // lit rim: near-white, faint green-cyan
+              const ir = 70,  ig = 96,  ib = 92           // body veil: faint green-gray (clear glass)
+              const er = 18,  eg = 30,  eb = 30           // shadow-side edge: dark, refracted look
               O.fill(0)
               for (let y = 1; y < W - 1; y++) {
                 for (let x = 1; x < W - 1; x++) {
                   const i = y * W + x, f = F[i * 4 + 3] / 255
                   if (f < 0.40) continue
-                  const ea = Math.min(1, (f - 0.40) / 0.08)          // thin anti-aliased edge, so the rim's peak stays opaque
+                  const ea = Math.min(1, (f - 0.40) / 0.08)          // thin anti-aliased edge
                   const a  = ea * ea * (3 - 2 * ea)
                   const gx = (F[(i + 1) * 4 + 3] - F[(i - 1) * 4 + 3]) / 510
                   const gy = (F[(i + W) * 4 + 3] - F[(i - W) * 4 + 3]) / 510
-                  const g  = Math.hypot(gx, gy) * gain
+                  const gm = Math.hypot(gx, gy), g = gm * gain
                   const nz = 1 / Math.sqrt(1 + g * g)                  // normal's view-facing component
-                  const rim = Math.min(1, Math.pow(1 - nz, 2.2) * rimB)  // Fresnel: peaks at the outline, falls off inward
+                  const fres = Math.pow(1 - nz, 2.2)                   // Fresnel: peaks at the outline
+                  // outward in-plane normal (height rises inward) → screen space → light term
+                  let ndl = 0
+                  if (gm > 1e-6) {
+                    const nx = -gx / gm, ny = -gy / gm
+                    ndl = (nx * bc - ny * bs) * Lx + (nx * bs + ny * bc) * Ly
+                  }
+                  const lit   = ndl > 0 ? Math.pow(ndl, 1.3) : 0
+                  const back  = ndl < 0 ? ndl * ndl : 0
+                  const bright = Math.min(1, fres * rimB * (AMB + (1 - AMB) * lit) + fres * 0.35 * back)  // lit rim + faint exit glow
+                  const shade  = Math.min(1, fres * (1 - lit) * 0.6)                                   // shadow-side edge
+                  let r = ir, gg = ig, b = ib
+                  r += (er - r) * shade; gg += (eg - gg) * shade; b += (eb - b) * shade
+                  r += (tr - r) * bright; gg += (tg - gg) * bright; b += (tb - b) * bright
                   const k = i * 4
-                  O[k]     = br + (tr - br) * rim
-                  O[k + 1] = bg + (tg - bg) * rim
-                  O[k + 2] = bb + (tb - bb) * rim
-                  O[k + 3] = 255 * a * (dark + (1 - dark) * rim)
+                  O[k] = r; O[k + 1] = gg; O[k + 2] = b
+                  O[k + 3] = 255 * a * Math.min(1, dark + (1 - dark) * Math.max(shade, bright))
                 }
               }
               gctx.putImageData(glassImg, 0, 0)
@@ -2149,7 +2172,7 @@ export default function GlassViewer() {
     setReplayFrame(null); setReplayFrameCount(0); setReplayPlaying(false)
     setBoxLoading(false); setBoxMeltFrac(0); setMeltRestore(null)
     // background back to black (gray fade latch)
-    bgGrayRef.current = 0; bgHeatTintRef.current = 0; bgCoolTintRef.current = 0
+    bgGrayRef.current = 0; bgHeatTintRef.current = 0; bgCoolTintRef.current = 0; glassGateRef.current = 0
     // rebuild the melt-tab particle arrangement + clear the graph history (even on same preset)
     setMeltResetToken(t => t + 1)
   }
@@ -2228,7 +2251,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 84</span>
+                  }}>Field Test Version 86</span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),
@@ -2578,9 +2601,9 @@ export default function GlassViewer() {
                   min={100} max={1000} step={25} value={motionFullT} onChange={e => { const v = +e.target.value; setMotionFullTState(v); setMotionFullT(v) }} />
                 <div style={{fontSize:10, color:'#777', marginBottom:8}}>Particles tab, render only: lattice-atom jiggle ramps linearly from the cold value at 0 °C to full here (bonds start going pink ~500 °C).</div>
                 {[['rim', 'Glass rim brightness', 0, 4, 0.05, v => v.toFixed(2)],
-                  ['dark', 'Glass interior darkness', 0, 1, 0.01, v => `${Math.round(v * 100)}%`],
+                  ['dark', 'Glass body tint (opacity)', 0, 1, 0.01, v => `${Math.round(v * 100)}%`],
                   ['gain', 'Glass edge curvature (rim width)', 2, 16, 0.5, v => `${v} px`],
-                  ['lightDeg', 'Glass light angle (specular, next)', -180, 180, 5, v => `${v}°`]].map(([k, label, mn, mx, st, fmt]) => (
+                  ['lightDeg', 'Glass light angle (fixed to screen)', -180, 180, 5, v => `${v}°`]].map(([k, label, mn, mx, st, fmt]) => (
                   <div key={k}>
                     <div style={{fontSize:11, color:'#888', marginBottom:2}}>{label}: <span style={{color:'#a090d0'}}>{fmt(glassLook[k])}</span></div>
                     <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
@@ -2588,7 +2611,7 @@ export default function GlassViewer() {
                       onChange={e => { const v = +e.target.value; setGlassLookState(g => ({ ...g, [k]: v })); glassLookRef.current[k] = v }} />
                   </div>
                 ))}
-                <div style={{fontSize:10, color:'#777', marginBottom:8}}>Bulk cooled glass: dark interior + Fresnel rim (green-cyan), fading in 1000 → 500 °C as the self-lit fill fades out. Curvature = how wide/soft the rim band is.</div>
+                <div style={{fontSize:10, color:'#777', marginBottom:8}}>Bulk cooled glass (cooling only): clear tinted body, rim lit from a light that stays fixed while the box spins (−135° = upper-left), darker edge on the shadow side, faint exit glow opposite. Fades in 1000 → 500 °C.</div>
                 <div style={{fontSize:11, color:'#888', marginBottom:2}}>Bulk glass starts hardening at: <span style={{color:'#a090d0'}}>{naHardenT} °C</span></div>
                 <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
                   min={500} max={1300} step={25} value={naHardenT} onChange={e => { const v = Math.max(+e.target.value, naRigidT + 25); setNaHardenTState(v); setNaHardenTemp(v) }} />
