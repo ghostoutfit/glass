@@ -465,7 +465,7 @@ body[data-theme='light'] .charge-label      { color: #666; }
 body[data-theme='light'] .particle-area     { background: #ede8df; }
 
 /* ── Time toggle (ported from the fission repo's GO button) ──
-   Running → "❙ ❙" with fission's red glow (click = pause). Paused → "▶ GO" with an accent glow
+   Running → "❙ ❙" in the replay buttons' dark-blue steel (click = pause). Paused → "▶ GO" with an accent glow
    (click = resume from the exact same moment). Fixed width so the label swap never reflows. */
 .time-btn {
   position: relative;
@@ -481,19 +481,24 @@ body[data-theme='light'] .particle-area     { background: #ede8df; }
   transition: background 0.15s, box-shadow 0.15s;
 }
 .time-btn:active { transform: translateY(1px); }
-.time-btn.running {
-  border: 1px solid #ff4040;
-  background: rgba(120,18,18,0.62);
+.time-btn.running {   /* no red — same dark-blue steel as the turtle / rabbit beside it */
+  background: linear-gradient(165deg, #1e2a40 0%, #141e30 50%, #0e1624 100%);
+  border: 1px solid #2e4060;
+  color: #90c8f0;
+  text-shadow: 0 1px 0 rgba(60,130,210,0.22), 0 -1px 0 rgba(0,0,20,0.75);
   box-shadow:
-    inset 0 0 6px rgba(255,40,40,0.22),
-    0 0 2px #ff4040,
-    0 0 8px #ff4040,
-    0 0 18px rgba(255,40,40,0.5),
-    0 0 40px rgba(255,40,40,0.2);
-  text-shadow: 0 0 4px rgba(255,255,255,0.5), 0 0 10px #ff4040, 0 0 22px rgba(255,80,80,0.6);
+    inset 0 1px 0 rgba(80,140,230,0.14),
+    inset 0 -2px 0 rgba(0,0,0,0.40),
+    0 0 0 1px #060810,
+    0 3px 0 #060810,
+    0 4px 8px rgba(0,0,0,0.60),
+    0 8px 18px rgba(0,0,0,0.35);
   letter-spacing: 1px;
 }
-.time-btn.running:hover { background: rgba(150,28,28,0.72); }
+.time-btn.running:hover {
+  background: linear-gradient(165deg, #283650 0%, #1c2840 50%, #141c30 100%);
+  border-color: #3e5878;
+}
 .time-btn.paused {
   border: 1px solid #4ade80;
   background: rgba(16,80,40,0.62);

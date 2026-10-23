@@ -214,9 +214,11 @@ function drawTEGraph(canvas, hist, darkMode = true, eMax = 4e-3, targetTempLine 
       i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)
     }
     ctx.stroke()
-    // Current point dot
-    const last = hist[n - 1]
-    ctx.fillStyle = darkMode ? '#ffcc80' : '#e05500'; ctx.beginPath(); ctx.arc(toX(last.e), toY(last.t), 4, 0, Math.PI * 2); ctx.fill()
+    // Current (live) point dot — hidden while scrubbing / replaying, where the replay ring marks "now"
+    if (!replayPt) {
+      const last = hist[n - 1]
+      ctx.fillStyle = darkMode ? '#ffcc80' : '#e05500'; ctx.beginPath(); ctx.arc(toX(last.e), toY(last.t), 4, 0, Math.PI * 2); ctx.fill()
+    }
   }
 
   const labelBox = (parts, x, y) => {   // parts: [[text, colour], …]; drawn on a soft backing box
