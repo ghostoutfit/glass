@@ -369,6 +369,22 @@ export function stepSandPhysics(grains, dt, HS, boxAngle, naBlobs = null) {
     const ctr = b.particles[0]
     if (ctr && ctr.type === 'na-ctr') { ctr.vx = rb.vx; ctr.vy = rb.vy }
   }
+
+  // Pin every soft blob's phantom centre to its orbs' centre of mass. The centre never collides,
+  // and a MERGED blob has no springs holding it, so it used to fall through everything to the
+  // wall (measured ~95 px off the real blob). absorbNearbyGrains' pre-cull and checkNaBlobMerges'
+  // contact test both measure from it, so touching grains were never absorbed and touching blobs
+  // never merged. (Rigid blobs are already pinned by fitRigidNaBlob.)
+  if (naBlobs) for (const b of naBlobs) {
+    if (b.rb) continue
+    const orbs = b.orbs, ctr = b.particles[0]
+    if (!orbs || !orbs.length || !ctr || ctr.type !== 'na-ctr') continue
+    let cx = 0, cy = 0, vx = 0, vy = 0
+    for (const p of orbs) { cx += p.x; cy += p.y; vx += p.vx; vy += p.vy }
+    const k = 1 / orbs.length
+    ctr.x = cx * k; ctr.y = cy * k; ctr.vx = vx * k; ctr.vy = vy * k
+    ctr._px = ctr.x; ctr._py = ctr.y
+  }
 }
 
 // ── Na₂O blob system ──────────────────────────────────────────────────────
