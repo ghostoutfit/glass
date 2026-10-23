@@ -230,6 +230,11 @@ function glassColor(tempC) {
 // strengths the caller eases toward 1 while that flow is active and 0 once it stops, so the wash
 // fades out when heating/cooling auto-shuts off at a limit instead of snapping off in one frame.
 function boxBgTint(baseR, baseG, baseB, heatAmt, coolAmt, grayAmt, tempC) {
+  const [r, g, b] = boxBgTintRGB(baseR, baseG, baseB, heatAmt, coolAmt, grayAmt, tempC)
+  return `rgb(${r},${g},${b})`
+}
+// Same as boxBgTint, as numbers — the cooled glass paints this exact colour under its body.
+function boxBgTintRGB(baseR, baseG, baseB, heatAmt, coolAmt, grayAmt, tempC) {
   // grayAmt (0..1) lifts the background from its dark base toward a light neutral gray. The caller
   // ramps it in only while COOLING, so the box is black through heating/hot holds (gray looks bad
   // behind raw grains) and gray once cooled (so the cooled glass is visible). Gray: window._glassBgGray.
@@ -250,7 +255,7 @@ function boxBgTint(baseR, baseG, baseB, heatAmt, coolAmt, grayAmt, tempC) {
     g = bG + (235 - bG) * k * 0.45
     b = bB + (255 - bB) * k
   }
-  return `rgb(${Math.round(r)},${Math.round(g)},${Math.round(b)})`
+  return [Math.round(r), Math.round(g), Math.round(b)]
 }
 
 // ── Na₂O blob outline helpers ─────────────────────────────────────────────
@@ -613,7 +618,7 @@ export default function GlassViewer() {
   const [motionCold,     setMotionColdState]  = useState(0.1)   // lattice jiggle at 0 °C (× full), render only
   const [motionFullT,    setMotionFullTState] = useState(500)   // °C where jiggle reaches full
   const [heatLeadSteps,  setHeatLeadSteps] = useState(30)
-  const [glassLook,      setGlassLookState]     = useState({ rim: 2.0, dark: 0.18, gain: 5, lightDeg: -135 })
+  const [glassLook,      setGlassLookState]     = useState({ rim: 2.0, dark: 0.10, gain: 9, lightDeg: 180 })
   const [naHardenT,      setNaHardenTState]     = useState(900)   // Bulk glass starts hardening
   const [naRigidT,       setNaRigidTState]      = useState(500)   // Bulk glass fully rigid
   const [bondLockTemp,   setBondLockTempState]  = useState(400)   // cooling: bonds lock in here (fast + slow)
@@ -722,7 +727,7 @@ export default function GlassViewer() {
   // Cooled-glass look (Bulk). Read by the box RAF loop; set by dev sliders ("Tune these").
   //   onT/fullT: crossfade old fill → glass; rim: rim brightness; dark: interior opacity (near-black);
   //   gain: edge curvature = blur radius of the height field (rim width, px); lightDeg: world light direction (for specular).
-  const glassLookRef  = useRef({ onT: 1000, fullT: 500, rim: 2.0, dark: 0.18, gain: 5, lightDeg: -135 })
+  const glassLookRef  = useRef({ onT: 1000, fullT: 500, rim: 2.0, dark: 0.10, gain: 9, lightDeg: 180 })
   // Glass look only applies to glass that has been melted and is COOLING: eases to 1 once a cool
   // run starts, back to 0 if heating resumes; reset with the composition. Never during heating.
   const glassGateRef  = useRef(0)
@@ -1567,6 +1572,10 @@ export default function GlassViewer() {
               const AMB = 0.12                            // unlit edges keep a little rim
               const tr = 215, tg = 248, tb = 238          // lit rim: near-white, faint green-cyan
               const ir = 70,  ig = 96,  ib = 92           // body veil: faint green-gray (clear glass)
+              // Body = the EXACT box background colour, painted opaque (hides any leftover grains under
+              // the glass), with the tint veil (GL.dark) over it — reads as perfectly clear glass.
+              const [bgR, bgG, bgB] = boxBgTintRGB(22, 18, 16, _heatTint, _coolTint, _bgGray, s.temp)
+              const vr = bgR + (ir - bgR) * dark, vg = bgG + (ig - bgG) * dark, vb = bgB + (ib - bgB) * dark
               const er = 18,  eg = 30,  eb = 30           // shadow-side edge: dark, refracted look
               O.fill(0)
               for (let y = 1; y < W - 1; y++) {
@@ -1590,12 +1599,12 @@ export default function GlassViewer() {
                   const back  = ndl < 0 ? ndl * ndl : 0
                   const bright = Math.min(1, fres * rimB * (AMB + (1 - AMB) * lit) + fres * 0.35 * back)  // lit rim + faint exit glow
                   const shade  = Math.min(1, fres * (1 - lit) * 0.6)                                   // shadow-side edge
-                  let r = ir, gg = ig, b = ib
+                  let r = vr, gg = vg, b = vb
                   r += (er - r) * shade; gg += (eg - gg) * shade; b += (eb - b) * shade
                   r += (tr - r) * bright; gg += (tg - gg) * bright; b += (tb - b) * bright
                   const k = i * 4
                   O[k] = r; O[k + 1] = gg; O[k + 2] = b
-                  O[k + 3] = 255 * a * Math.min(1, dark + (1 - dark) * Math.max(shade, bright))
+                  O[k + 3] = 255 * a                                  // opaque body (bg colour + tint)
                 }
               }
               gctx.putImageData(glassImg, 0, 0)
@@ -2251,7 +2260,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 86</span>
+                  }}>Field Test Version 87</span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),
@@ -2611,7 +2620,7 @@ export default function GlassViewer() {
                       onChange={e => { const v = +e.target.value; setGlassLookState(g => ({ ...g, [k]: v })); glassLookRef.current[k] = v }} />
                   </div>
                 ))}
-                <div style={{fontSize:10, color:'#777', marginBottom:8}}>Bulk cooled glass (cooling only): clear tinted body, rim lit from a light that stays fixed while the box spins (−135° = upper-left), darker edge on the shadow side, faint exit glow opposite. Fades in 1000 → 500 °C.</div>
+                <div style={{fontSize:10, color:'#777', marginBottom:8}}>Bulk cooled glass (cooling only): clear tinted body, rim lit from a light that stays fixed while the box spins (180° = from the left), darker edge on the shadow side, faint exit glow opposite. Fades in 1000 → 500 °C.</div>
                 <div style={{fontSize:11, color:'#888', marginBottom:2}}>Bulk glass starts hardening at: <span style={{color:'#a090d0'}}>{naHardenT} °C</span></div>
                 <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
                   min={500} max={1300} step={25} value={naHardenT} onChange={e => { const v = Math.max(+e.target.value, naRigidT + 25); setNaHardenTState(v); setNaHardenTemp(v) }} />
