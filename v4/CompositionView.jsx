@@ -83,22 +83,24 @@ function tempForContent(target, na2oPct, plateau) {
 // Slow cool finds more/better bonds, so it releases MORE latent heat → an even taller hump
 // (even shallower shelf) than fast. Live-tunable via window._coolLatentSlow / _coolLatentFast.
 const COOL_BAND_LO = GT.LATENT_LO, COOL_BAND_HI = GT.CRYST_LOCK, COOL_BAND_W = 60
-function coolHeatCap(T, slow) {
-  const amp = slow ? (window._coolLatentSlow ?? 7) : (window._coolLatentFast ?? 3)
+// The latent-heat shelf scales with Na₂O exactly like heating's heatCap (× min(1, na2o/30)), so
+// pure SiO₂ — no bonds break or form — has a flat curve and cools straight back down the heating line.
+function coolHeatCap(T, slow, na2oPct = 30) {
+  const amp = 1 + ((slow ? (window._coolLatentSlow ?? 7) : (window._coolLatentFast ?? 3)) - 1) * Math.min(1, na2oPct / 30)
   const ss = (a, b, x) => { const u = Math.max(0, Math.min(1, (x - a) / (b - a))); return u * u * (3 - 2 * u) }
   const band = ss(COOL_BAND_LO - COOL_BAND_W, COOL_BAND_LO + COOL_BAND_W, T) *
                (1 - ss(COOL_BAND_HI - COOL_BAND_W, COOL_BAND_HI + COOL_BAND_W, T))
   return 1 + (amp - 1) * band
 }
-function coolEnergyContent(T, slow) {
+function coolEnergyContent(T, slow, na2oPct) {
   let c = 0
-  for (let x = 5; x <= T; x += 5) c += coolHeatCap(x, slow) * 5
+  for (let x = 5; x <= T; x += 5) c += coolHeatCap(x, slow, na2oPct) * 5
   return c * ENERGY_UNIT
 }
-function coolTempForContent(target, slow) {
+function coolTempForContent(target, slow, na2oPct) {
   if (target <= 0) return 0
   let c = 0
-  for (let x = 5; x <= 2000; x += 5) { c += coolHeatCap(x, slow) * 5 * ENERGY_UNIT; if (c >= target) return x }
+  for (let x = 5; x <= 2000; x += 5) { c += coolHeatCap(x, slow, na2oPct) * 5 * ENERGY_UNIT; if (c >= target) return x }
   return 2000
 }
 // Ramp ePerParticle so that energy CONTENT moves linearly from the start temp to endTemp.
@@ -865,10 +867,10 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
         // heat-capacity curve, so the graph SLOPE carries the latent-heat physics (a shallow
         // shelf 1100→500), and slow's taller hump makes that shelf even shallower than fast.
         const eTop  = energyContent(Tstart, na2oPctRef.current, hcPlateauRef.current)
-        const cTop  = coolEnergyContent(Tstart, slow)
+        const cTop  = coolEnergyContent(Tstart, slow, na2oPctRef.current)
         const scale = cTop > 0 ? eTop / cTop : 1   // normalise so the loop meets heating at the top
         const graphE = eTop * (1 - t)              // linear in energy → constant rate on the x-axis
-        const Tnow   = coolTempForContent(graphE / scale, slow)
+        const Tnow   = coolTempForContent(graphE / scale, slow, na2oPctRef.current)
         ePerParticle = (Tnow + 273) * ENERGY_UNIT
         effectiveERef.current = ePerParticle
         coolGraphERef.current = graphE             // plot this on the graph (hysteresis path)
