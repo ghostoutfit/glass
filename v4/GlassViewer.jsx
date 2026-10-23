@@ -2098,7 +2098,7 @@ export default function GlassViewer() {
                       dropped to the second toolbar line. Absolute, so it never resizes either row. */}
                   <span style={{ position:'relative', display:'inline-flex' }}>
                     <button className={`tab-btn ${tab==='melt'?'active':''}`}  onClick={() => setTab('melt')}>Particles and Fields</button>
-                    <div style={{ position:'absolute', left:'calc(100% + 1px)', top:'calc(100% + 20px)', transform:'translateX(-50%)', display:'flex', gap:4, zIndex:1 }}>
+                    {tab === 'melt' && <div style={{ position:'absolute', left:'calc(100% + 1px)', top:'calc(100% + 20px)', transform:'translateX(-50%)', display:'flex', gap:4, zIndex:1 }}>
                   <button className="action-btn replay-btn" style={{padding:'2px 9px', fontSize:11, flexShrink:0, display:'flex', alignItems:'center', justifyContent:'center'}}
                     disabled={replayFrameCount === 0}
                     onClick={() => { setReplayPlaying(false); setReplayFrame(0) }}
@@ -2107,7 +2107,7 @@ export default function GlassViewer() {
                     disabled={replayFrameCount === 0}
                     onClick={() => { setReplayFrame(0); setReplayPlaying(true) }}
                   ><img src="/glass/Rabbit.png" draggable={false} style={{ height: '1.5em', filter: 'brightness(0) invert(1) brightness(0.7) sepia(1) hue-rotate(166deg) brightness(0.95)', marginRight: 3 }} /><span style={{ fontSize: '1.4em', color: '#90c8f0', lineHeight: 1 }}>↺</span></button>
-                    </div>
+                    </div>}
                   </span>
                   <button className={`tab-btn ${tab==='glass'?'active':''}`} onClick={() => setTab('glass')}>Bulk Material</button>
                   {/* Build marker, pinned to the right of "Bulk Material". Absolutely positioned so
@@ -2118,7 +2118,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 70</span>
+                  }}>Field Test Version 71</span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),
@@ -2175,22 +2175,24 @@ export default function GlassViewer() {
                   </>}
                   <div className="toolbar-divider" />
                   {/* Readout labels sit ABOVE the LCDs (absolute — the toolbar height doesn't change) */}
-                  <div style={{ position:'relative', marginLeft:8 }}>
-                  <span style={{position:'absolute', bottom:'100%', left:0, right:0, marginBottom:2, textAlign:'center', whiteSpace:'nowrap', fontSize:10, fontWeight:700, letterSpacing:'0.08em', textTransform:'uppercase', color:'rgba(30,45,60,0.70)', pointerEvents:'none'}}>Energy <span style={{textTransform:'none'}}>(kJ)</span></span>
+                  <div style={{ position:'relative' }}>
+                  <span style={{position:'absolute', bottom:'100%', left:0, right:0, marginBottom:2, textAlign:'center', whiteSpace:'nowrap', fontSize:10, fontWeight:700, letterSpacing:'0.08em', textTransform:'uppercase', color:'rgba(30,45,60,0.70)', pointerEvents:'none'}}>Energy</span>
                   <div style={lcdStyle}>
                     <span style={{visibility:'hidden', display:'block', padding:'3px 6px'}}>9999</span>
                     <span style={{position:'absolute', inset:0, padding:'3px 6px', color:'rgba(60,60,60,0.15)', textAlign:'right'}}>8888</span>
                     <span style={{position:'absolute', inset:0, padding:'3px 6px', color:'rgba(60,60,60,0.75)', textAlign:'right'}}>{Math.round(energyContentKJ(meltLocalTemp, p.na2o, hcPlateau) * ENERGY_KJ_MULT)}</span>
                   </div>
                   </div>
-                  <div style={{ position:'relative', marginLeft:22 }}>   {/* room for the wider labels */}
-                  <span style={{position:'absolute', bottom:'100%', left:0, right:0, marginBottom:2, textAlign:'center', whiteSpace:'nowrap', fontSize:10, fontWeight:700, letterSpacing:'0.08em', textTransform:'uppercase', color:'rgba(30,45,60,0.70)', pointerEvents:'none'}}>Temp <span style={{textTransform:'none'}}>(°C)</span></span>
+                  <span style={{fontSize:12, fontWeight:700, color:'rgba(30,45,60,0.70)'}}>kJ</span>
+                  <div style={{ position:'relative' }}>
+                  <span style={{position:'absolute', bottom:'100%', left:0, right:0, marginBottom:2, textAlign:'center', whiteSpace:'nowrap', fontSize:10, fontWeight:700, letterSpacing:'0.08em', textTransform:'uppercase', color:'rgba(30,45,60,0.70)', pointerEvents:'none'}}>Temp</span>
                   <div style={lcdStyle}>
                     <span style={{visibility:'hidden', display:'block', padding:'3px 6px'}}>1800</span>
                     <span style={{position:'absolute', inset:0, padding:'3px 6px', color:'rgba(60,60,60,0.15)', textAlign:'right'}}>1800</span>
                     <span style={{position:'absolute', inset:0, padding:'3px 6px', color:'rgba(60,60,60,0.75)', textAlign:'right'}}>{meltLocalTemp}</span>
                   </div>
                   </div>
+                  <span style={{fontSize:12, fontWeight:700, color:'rgba(30,45,60,0.70)'}}>°C</span>
                 </>}
 
                 {/* Bulk-only dev controls — heat/cool, presets and readouts are shared above;
