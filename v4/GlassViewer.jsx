@@ -613,6 +613,7 @@ export default function GlassViewer() {
   const [motionCold,     setMotionColdState]  = useState(0.1)   // lattice jiggle at 0 °C (× full), render only
   const [motionFullT,    setMotionFullTState] = useState(500)   // °C where jiggle reaches full
   const [heatLeadSteps,  setHeatLeadSteps] = useState(30)
+  const [glassLook,      setGlassLookState]     = useState({ rim: 2.0, dark: 0.93, gain: 5, lightDeg: -50 })
   const [naHardenT,      setNaHardenTState]     = useState(900)   // Bulk glass starts hardening
   const [naRigidT,       setNaRigidTState]      = useState(500)   // Bulk glass fully rigid
   const [bondLockTemp,   setBondLockTempState]  = useState(400)   // cooling: bonds lock in here (fast + slow)
@@ -718,6 +719,10 @@ export default function GlassViewer() {
 
   const boxCanvasRef  = useRef(null)
   const miniCanvasRef = useRef(null)
+  // Cooled-glass look (Bulk). Read by the box RAF loop; set by dev sliders ("Tune these").
+  //   onT/fullT: crossfade old fill → glass; rim: rim brightness; dark: interior opacity (near-black);
+  //   gain: edge curvature = blur radius of the height field (rim width, px); lightDeg: world light direction (for specular).
+  const glassLookRef  = useRef({ onT: 1000, fullT: 500, rim: 2.0, dark: 0.93, gain: 5, lightDeg: -50 })
   const bgGrayRef     = useRef(0)   // box background: 0 = black (heating/idle-hot), ramps to 1 (gray) while cooling
   const bgHeatTintRef = useRef(0)   // eased 0..1 strength of the red heating wash (fades out at auto-shutoff)
   const bgCoolTintRef = useRef(0)   // eased 0..1 strength of the blue cooling wash
@@ -1115,6 +1120,15 @@ export default function GlassViewer() {
     const sandMeltCrisp = document.createElement('canvas')
     sandMeltCrisp.width = BOX_SIZE; sandMeltCrisp.height = BOX_SIZE
     const smctx2        = sandMeltCrisp.getContext('2d', { willReadFrequently: true })
+    // Cooled-glass look: a CPU-readable copy of the soft halo field (the blob's "height") and the
+    // per-pixel glass output (see the glass pass after Pass 1B).
+    const glassFieldOff = document.createElement('canvas')
+    glassFieldOff.width = BOX_SIZE; glassFieldOff.height = BOX_SIZE
+    const gfctx         = glassFieldOff.getContext('2d', { willReadFrequently: true })
+    const glassOff      = document.createElement('canvas')
+    glassOff.width      = BOX_SIZE; glassOff.height = BOX_SIZE
+    const gctx          = glassOff.getContext('2d')
+    const glassImg      = gctx.createImageData(BOX_SIZE, BOX_SIZE)
 
 
     // Full-canvas offscreens for floor-mode metaball (canvas-sized, resize with viewport)
@@ -1519,7 +1533,52 @@ export default function GlassViewer() {
             for (let i = 3; i < px.length; i += 4) px[i] = px[i] > 64 ? 255 : 0
             smctx2.putImageData(imgD, 0, 0)
 
-            // Pass 1C: colorize mask with solid fill color → draw onto scene
+            // ── Cooled glass (steps 1–3 of the glass look) ─────────────────────────────
+            // glassAmt crossfades the old self-lit fill → glass as the melt cools 1000 → 500 °C.
+            // The crisp blob mask, BLURRED by GL.gain px, is treated as the blob's HEIGHT (a pillow:
+            // 0.5 at the outline rising smoothly to 1 inside over the blur radius):
+            //  1. normal = from the field gradient (smooth + curved, works for merged/concave
+            //     blobs); light direction L is world-space (doesn't rotate with the box) — used by
+            //     the specular step, not yet here.
+            //  2. interior (flat field → surface faces the viewer) = nearly black, not a gray wash.
+            //  3. rim (steep field → surface tilts away from the viewer) = Fresnel-bright, faint
+            //     green-cyan. Edge alpha comes from the soft field too → anti-aliased curved outline.
+            const GL = glassLookRef.current
+            const gu = Math.max(0, Math.min(1, (GL.onT - s.temp) / Math.max(1, GL.onT - GL.fullT)))
+            const glassAmt = gu * gu * (3 - 2 * gu)
+            if (glassAmt > 0) {
+              gfctx.clearRect(0, 0, BOX_SIZE, BOX_SIZE)
+              gfctx.filter = `blur(${GL.gain}px)`
+              gfctx.drawImage(sandMeltCrisp, 0, 0)
+              gfctx.filter = 'none'
+              const F = gfctx.getImageData(0, 0, BOX_SIZE, BOX_SIZE).data
+              const O = glassImg.data, W = BOX_SIZE
+              const rimB = GL.rim, dark = GL.dark, gain = GL.gain * 11    // slope × blur width → tilt (≈4 at the outline)
+              const tr = 205, tg = 246, tb = 236          // faint green-cyan rim tint (mostly white)
+              const br = 4, bg = 8, bb = 9                // near-black interior
+              O.fill(0)
+              for (let y = 1; y < W - 1; y++) {
+                for (let x = 1; x < W - 1; x++) {
+                  const i = y * W + x, f = F[i * 4 + 3] / 255
+                  if (f < 0.40) continue
+                  const ea = Math.min(1, (f - 0.40) / 0.08)          // thin anti-aliased edge, so the rim's peak stays opaque
+                  const a  = ea * ea * (3 - 2 * ea)
+                  const gx = (F[(i + 1) * 4 + 3] - F[(i - 1) * 4 + 3]) / 510
+                  const gy = (F[(i + W) * 4 + 3] - F[(i - W) * 4 + 3]) / 510
+                  const g  = Math.hypot(gx, gy) * gain
+                  const nz = 1 / Math.sqrt(1 + g * g)                  // normal's view-facing component
+                  const rim = Math.min(1, Math.pow(1 - nz, 2.2) * rimB)  // Fresnel: peaks at the outline, falls off inward
+                  const k = i * 4
+                  O[k]     = br + (tr - br) * rim
+                  O[k + 1] = bg + (tg - bg) * rim
+                  O[k + 2] = bb + (tb - bb) * rim
+                  O[k + 3] = 255 * a * (dark + (1 - dark) * rim)
+                }
+              }
+              gctx.putImageData(glassImg, 0, 0)
+            }
+
+            // Pass 1C: colorize mask with solid fill color → draw onto scene (fades out as glass fades in)
             smctx.clearRect(0, 0, BOX_SIZE, BOX_SIZE)
             smctx.drawImage(sandMeltCrisp, 0, 0)
             smctx.save()
@@ -1527,12 +1586,21 @@ export default function GlassViewer() {
             smctx.fillStyle = blobFillColor(s.temp)
             smctx.fillRect(0, 0, BOX_SIZE, BOX_SIZE)
             smctx.restore()
-            ctx.drawImage(sandMeltOff, -HS, -HS, BOX_SIZE, BOX_SIZE)
+            if (glassAmt < 1) {
+              ctx.globalAlpha = 1 - glassAmt
+              ctx.drawImage(sandMeltOff, -HS, -HS, BOX_SIZE, BOX_SIZE)
+              ctx.globalAlpha = 1
+            }
+            if (glassAmt > 0) {
+              ctx.globalAlpha = glassAmt
+              ctx.drawImage(glassOff, -HS, -HS, BOX_SIZE, BOX_SIZE)
+              ctx.globalAlpha = 1
+            }
 
             // Pass 2: soft glow overlay — blur the crisp mask, tint at low alpha, draw
             // lighter. Decorative; dropped on 'simple'. The crisp metaball mask itself is
             // kept, so the melt still reads as a blob.
-            if (capsRef.current.blobGlowBlur) {
+            if (capsRef.current.blobGlowBlur && glassAmt < 1) {
               const glowBlur = Math.round(4 + 6 * t)
               smctx.clearRect(0, 0, BOX_SIZE, BOX_SIZE)
               smctx.filter = `blur(${glowBlur}px)`
@@ -1544,13 +1612,15 @@ export default function GlassViewer() {
               smctx.fillRect(0, 0, BOX_SIZE, BOX_SIZE)
               smctx.restore()
               ctx.globalCompositeOperation = 'lighter'
+              ctx.globalAlpha = 1 - glassAmt
               ctx.drawImage(sandMeltOff, -HS, -HS, BOX_SIZE, BOX_SIZE)
+              ctx.globalAlpha = 1
               ctx.globalCompositeOperation = 'source-over'
             }
 
             // Pass 3: same heat glow as pure sand, using blob sub-circles as sources.
             // Decorative; dropped on 'simple'.
-            if (heatT > 0 && capsRef.current.blobGlowBlur) {
+            if (heatT > 0 && capsRef.current.blobGlowBlur && glassAmt < 1) {
               const gc = sandGlowOff.getContext('2d')
               gc.clearRect(0, 0, BOX_SIZE, BOX_SIZE)
               gc.globalCompositeOperation = 'lighter'
@@ -1565,7 +1635,9 @@ export default function GlassViewer() {
               }
               ctx.filter = `blur(${Math.round(heatT * 12)}px)`
               ctx.globalCompositeOperation = 'lighter'
+              ctx.globalAlpha = 1 - glassAmt
               ctx.drawImage(sandGlowOff, -HS, -HS, BOX_SIZE, BOX_SIZE)
+              ctx.globalAlpha = 1
               ctx.filter = 'none'
               ctx.globalCompositeOperation = 'source-over'
             }
@@ -2156,7 +2228,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 83</span>
+                  }}>Field Test Version 84</span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),
@@ -2505,6 +2577,18 @@ export default function GlassViewer() {
                 <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
                   min={100} max={1000} step={25} value={motionFullT} onChange={e => { const v = +e.target.value; setMotionFullTState(v); setMotionFullT(v) }} />
                 <div style={{fontSize:10, color:'#777', marginBottom:8}}>Particles tab, render only: lattice-atom jiggle ramps linearly from the cold value at 0 °C to full here (bonds start going pink ~500 °C).</div>
+                {[['rim', 'Glass rim brightness', 0, 4, 0.05, v => v.toFixed(2)],
+                  ['dark', 'Glass interior darkness', 0, 1, 0.01, v => `${Math.round(v * 100)}%`],
+                  ['gain', 'Glass edge curvature (rim width)', 2, 16, 0.5, v => `${v} px`],
+                  ['lightDeg', 'Glass light angle (specular, next)', -180, 180, 5, v => `${v}°`]].map(([k, label, mn, mx, st, fmt]) => (
+                  <div key={k}>
+                    <div style={{fontSize:11, color:'#888', marginBottom:2}}>{label}: <span style={{color:'#a090d0'}}>{fmt(glassLook[k])}</span></div>
+                    <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                      min={mn} max={mx} step={st} value={glassLook[k]}
+                      onChange={e => { const v = +e.target.value; setGlassLookState(g => ({ ...g, [k]: v })); glassLookRef.current[k] = v }} />
+                  </div>
+                ))}
+                <div style={{fontSize:10, color:'#777', marginBottom:8}}>Bulk cooled glass: dark interior + Fresnel rim (green-cyan), fading in 1000 → 500 °C as the self-lit fill fades out. Curvature = how wide/soft the rim band is.</div>
                 <div style={{fontSize:11, color:'#888', marginBottom:2}}>Bulk glass starts hardening at: <span style={{color:'#a090d0'}}>{naHardenT} °C</span></div>
                 <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
                   min={500} max={1300} step={25} value={naHardenT} onChange={e => { const v = Math.max(+e.target.value, naRigidT + 25); setNaHardenTState(v); setNaHardenTemp(v) }} />
