@@ -62,6 +62,7 @@ let _naLiberateFrac  = 0.5   // liberation fraction for Na2O atoms
 let _naBreakStrain   = 0.02  // break strain for Na-O bonds (independent of Si-O _breakStrain)
 let _breakStrainSpread = 0.15 // per-bond random ± factor drawn at buildRigidBondMap; 0 = uniform
 let _useEmaStrain     = false // true = EMA-smoothed strain for break check; false = instantaneous
+let _grainFeedback    = true // Si-O break feedback per GRAIN (true) vs global (false) — see bond breaking
 let _sevTriggerDist   = 13   // px — freed modifier ion must be within this distance of a Si or O to sever the Si-O bond
 // Feedback loop calibration: GAIN interpolated on sio2Pct between soda (70%) and silica (100%)
 const FEEDBACK_GAIN_SODA   = 0.437  // 70% SiO2 / 30% Na2O: f=0 at 500°C, f=1 at 1322°C
@@ -100,6 +101,7 @@ export const setNaBreakStrain      = v => { _naBreakStrain = v }
 export const setBreakStrainSpread  = v => { _breakStrainSpread = v }
 export const setUseEmaStrain       = v => { _useEmaStrain = v }
 export const setSevTriggerDist     = v => { _sevTriggerDist = v }
+export const setGrainFeedback      = v => { _grainFeedback = !!v }
 export const setFeedbackGainMult   = v => { _feedbackGainMult = v }
 export const setLatticeSpeedMult   = v => { _latticeSpeedMult = v }
 export const setFreedSpeedMult     = v => { _freedSpeedMult = v }
@@ -1288,12 +1290,13 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
   }
   const fBrokenSiO = totSiO > 0 ? brokeSiO / totSiO : 0
   const fBrokenMod = totMod > 0 ? brokeMod / totMod : 0
-  // PROTOTYPE (window._grainFeedback, default off): Si-O feedback per GRAIN instead of global.
-  // With the global fraction, grains that broke early raise the threshold for everyone, so a
-  // grain that lags (e.g. one with no Na₂O neighbours) is shielded and stays whole even at 1800.
-  // Per grain, each grain's threshold rises only with its OWN breakage, so laggards catch up.
+  // Si-O feedback per GRAIN (default; dev-panel checkbox "Per-grain Si-O feedback"). With a
+  // global fraction, grains that broke early raise the threshold for everyone, so a grain that
+  // lags (the bottom-left one, no Na₂O neighbours) was shielded: 2% broken at 1800 vs 24–56%
+  // elsewhere. Per grain, each threshold rises only with its OWN breakage → 24–36% across all
+  // grains at 1800, same 30% overall.
   let gBroke = null, gTot = null
-  if (_win._grainFeedback && phys.rigidBonds) {
+  if (_grainFeedback && phys.rigidBonds) {
     const nc = phys._nChunks ??= 1 + particles.reduce((m, p) => Math.max(m, p.chunkIdx ?? 0), 0)
     gBroke = new Float64Array(nc); gTot = new Float64Array(nc)
     for (const rb of phys.rigidBonds) {

@@ -670,6 +670,11 @@ reform when strain <= _reformStrain (0) and no severance cooldown
 The f=0/f=1 temperatures in those constants' comments assume a multiplier of 1 and do not apply
 at 40.
 
+**v4: Si-O feedback is per GRAIN** (`_grainFeedback`, default true; dev checkbox "Per-grain Si-O
+feedback"). With the global Si-O fraction, the bottom-left grain (no Na₂O neighbours) was shielded
+by the other grains' breakage — 2 % broken at 1800 °C vs 24–56 % elsewhere. Per grain: 24–36 %
+across all grains, same 30 % overall. Na-O/Ca-O still use the population fraction below.
+
 **`fBroken` is per bond population**, not global: `fBrokenSiO` and `fBrokenMod` are tracked
 separately. A single global figure was diluted by the ~550 always-intact Si-O bonds below the
 projection cutoff, so a Na-O break barely moved it, the Na-O threshold never rose, and Na-O
