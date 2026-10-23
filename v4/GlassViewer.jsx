@@ -682,7 +682,12 @@ export default function GlassViewer() {
   const prevCoolingModeRef     = useRef(null)
   const [replayFrameCount, setReplayFrameCount] = useState(0)
   const [replayFrame, setReplayFrame]     = useState(null)
-  const [replayPlaying, setReplayPlaying] = useState(false)
+  const [replayPlaying, setReplayPlaying] = useState(false)   // false | 'slow' (turtle) | 'fast' (rabbit)
+  // Pause: stops time everywhere (particle physics, heat integrator, cooling ramps, graph, Bulk sim
+  // + rotation). Viewing history (replayFrame != null) also stops time — a DVR, not a second sim.
+  const [timePaused, setTimePaused] = useState(false)
+  const timeStoppedRef = useRef(false)
+  const replayInfoRef  = useRef([])   // CompositionView's recorded frames ({t, e, …}) for readouts
   const replayRafRef = useRef(null)
 
   // Glass tab controls
@@ -956,7 +961,7 @@ export default function GlassViewer() {
       const elapsed = st.lastTs ? Math.min((ts - st.lastTs) / 1000, 0.05) : 0
       st.lastTs = ts
       st.heatPower = 0  // heating power (°C·heat-capacity per wall-second) — read by CompositionView's heat lead
-      if (!boxSimRef.current.sandPaused && s.energyInput !== 0 && elapsed > 0) {
+      if (!boxSimRef.current.sandPaused && !timeStoppedRef.current && s.energyInput !== 0 && elapsed > 0) {
         const input      = s.energyInput
         const atFloor    = st.temp <= 0    && input < 0
         const atCeiling  = st.temp >= 1800 && input > 0
@@ -986,10 +991,23 @@ export default function GlassViewer() {
     return () => cancelAnimationFrame(raf)
   }, [])
 
-  // ── Replay tick ───────────────────────────────────────────────────────────
+  // ── Replay / time ─────────────────────────────────────────────────────────
+  const timeStopped = timePaused || replayFrame !== null
+  const replayFrameInfo = replayFrame !== null ? replayInfoRef.current[replayFrame] : null
+  const shownTemp = replayFrameInfo ? replayFrameInfo.t : meltLocalTemp   // LCDs follow the scrubbed moment
+  timeStoppedRef.current = timeStopped
+  // CompositionView reports the history length (throttled); a reset reports 0.
   const handleReplayReady = useCallback(count => {
-    setReplayFrameCount(count); setReplayFrame(null); setReplayPlaying(false)
+    setReplayFrameCount(count)
+    if (count === 0) { setReplayFrame(null); setReplayPlaying(false) }
   }, [])
+  // Turtle / rabbit: play history from the scrub position (or from the start when LIVE) at slow /
+  // fast speed; pressing the active one again stops; reaching the end returns to LIVE.
+  const playReplay = useCallback(speed => {
+    if (replayPlaying === speed) { setReplayPlaying(false); return }
+    if (replayFrame === null || replayFrame >= replayFrameCount - 1) setReplayFrame(0)
+    setReplayPlaying(speed)
+  }, [replayPlaying, replayFrame, replayFrameCount])
   const handleTempUpdate   = useCallback(v => { setMeltLocalTemp(v); meltTempRef.current.temp = v }, [])
   const onGoTemp = useCallback(() => {
     const v = Math.max(0, Math.min(1800, Math.round(+gotoTemp)))
@@ -1016,13 +1034,16 @@ export default function GlassViewer() {
 
   useEffect(() => {
     if (!replayPlaying) { cancelAnimationFrame(replayRafRef.current); return }
-    let last = null
+    const fps = replayPlaying === 'fast' ? (window._replayFastFps ?? 45) : (window._replaySlowFps ?? 10)
+    let last = null, acc = 0
     const tick = ts => {
-      if (last !== null && ts - last < 16) { replayRafRef.current = requestAnimationFrame(tick); return }
+      const dt = last === null ? 0 : Math.min(0.1, (ts - last) / 1000)
       last = ts
-      setReplayFrame(f => {
-        const next = (f ?? 0) + 1
-        if (next >= replayFrameCount) { setReplayPlaying(false); return replayFrameCount - 1 }
+      acc += dt * fps
+      const adv = Math.floor(acc); acc -= adv
+      if (adv > 0) setReplayFrame(f => {
+        const next = (f ?? 0) + adv
+        if (next >= replayFrameCount - 1) { setReplayPlaying(false); return null }   // end → LIVE
         return next
       })
       replayRafRef.current = requestAnimationFrame(tick)
@@ -1030,12 +1051,14 @@ export default function GlassViewer() {
     replayRafRef.current = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(replayRafRef.current)
   }, [replayPlaying, replayFrameCount])
+  // Leaving the Particles tab returns to LIVE (history is a Particles-view feature).
+  useEffect(() => { if (tab !== 'melt') { setReplayPlaying(false); setReplayFrame(null) } }, [tab])
 
   const startCooling = useCallback(mode => {
     if (coolLockedRef.current && coolLockedRef.current !== mode) return   // no switching speed mid-run
     coolLockedRef.current = mode; setCoolLocked(mode)
     heatLockedRef.current = true; setHeatLocked(true)   // cooling is one-way: heat stays off until reset
-    setReplayFrameCount(0); setReplayFrame(null); setReplayPlaying(false)
+    setReplayFrame(null); setReplayPlaying(false)   // back to LIVE (history keeps recording)
     setMeltHeatMode(null)
     setCoolingMode(m => {
       const next = m === mode ? null : mode
@@ -1269,10 +1292,10 @@ export default function GlassViewer() {
           }
         }
 
-        const elapsed = Math.min((ts - phys.prevTime) / 1000, 0.05)
+        const elapsed = timeStoppedRef.current ? 0 : Math.min((ts - phys.prevTime) / 1000, 0.05)   // Pause stops time
         phys.prevTime    = ts
 
-        if (!box.cornerDrag) {
+        if (!box.cornerDrag && !timeStoppedRef.current) {
           if (s.autoRotate) {
             box.boxAngle += 0.1 * 2 * Math.PI * elapsed
           } else {
@@ -1305,7 +1328,7 @@ export default function GlassViewer() {
               runHeatReplayChunk(phys, s, HS, box, presetIdRef.current === 'soda', true)
               if (!s.heatReplay) { boxLoadingRef.current = false; setBoxLoading(false) }
             }
-          } else if (!s.sandPaused) {
+          } else if (!s.sandPaused && !timeStoppedRef.current) {
             phys.accumulator += elapsed
             while (phys.accumulator >= FIXED_DT) {
               stepNaBlobSprings(phys.naBlobs, FIXED_DT, box.boxAngle, s.temp)
@@ -2076,12 +2099,16 @@ export default function GlassViewer() {
           {tab === 'melt' && (
             <div style={{ position:'absolute', bottom:7, left:50, right:50, display:'flex', alignItems:'center', gap:6 }}>
               <div style={{ flex:'0 1 90%', minWidth:0, display:'flex', alignItems:'center' }}>
+                {/* History scrubber (DVR): the whole recorded run; the right end is LIVE. Dragging left
+                    shows the past and stops time; dragging back to the end resumes LIVE. */}
                 <ScrubSlider
-                  value={replayFrameCount > 0 && replayFrame != null ? replayFrame / Math.max(1, replayFrameCount - 1) : 1}
+                  value={replayFrameCount > 1 && replayFrame != null ? replayFrame / (replayFrameCount - 1) : 1}
                   onChange={v => {
-                    if (replayFrameCount > 0) { setReplayPlaying(false); setReplayFrame(Math.round(v * (replayFrameCount - 1))) }
+                    if (replayFrameCount < 2) return
+                    setReplayPlaying(false)
+                    setReplayFrame(v >= 0.995 ? null : Math.round(v * (replayFrameCount - 1)))
                   }}
-                  disabled={replayFrameCount === 0}
+                  disabled={replayFrameCount < 2}
                 />
               </div>
             </div>
@@ -2101,16 +2128,22 @@ export default function GlassViewer() {
                       dropped to the second toolbar line. Absolute, so it never resizes either row. */}
                   <span style={{ position:'relative', display:'inline-flex' }}>
                     <button className={`tab-btn ${tab==='melt'?'active':''}`}  onClick={() => setTab('melt')}>Particles and Fields</button>
-                    {tab === 'melt' && <div style={{ position:'absolute', left:'calc(100% + 1px)', top:'calc(100% + 20px)', transform:'translateX(-50%)', display:'flex', gap:4, zIndex:1 }}>
-                  <button className="action-btn replay-btn" style={{padding:'2px 9px', fontSize:11, flexShrink:0, display:'flex', alignItems:'center', justifyContent:'center'}}
-                    disabled={replayFrameCount === 0}
-                    onClick={() => { setReplayPlaying(false); setReplayFrame(0) }}
+                    <div style={{ position:'absolute', left:'calc(100% + 1px)', top:'calc(100% + 20px)', transform:'translateX(-50%)', display:'flex', gap:4, zIndex:1 }}>
+                  {/* Pause — just left of the turtle (absolute, so turtle/rabbit stay centred on the
+                      split). Shown on BOTH tabs: it stops time everywhere. */}
+                  <button className={`action-btn replay-btn${timePaused ? ' active' : ''}`}
+                    style={{position:'absolute', right:'100%', marginRight:4, top:0, bottom:0, width:38, padding:0, fontSize:13, fontWeight:900, display:'flex', alignItems:'center', justifyContent:'center', color:'#90c8f0'}}
+                    title={timePaused ? 'Resume time' : 'Pause — stop time'}
+                    onClick={() => setTimePaused(p => !p)}>{timePaused ? '▶' : '❚❚'}</button>
+                  <button className={`action-btn replay-btn${replayPlaying === 'slow' ? ' active' : ''}`} style={{padding:'2px 9px', fontSize:11, flexShrink:0, display:'flex', alignItems:'center', justifyContent:'center', visibility: tab === 'melt' ? 'visible' : 'hidden'}}
+                    disabled={replayFrameCount < 2} title="Replay history slowly"
+                    onClick={() => playReplay('slow')}
                   ><img src="/glass/Turtle.png" draggable={false} style={{ height: '1.5em', filter: 'brightness(0) invert(1) brightness(0.7) sepia(1) hue-rotate(166deg) brightness(0.95)', marginRight: 3 }} /><span style={{ fontSize: '1.4em', color: '#90c8f0', lineHeight: 1 }}>↺</span></button>
-                  <button className="action-btn replay-btn" style={{padding:'2px 9px', fontSize:11, flexShrink:0, display:'flex', alignItems:'center', justifyContent:'center'}}
-                    disabled={replayFrameCount === 0}
-                    onClick={() => { setReplayFrame(0); setReplayPlaying(true) }}
+                  <button className={`action-btn replay-btn${replayPlaying === 'fast' ? ' active' : ''}`} style={{padding:'2px 9px', fontSize:11, flexShrink:0, display:'flex', alignItems:'center', justifyContent:'center', visibility: tab === 'melt' ? 'visible' : 'hidden'}}
+                    disabled={replayFrameCount < 2} title="Replay history fast"
+                    onClick={() => playReplay('fast')}
                   ><img src="/glass/Rabbit.png" draggable={false} style={{ height: '1.5em', filter: 'brightness(0) invert(1) brightness(0.7) sepia(1) hue-rotate(166deg) brightness(0.95)', marginRight: 3 }} /><span style={{ fontSize: '1.4em', color: '#90c8f0', lineHeight: 1 }}>↺</span></button>
-                    </div>}
+                    </div>
                   </span>
                   <button className={`tab-btn ${tab==='glass'?'active':''}`} onClick={() => setTab('glass')}>Bulk Material</button>
                   {/* Build marker, pinned to the right of "Bulk Material". Absolutely positioned so
@@ -2121,7 +2154,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 78</span>
+                  }}>Field Test Version 79</span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),
@@ -2183,7 +2216,7 @@ export default function GlassViewer() {
                   <div style={lcdStyle}>
                     <span style={{visibility:'hidden', display:'block', padding:'3px 6px'}}>9999</span>
                     <span style={{position:'absolute', inset:0, padding:'3px 6px', color:'rgba(60,60,60,0.15)', textAlign:'right'}}>8888</span>
-                    <span style={{position:'absolute', inset:0, padding:'3px 6px', color:'rgba(60,60,60,0.75)', textAlign:'right'}}>{Math.round(energyContentKJ(meltLocalTemp, p.na2o, hcPlateau) * ENERGY_KJ_MULT)}</span>
+                    <span style={{position:'absolute', inset:0, padding:'3px 6px', color:'rgba(60,60,60,0.75)', textAlign:'right'}}>{Math.round(energyContentKJ(shownTemp, p.na2o, hcPlateau) * ENERGY_KJ_MULT)}</span>
                   </div>
                   </div>
                   <span style={{fontSize:12, fontWeight:700, color:'rgba(30,45,60,0.70)'}}>kJ</span>
@@ -2192,7 +2225,7 @@ export default function GlassViewer() {
                   <div style={lcdStyle}>
                     <span style={{visibility:'hidden', display:'block', padding:'3px 6px'}}>1800</span>
                     <span style={{position:'absolute', inset:0, padding:'3px 6px', color:'rgba(60,60,60,0.15)', textAlign:'right'}}>1800</span>
-                    <span style={{position:'absolute', inset:0, padding:'3px 6px', color:'rgba(60,60,60,0.75)', textAlign:'right'}}>{meltLocalTemp}</span>
+                    <span style={{position:'absolute', inset:0, padding:'3px 6px', color:'rgba(60,60,60,0.75)', textAlign:'right'}}>{shownTemp}</span>
                   </div>
                   </div>
                   <span style={{fontSize:12, fontWeight:700, color:'rgba(30,45,60,0.70)'}}>°C</span>
@@ -2772,7 +2805,7 @@ export default function GlassViewer() {
               meltTemp={meltLocalTemp} simSpeed={simSpeed} speedMult={speedMult} coolingMode={coolingMode}
               onTempUpdate={handleTempUpdate} onEnergyUpdate={handleEnergyUpdate}
               onBondCounts={handleBondCounts}
-              graphCanvasRef={graphCanvasRef} graphUiRef={graphUiRef} heatRateRef={meltTempRef} heatLeadSteps={heatLeadSteps}
+              graphCanvasRef={graphCanvasRef} graphUiRef={graphUiRef} heatRateRef={meltTempRef} timePaused={timeStopped} replayInfoRef={replayInfoRef} heatLeadSteps={heatLeadSteps}
               cumulativeEnergyRef={meltCumulativeEnergyRef}
               graphXMaxRef={graphXMaxRef}
               replayFrame={replayFrame} onReplayReady={handleReplayReady}
@@ -2809,25 +2842,14 @@ export default function GlassViewer() {
         <div style={{ width:100, flexShrink:0, background:'#050505', borderLeft:'2px solid #4a5e6e' }} />
       </div>
 
-      {/* ── Bottom scrub bar ── */}
+      {/* ── Bottom status bar: what time is showing (controls live in the toolbar) ── */}
       <div className="scrub-bar">
-        {tab === 'melt' && replayFrameCount > 0 ? <>
-          <button className={`action-btn replay-btn${replayPlaying?' active':''}`}
-            style={{padding:'2px 9px', fontSize:11, marginRight:8}}
-            onClick={() => { if (replayFrame===null) setReplayFrame(0); setReplayPlaying(p => !p) }}>
-            {replayPlaying ? '■ Stop' : '▶ Play'}
-          </button>
-          <input type="range" className="replay-range"
-            min={0} max={replayFrameCount-1} value={replayFrame ?? 0}
-            onChange={e => { setReplayPlaying(false); setReplayFrame(+e.target.value) }} />
-          <span style={{fontSize:11, color:'rgba(160,140,100,0.65)', fontVariantNumeric:'tabular-nums', whiteSpace:'nowrap', marginLeft:8, flexShrink:0}}>
-            {replayFrame ?? 0} / {replayFrameCount-1}
-          </span>
-          <button className="action-btn replay-btn" style={{padding:'2px 9px', fontSize:11, marginLeft:8}}
-            onClick={() => setReplayFrame(null)}>Live</button>
-        </> : (
-          <span style={{fontSize:10, fontWeight:700, letterSpacing:'0.06em', color:'rgba(120,110,90,0.55)', marginLeft:'auto'}}>LIVE</span>
-        )}
+        <span style={{fontSize:10, fontWeight:700, letterSpacing:'0.06em', marginLeft:'auto',
+          color: replayFrameInfo ? 'rgba(144,200,240,0.85)' : timePaused ? 'rgba(230,180,90,0.85)' : 'rgba(120,110,90,0.55)'}}>
+          {replayFrameInfo
+            ? `REPLAY · ${replayFrameInfo.t} °C · ${replayFrame + 1} / ${replayFrameCount}`
+            : timePaused ? 'PAUSED' : 'LIVE'}
+        </span>
       </div>
 
       {/* Floating E–T graph */}

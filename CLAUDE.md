@@ -1015,6 +1015,27 @@ Rules this layout depends on:
    `meltPhysics.js` and would need 29 more dependencies. Dev-only, so a frozen state can be
    slightly stale after a slider move; change the temperature or switch twice to force a rebuild.
 
+## v4: history (DVR), pause, turtle / rabbit
+
+- **Recording**: `CompositionView` records a history frame every `every` sim steps while time runs
+  (heating, holds, cooling — previously only CompositionView ramps, which v4 heating isn't, so the
+  buffer was empty until a cool finished). Frame = positions (Float32), the exact drawn bonds
+  (Uint16 pairs) + strain (Int8, ×100), temperature, graph x. Capped at `REPLAY_MAX` (900) by
+  decimation (drop every other frame, double `every`) → ≲10 MB. Cleared with the graph on rebuild.
+  Count reported to GlassViewer throttled (400 ms); frames shared via `replayInfoRef`.
+- **Replay draw is non-destructive**: a display copy of `phys` (frame positions, frame bonds, all
+  atoms drawn at true position, frame temperature for thermal colouring). The old replay wrote the
+  frame INTO the live particles, so returning to live resumed from the wrong positions.
+- **Time stop** (`timeStopped = timePaused || replayFrame !== null`): CompositionView zeroes elapsed →
+  no steps, no ramp advance, no graph points; `integrateMelt` skips; the Bulk loop zeroes elapsed,
+  skips rotation and the sand step/meld. Viewing history stops time (DVR); LIVE resumes it.
+- **Controls**: toolbar scrubber spans the whole history, right end = LIVE. Turtle / rabbit play
+  from the scrub position (from the start when LIVE) at `_replaySlowFps` 10 / `_replayFastFps` 45
+  frames/s; pressing the active one stops; the end returns to LIVE. Pause (❚❚/▶) sits left of the
+  turtle on both tabs. While scrubbed, the LCDs show the frame's temperature/kJ and the graph rings
+  the frame's point. Bottom bar is now a status line (LIVE / PAUSED / REPLAY · T · n/N); its old
+  duplicate Play/range/Live controls are gone.
+
 ## Always-visible toggles
 
 | Control | Effect |

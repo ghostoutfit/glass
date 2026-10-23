@@ -1,6 +1,6 @@
 import { useMemo, useRef, useEffect } from 'react'
 import { initPhysics, stepPhysics, setSiOr0,
-         rebuildBonds, computeKE, computeBondedKE, computePE, ENERGY_UNIT, THERMAL_SPEED,
+         computeKE, computeBondedKE, computePE, ENERGY_UNIT, THERMAL_SPEED,
          buildRigidBondMap, setSioExclMult, setBreakStrain, setReformStrain, setCrystAnchorK, setLiberateFrac, setSioK, setNaOK,
          setNaAnchorK, setNaLiberateFrac, setNaBreakStrain, setLatticeSpeedMult, setFreedSpeedMult,
          resetLibStats, getLibStats, measureStrain95, meltStructure, setUseEmaStrain,
@@ -17,6 +17,7 @@ import { MELT_CANDIDATES } from './candidates.melt.generated.js'   // precompute
 // At BASE_STEPS_PER_SEC these equal the historical ~4.5 s / ~24 s wall-clock at simSpeed 1.
 const FAST_COOL_FRAMES = 270   // ~4.5 s at simSpeed 1
 const SLOW_COOL_FRAMES = 1440  // ~24 s at simSpeed 1
+const REPLAY_MAX = 900          // history frames kept (decimated beyond this)
 
 // Wall-clock pacing: the sim advances by elapsed real time, not per rendered frame, so faster
 // hardware just draws more (smoother) frames of the SAME sim rate instead of running faster.
@@ -121,7 +122,7 @@ const GRAPH_MAX_MARKERS = 3
 //  · click the curve → fixed dotted horizontal line at that point's temperature (≤3);
 //    click a line → remove it
 //  · each line labels its °C at the right end and dots every place the curve crosses it
-function drawTEGraph(canvas, hist, darkMode = true, eMax = 4e-3, targetTempLine = null, ui = null) {
+function drawTEGraph(canvas, hist, darkMode = true, eMax = 4e-3, targetTempLine = null, ui = null, replayPt = null) {
   const s = setupCanvas(canvas)
   if (!s) return
   const { ctx, w, h } = s
@@ -248,6 +249,15 @@ function drawTEGraph(canvas, hist, darkMode = true, eMax = 4e-3, targetTempLine 
     }
   }
 
+  // ── Replay position: where the scrubbed / playing history frame sits on the curve ──
+  if (replayPt) {
+    const x = toX(replayPt.e), y = toY(replayPt.t)
+    ctx.fillStyle = darkMode ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.12)'
+    ctx.beginPath(); ctx.arc(x, y, 9, 0, Math.PI * 2); ctx.fill()
+    ctx.strokeStyle = darkMode ? '#fff' : '#222'; ctx.lineWidth = 2
+    ctx.beginPath(); ctx.arc(x, y, 5.5, 0, Math.PI * 2); ctx.stroke()
+  }
+
   // ── Hover: nearest curve point within 14 px → coordinate pair with units ──
   const mo = ui?.mouse
   const overMarker = markerAt(mo) >= 0
@@ -328,7 +338,7 @@ function countBonds(phys) {
   return counts
 }
 
-export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, attractK = 0, attractFalloff = 1, debug = false, bondNums = false, meltTemp = 50, simSpeed = 1, speedMult = 1, coolingMode = null, onTempUpdate = null, onEnergyUpdate = null, onBondCounts = null, replayFrame = null, onReplayReady = null, graphCanvasRef = null, graphUiRef = null, cumulativeEnergyRef = null, graphXMaxRef = null, darkMode = true, showCharge = false, chargeLite = false, showField = true, fieldBlur = true, interpolate = false, longerCooledBonds = true, atomColorMode = 'normal', showBrokenBonds = false, showLiveStats = false, useEmaStrain = true, hcPlateau = 4, active = true, resetToken = 0, targetTempLine = null, meltRestore = null, coolCommitted = null, heatRateRef = null, heatLeadSteps = 30 }) {
+export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, attractK = 0, attractFalloff = 1, debug = false, bondNums = false, meltTemp = 50, simSpeed = 1, speedMult = 1, coolingMode = null, onTempUpdate = null, onEnergyUpdate = null, onBondCounts = null, replayFrame = null, onReplayReady = null, graphCanvasRef = null, graphUiRef = null, cumulativeEnergyRef = null, graphXMaxRef = null, darkMode = true, showCharge = false, chargeLite = false, showField = true, fieldBlur = true, interpolate = false, longerCooledBonds = true, atomColorMode = 'normal', showBrokenBonds = false, showLiveStats = false, useEmaStrain = true, hcPlateau = 4, active = true, resetToken = 0, targetTempLine = null, meltRestore = null, coolCommitted = null, heatRateRef = null, heatLeadSteps = 30, timePaused = false, replayInfoRef = null }) {
   const types = useMemo(
     () => buildGrid(sio2Pct, na2oPct, caoPct),
     [sio2Pct, na2oPct, caoPct]
@@ -411,8 +421,15 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
   const selectedIdxRef      = useRef(-1)
   const replayFrameRef      = useRef(replayFrame)
   const onReplayReadyRef    = useRef(onReplayReady)
-  const replayBufferRef     = useRef([])
-  const replayNotifiedRef   = useRef(false)
+  // Continuous history (DVR): every RECORD_EVERY sim steps while time runs, a frame of positions +
+  // the exact drawn bonds (+ strain) + temperature + graph x. Capped at REPLAY_MAX frames by
+  // decimation (drop every other frame, double the interval) so memory stays bounded (~10 MB).
+  const replayRef           = useRef({ frames: [], every: 2, acc: 0, lastNotify: 0 })
+  const timePausedRef       = useRef(timePaused)
+  timePausedRef.current     = timePaused
+  const replayInfoRefRef    = useRef(replayInfoRef)
+  replayInfoRefRef.current  = replayInfoRef
+  const allFreedRef         = useRef(null)
   const onBondCountsRef     = useRef(onBondCounts)
   const lastBondCountTsRef  = useRef(0)
   // Graph history — grows forever, never wraps
@@ -447,6 +464,9 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
   useEffect(() => {
     histRef.current = []
     if (graphUiRefRef.current?.current) graphUiRefRef.current.current.markers.length = 0   // markers belong to this graph
+    replayRef.current = { frames: [], every: 2, acc: 0, lastNotify: 0 }   // history belongs to this run
+    if (replayInfoRefRef.current) replayInfoRefRef.current.current = replayRef.current.frames
+    onReplayReadyRef.current?.(0)
     const ext = graphCanvasRefRef.current?.current
     if (ext) drawTEGraph(ext, [], darkModeRef.current, 4e-3, targetTempLineRef.current)
   }, [sio2Pct, na2oPct, caoPct])
@@ -588,6 +608,9 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
     setCoolBondScale(1)     // reset "longer cooled bonds" on a fresh build
     histRef.current = []
     if (graphUiRefRef.current?.current) graphUiRefRef.current.current.markers.length = 0   // markers belong to this graph
+    replayRef.current = { frames: [], every: 2, acc: 0, lastNotify: 0 }   // history belongs to this run
+    if (replayInfoRefRef.current) replayInfoRefRef.current.current = replayRef.current.frames
+    onReplayReadyRef.current?.(0)
 
     window.bondAudit = () => {
       const phys = physRef.current
@@ -895,20 +918,12 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
       // ── Detect ramp mode change ───────────────────────────────────
       if (cm !== prevCoolingRef.current) {
         if ((cm === 'fast' || cm === 'slow') && coolRunRef.current === cm) {
-          // Resume the paused cool run: keep its start energy, progress and replay buffer, so
-          // it carries on at the same rate and the graph continues along the same cooling path.
-          replayNotifiedRef.current = false   // re-announce the (longer) replay when it next stops
+          // Resume the paused cool run: keep its start energy and progress, so it carries on at
+          // the same rate and the graph continues along the same cooling path.
         } else if (cm === 'fast' || cm === 'slow' || cm === 'fastHeat' || cm === 'slowHeat') {
           coolRunRef.current = (cm === 'fast' || cm === 'slow') ? cm : null
           coolingStartERef.current  = effectiveERef.current
           coolingFrameRef.current   = 0
-          replayBufferRef.current   = []
-          replayNotifiedRef.current = false
-        } else {
-          if (!replayNotifiedRef.current && replayBufferRef.current.length > 0) {
-            replayNotifiedRef.current = true
-            onReplayReadyRef.current?.(replayBufferRef.current.length)
-          }
         }
         prevCoolingRef.current = cm
       }
@@ -924,6 +939,8 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
       let elapsed = lastTsRef.current ? (nowMs - lastTsRef.current) / 1000 : 0
       lastTsRef.current = nowMs
       if (elapsed > MAX_FRAME_DT) elapsed = MAX_FRAME_DT   // clamp → slow hw lags, never spirals
+      const paused = timePausedRef.current   // Pause button, or viewing history: time stands still
+      if (paused) elapsed = 0
       const speed   = window._simSpeed ?? speedRef.current
       const useWall = window._wallClock !== false
       let stepsThisFrame, rampAdvance
@@ -940,6 +957,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
         stepsThisFrame = frameAccRef.current >= 1 ? (frameAccRef.current -= 1, 1) : 0
         rampAdvance = 1
       }
+      if (paused) { stepsThisFrame = 0; rampAdvance = 0 }
 
       // ── Compute energy target for this frame ──────────────────────
       // All ramps are energy-based: ePerParticle = (sliderVal+273)*ENERGY_UNIT. The ramp is
@@ -1028,7 +1046,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
       // energy ramp above (ePerParticle / coolGraphERef) — not from stepPhysics. Running it here,
       // outside the gate, means the Bulk Material tab drives the SAME graph identically (the
       // temperature is shared), and switching tabs or scrubbing benchmarks stays continuous.
-      histFrameRef.current++
+      if (!paused) histFrameRef.current++
       if (histFrameRef.current >= 3) {
         histFrameRef.current = 0
         const targetTempC = Math.max(0, Math.round(ePerParticle / ENERGY_UNIT - 273))
@@ -1041,7 +1059,9 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
         const extCanvas = graphCanvasRefRef.current?.current
         if (extCanvas) {
           const eMax = energyContent(1800, na2oPctRef.current, hcPlateauRef.current) * 1.05
-          drawTEGraph(extCanvas, histRef.current, darkModeRef.current, eMax, targetTempLineRef.current, graphUiRefRef.current?.current)
+          const rfG = replayFrameRef.current
+          const replayPt = rfG != null ? replayRef.current.frames[rfG] : null
+          drawTEGraph(extCanvas, histRef.current, darkModeRef.current, eMax, targetTempLineRef.current, graphUiRefRef.current?.current, replayPt)
         }
       }
 
@@ -1054,16 +1074,20 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
       if (phys && activeRef.current) {
         const rf = replayFrameRef.current
 
-        // ── Replay mode ───────────────────────────────────────────────
-        if (rf !== null && replayBufferRef.current[rf]) {
-          const snap = replayBufferRef.current[rf]
-          const ps   = phys.particles
-          for (let i = 0; i < ps.length; i++) {
-            ps[i].px = snap[i * 2]; ps[i].x = snap[i * 2]
-            ps[i].py = snap[i * 2 + 1]; ps[i].y = snap[i * 2 + 1]
-          }
-          rebuildBonds(phys)
-          drawScene(canvasRef.current, phys, { ts, bondNums: bondNumsRef.current, darkMode: darkModeRef.current, showCharge: showChargeRef.current, chargeLite: chargeLiteRef.current, showField: showFieldRef.current, fieldBlur: fieldBlurRef.current, atomColorMode: atomColorModeRef.current, showBrokenBonds: showBrokenBondsRef.current, showLiveStats: showLiveStatsRef.current, targetTempC: Math.round(ePerParticle / ENERGY_UNIT - 273), hoverIdx: hoverIdxRef.current, selectedIdx: selectedIdxRef.current })
+        // ── Replay mode: draw a recorded frame WITHOUT touching the live sim ──
+        // A display copy of phys gets the frame's positions and its exact drawn bonds; every atom
+        // is drawn at its true position (all "freed"), and the frame's own temperature drives the
+        // thermal colouring. Time is stopped while viewing history (GlassViewer pauses).
+        const fr = rf !== null ? replayRef.current.frames[rf] : null
+        if (fr) {
+          const ps = phys.particles, n = ps.length
+          if (!allFreedRef.current || allFreedRef.current.length !== n) allFreedRef.current = new Uint8Array(n).fill(1)
+          const dps = new Array(n)
+          for (let i = 0; i < n; i++) { const x = fr.pos[i * 2], y = fr.pos[i * 2 + 1]; dps[i] = { ...ps[i], x, y, px: x, py: y } }
+          const nb = fr.bonds.length / 2, bonds = new Array(nb)
+          for (let k = 0; k < nb; k++) bonds[k] = { i: fr.bonds[k * 2], j: fr.bonds[k * 2 + 1], strain: fr.strain[k] / 100, currentBreakStrain: 0.25, broken: false }
+          const disp = { ...phys, particles: dps, bonds, latticeFreed: allFreedRef.current }
+          drawScene(canvasRef.current, disp, { ts, bondNums: bondNumsRef.current, darkMode: darkModeRef.current, showCharge: showChargeRef.current, chargeLite: chargeLiteRef.current, showField: showFieldRef.current, fieldBlur: fieldBlurRef.current, atomColorMode: atomColorModeRef.current, showBrokenBonds: false, showLiveStats: showLiveStatsRef.current, targetTempC: fr.t, hoverIdx: null, selectedIdx: -1 })
           rafRef.current = requestAnimationFrame(frame)
           return
         }
@@ -1115,19 +1139,27 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
           phys.cumulativeKE     += ke
         }
 
-        // ── Record replay snapshot ────────────────────────────────────
-        if (isRamping) {
-          const ps   = phys.particles
-          const snap = new Float32Array(ps.length * 2)
-          for (let i = 0; i < ps.length; i++) { snap[i * 2] = ps[i].x; snap[i * 2 + 1] = ps[i].y }
-          replayBufferRef.current.push(snap)
-
-          if (!replayNotifiedRef.current) {
-            const dur = (cm === 'fast' || cm === 'fastHeat') ? FAST_COOL_FRAMES : SLOW_COOL_FRAMES
-            if (coolingFrameRef.current >= dur) {
-              replayNotifiedRef.current = true
-              onReplayReadyRef.current?.(replayBufferRef.current.length)
+        // ── Record history frame (DVR) ────────────────────────────────
+        if (stepsThisFrame > 0) {
+          const R = replayRef.current
+          R.acc += stepsThisFrame
+          if (R.acc >= R.every) {
+            R.acc = 0
+            const ps = phys.particles, n = ps.length
+            const pos = new Float32Array(n * 2)
+            for (let i = 0; i < n; i++) { pos[i * 2] = ps[i].x; pos[i * 2 + 1] = ps[i].y }
+            const live = phys.bonds.filter(b => !b.broken)
+            const bonds = new Uint16Array(live.length * 2), strain = new Int8Array(live.length)
+            for (let k = 0; k < live.length; k++) {
+              bonds[k * 2] = live[k].i; bonds[k * 2 + 1] = live[k].j
+              strain[k] = Math.max(-127, Math.min(127, Math.round((live[k].strain ?? 0) * 100)))
             }
+            const t = Math.max(0, Math.round(ePerParticle / ENERGY_UNIT - 273))
+            const e = coolGraphERef.current ?? energyContent(t, na2oPctRef.current, hcPlateauRef.current)
+            R.frames.push({ pos, bonds, strain, t, e })
+            if (R.frames.length > REPLAY_MAX) { R.frames = R.frames.filter((_, k) => k % 2 === 0); R.every *= 2 }
+            if (replayInfoRefRef.current) replayInfoRefRef.current.current = R.frames
+            if (nowMs - R.lastNotify > 400) { R.lastNotify = nowMs; onReplayReadyRef.current?.(R.frames.length) }
           }
         }
 
