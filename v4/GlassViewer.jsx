@@ -471,23 +471,125 @@ function pickBulkCandidate(cands, temp) {
 
 const COOL_MIN_TEMP = 1500   // Slow/Fast Cool only engage from a full melt
 
-// ── Performance tier ────────────────────────────────────────────────────────
-// Other sims in this project run a speed test that classifies the machine as
-// 'simple' (weak) or 'detailed' (capable). THAT TEST IS NOT WIRED UP HERE YET.
-//
-// detectPerformanceTier() is a deliberate placeholder: it always returns null,
-// meaning "unknown", so the tier falls back to QUALITY_DEFAULT and nothing
-// changes from today's behaviour. To switch it on, replace the body with a call
-// to the real speed test and return 'simple' | 'detailed'. Everything
-// downstream (the QUALITY caps table, the Field button, CompositionView's
-// showField prop) is already wired and starts working with no other edits.
-//
-// The dev panel has a manual Quality override so this can be exercised before
-// the real test lands.
-function detectPerformanceTier() {
-  // TODO(speed-test): return the shared speed test's verdict, 'simple' | 'detailed'.
-  return null
+// Lookup tables for the per-pixel glass lighting (was Math.pow/sqrt per pixel per frame).
+const _FRES_N = 1024, _FRES_MAX_G = 24, _FRES_SCALE = _FRES_N / _FRES_MAX_G
+const _FRES_LUT = new Float32Array(_FRES_N).map((_, i) => { const g = i / _FRES_SCALE; return Math.pow(1 - 1 / Math.sqrt(1 + g * g), 2.2) })
+const _LIT_LUT  = new Float32Array(256).map((_, i) => Math.pow(i / 255, 1.3))
+
+// ── Bulk-tab section profiler (console: bulkPerf(); off unless window._bulkProf) ──
+// Accumulates CPU ms per section of the Bulk frame. Canvas draws are queued, so a section's ms
+// is its JS + command cost plus any synchronous raster it forces (filters, getImageData).
+const _bp = { acc: {}, frames: 0, steps: 0, t: 0 }
+const bpStart = () => { if (window._bulkProf) _bp.t = performance.now() }
+const bpMark  = name => { if (!window._bulkProf) return; const n = performance.now(); _bp.acc[name] = (_bp.acc[name] ?? 0) + n - _bp.t; _bp.t = n }
+if (typeof window !== 'undefined') {
+  window.bulkPerf = (reset = true) => {
+    const f = Math.max(1, _bp.frames), rows = {}
+    let tot = 0
+    for (const [k, v] of Object.entries(_bp.acc)) { rows[k] = +(v / f).toFixed(2); tot += v / f }
+    rows['= TOTAL ms/frame'] = +tot.toFixed(2); rows['physics steps/frame'] = +(_bp.steps / f).toFixed(2)
+    console.table(rows)
+    if (reset) { _bp.acc = {}; _bp.frames = 0; _bp.steps = 0 }
+    return rows
+  }
 }
+
+// ── Performance tier: startup speed test (ported verbatim from ssp/bonds) ─────────
+// Same two micro-benchmarks and thresholds as the bonds sim, so a tier means the same machine
+// class across sims. Both draw to an offscreen canvas and force a GPU→CPU sync (getImageData),
+// take the min of two timed passes (cold start excluded). The TRAIL time decides the tier:
+//   ≤ 8 ms → hires · 8–13 → detailed · > 13 → simple   (bonds' extra 'low' tier, > 40 ms, maps
+//   to simple here — glass has no lower tier — and is flagged so the dropdown shows it red).
+// The result is also the auto-quality CEILING: runtime adaptation may step below it, never above.
+const PERF_PARTICLE_RADIUS = 10   // bonds' PARTICLE_RADIUS — part of the benchmark, keep identical
+function _runPerfBenchmark() {
+  const oc = document.createElement('canvas')
+  oc.width = 300; oc.height = 300
+  const dc = oc.getContext('2d')
+  const R = PERF_PARTICLE_RADIUS
+  function _draw100() {
+    for (let i = 0; i < 100; i++) {
+      const x = 15 + (i % 10) * 27, y = 15 + Math.floor(i / 10) * 27
+      const g1 = dc.createRadialGradient(x, y, 0, x, y, R * 1.1)
+      g1.addColorStop(0, '#ff1a65'); g1.addColorStop(0.82, '#ff1a65'); g1.addColorStop(1, 'rgba(0,0,0,0)')
+      dc.fillStyle = g1; dc.beginPath(); dc.arc(x, y, R * 1.1, 0, Math.PI * 2); dc.fill()
+      const g2 = dc.createRadialGradient(x, y, 0, x, y, R)
+      g2.addColorStop(0, '#ff80b0'); g2.addColorStop(0.5, '#ff80b0'); g2.addColorStop(1, 'rgba(0,0,0,0)')
+      dc.save(); dc.shadowColor = '#ff80b0'; dc.shadowBlur = 8; dc.globalAlpha = 0.82
+      dc.fillStyle = g2; dc.beginPath(); dc.arc(x, y, R, 0, Math.PI * 2); dc.fill()
+      dc.restore(); dc.globalAlpha = 1
+    }
+    dc.getImageData(0, 0, 1, 1)   // GPU→CPU sync
+  }
+  for (let i = 0; i < 40; i++) {   // warm-up: JIT, shader compile, readback path
+    const x = 15 + (i % 8) * 35, y = 15 + Math.floor(i / 8) * 35
+    const g = dc.createRadialGradient(x, y, 0, x, y, R)
+    g.addColorStop(0, '#ff1a65'); g.addColorStop(1, 'rgba(0,0,0,0)')
+    dc.fillStyle = g; dc.beginPath(); dc.arc(x, y, R, 0, Math.PI * 2); dc.fill()
+  }
+  dc.getImageData(0, 0, 1, 1)
+  const t0 = performance.now(); _draw100(); const r0 = performance.now() - t0
+  const t1 = performance.now(); _draw100(); const r1 = performance.now() - t1
+  return Math.min(r0, r1)
+}
+function _runTrailBenchmark() {
+  const oc = document.createElement('canvas')
+  oc.width = 800; oc.height = 600
+  const dc = oc.getContext('2d')
+  dc.lineCap = 'round'; dc.lineJoin = 'round'; dc.lineWidth = 1.5
+  const _nB = 32, trailLen = 140
+  const colors = ['#4488ff', '#44ff44', '#ff66cc']
+  const trails = Array.from({ length: 10 }, (_, t) =>
+    Array.from({ length: trailLen }, (_, i) => [
+      100 + (t % 5) * 130 + Math.sin(i * 0.22 + t * 1.3) * 45,
+      70  + Math.floor(t / 5) * 260 + i * 2.2 + Math.cos(i * 0.17 + t) * 22,
+    ]))
+  function _drawTrails() {
+    for (let ci = 0; ci < colors.length; ci++) {
+      dc.strokeStyle = colors[ci]
+      for (let b = 0; b < _nB; b++) {
+        dc.globalAlpha = ((b + 1) / _nB) * 0.75
+        dc.beginPath()
+        for (const pts of trails) {
+          const np = pts.length
+          const i0 = Math.round(b / _nB * (np - 1))
+          const i1 = Math.round((b + 1) / _nB * (np - 1))
+          if (i1 <= i0) continue
+          dc.moveTo(pts[i0][0], pts[i0][1])
+          for (let i = i0 + 1; i <= i1; i++)
+            dc.quadraticCurveTo(pts[i - 1][0], pts[i - 1][1], (pts[i - 1][0] + pts[i][0]) / 2, (pts[i - 1][1] + pts[i][1]) / 2)
+        }
+        dc.stroke()
+      }
+    }
+    dc.getImageData(0, 0, 1, 1)
+  }
+  _drawTrails(); dc.getImageData(0, 0, 1, 1)
+  const t0 = performance.now(); _drawTrails(); const r0 = performance.now() - t0
+  const t1 = performance.now(); _drawTrails(); const r1 = performance.now() - t1
+  return Math.min(r0, r1)
+}
+// Runs once per page load (memoised). Returns { grad, trail, tier, low }.
+let _speedTest = null
+function detectPerformanceTier() {
+  if (_speedTest) return _speedTest
+  try {
+    const grad = _runPerfBenchmark(), trail = _runTrailBenchmark()
+    const tier = trail > 13 ? 'simple' : trail > 8 ? 'detailed' : 'hires'
+    _speedTest = { grad, trail, tier, low: trail > 40 }
+  } catch { _speedTest = { grad: NaN, trail: NaN, tier: null, low: false } }
+  return _speedTest
+}
+
+// Runtime adaptive quality (bonds' algorithm, same constants): the startup test scores the
+// machine once, but capacity drifts (thermal throttling, battery saver, other tabs, heavier
+// states). Both tabs report their real per-frame WORK time; the median of the last 40 samples
+// steps the tier down when it can't keep up and back up when there's lots of headroom. Cooldown,
+// a ceiling (never auto-exceed the startup/user pick) and an anti-oscillation lock stop flapping.
+const Q_TIERS = ['simple', 'detailed', 'hires']
+const ADAPT = { window: 40, cooldownMs: 2500, minSamples: 20, downFactor: 0.9, oscWindowMs: 12000 }
+const qBudgetMs = q => q === 'hires' ? 16.7 : 33.3
+const _median = arr => { const a = arr.slice().sort((x, y) => x - y), m = a.length >> 1; return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2 }
 
 const QUALITY_DEFAULT = 'detailed'
 
@@ -504,6 +606,7 @@ const QUALITY = {
   // but pointless on machines that can't render the extra frames). Detection never selects it;
   // it is a manual opt-in from the dev panel.
   hires: {
+    physBudgetMs:    14,     // Bulk: max physics ms per frame before dropping backlog (see box loop)
     bondStrainField: true,
     chargeGradient:  true,
     interpolate:     true,
@@ -514,6 +617,7 @@ const QUALITY = {
   // Full fidelity. maxDpr 2 is not a downgrade for a normal 1x or 2x panel; it only
   // clamps the pathological case of a high-DPI panel plus browser zoom.
   detailed: {
+    physBudgetMs:    12,
     bondStrainField: true,
     chargeGradient:  true,
     interpolate:     false,
@@ -543,6 +647,7 @@ const QUALITY = {
   // Atoms, bonds, grains and the blob all still draw: every interaction being taught
   // survives this tier. Only soft glows and resolution go.
   simple: {
+    physBudgetMs:    8,
     bondStrainField: false,
     chargeGradient:  false,   // charge halos still draw, but as flat discs (no per-atom gradient)
     interpolate:     false,
@@ -576,7 +681,51 @@ export default function GlassViewer() {
   // Performance tier. detectPerformanceTier() is a stub returning null until the
   // real speed test is dropped in (see the top of this file), so this currently
   // always resolves to QUALITY_DEFAULT. The dev panel can override it by hand.
-  const [quality, setQuality] = useState(() => detectPerformanceTier() ?? QUALITY_DEFAULT)
+  const [quality, setQuality] = useState(() => detectPerformanceTier().tier ?? QUALITY_DEFAULT)
+  const qualityRef = useRef(quality)
+  qualityRef.current = quality
+  // Adaptive-quality state (see ADAPT). Ceiling = startup verdict, or the user's manual pick.
+  const adaptRef = useRef({ ceiling: detectPerformanceTier().tier ?? QUALITY_DEFAULT, auto: true, costs: [],
+                            lastAt: 0, via: 'init', enteredAt: 0, lastMedian: 0 })
+  // Called by both tabs' RAF loops with that frame's work time (ms). Stable identity.
+  const recordFrameCost = useRef(ms => {
+    const A = adaptRef.current
+    A.costs.push(ms); if (A.costs.length > ADAPT.window) A.costs.shift()
+    if (!A.auto) return
+    const now = performance.now()
+    if (now - A.lastAt < ADAPT.cooldownMs || A.costs.length < ADAPT.minSamples) return
+    const q = qualityRef.current, med = A.lastMedian = _median(A.costs), budget = qBudgetMs(q)
+    const cur = Q_TIERS.indexOf(q), ceil = Q_TIERS.indexOf(A.ceiling)
+    let next = null, via = null
+    if (med > budget * ADAPT.downFactor && cur > 0) {
+      if (A.via === 'up' && now - A.enteredAt < ADAPT.oscWindowMs) A.ceiling = Q_TIERS[cur - 1]   // flapping → lock lower
+      next = Q_TIERS[cur - 1]; via = 'down'
+    } else if (cur < ceil) {
+      const upFactor = Q_TIERS[cur + 1] === 'hires' ? 0.15 : 0.40
+      if (med < budget * upFactor) { next = Q_TIERS[cur + 1]; via = 'up' }
+    }
+    if (next) {
+      A.via = via; A.enteredAt = now; A.lastAt = now; A.costs.length = 0
+      if (window._perfLog) console.log(`[adapt] ${via} → ${next}  (median ${med.toFixed(1)} ms, budget ${budget.toFixed(1)} ms)`)
+      setQuality(next)
+    }
+  }).current
+  // Manual pick (dropdown / dev panel): authoritative — becomes the ceiling, clears any lock.
+  const pickQuality = q => {
+    const A = adaptRef.current
+    A.ceiling = q; A.via = 'manual'; A.enteredAt = A.lastAt = performance.now(); A.costs.length = 0
+    setQuality(q)
+  }
+  useEffect(() => {
+    window.perfReport = () => {
+      const A = adaptRef.current, st = detectPerformanceTier()
+      console.table({ quality: qualityRef.current, ceiling: A.ceiling, autoQuality: A.auto,
+        'median frame work': A.costs.length ? _median(A.costs).toFixed(1) + ' ms' : '—',
+        'frame budget': qBudgetMs(qualityRef.current).toFixed(1) + ' ms', samples: A.costs.length,
+        enteredVia: A.via, 'speed test grad': st.grad?.toFixed(1) + ' ms', 'speed test trail': st.trail?.toFixed(1) + ' ms' })
+    }
+    window.setAutoQuality = on => { adaptRef.current.auto = !!on; if (!on) adaptRef.current.costs.length = 0; return adaptRef.current.auto }
+  }, [])
   const caps = qualityCaps(quality)
   // The strain field is available on both tiers; 'simple' just draws it crisp (no blur) via
   // fieldBlur, because the blur — not the field itself — is the expensive part.
@@ -731,6 +880,8 @@ export default function GlassViewer() {
   // Glass look only applies to glass that has been melted and is COOLING: eases to 1 once a cool
   // run starts, back to 0 if heating resumes; reset with the composition. Never during heating.
   const glassGateRef  = useRef(0)
+  const gpuThreshRef  = useRef(null)   // null = untested, true/false = SVG alpha-threshold filter usable
+  const grainGroupsRef = useRef(new Map())   // per-frame colour batches for the Bulk grain draw
   const bgGrayRef     = useRef(0)   // box background: 0 = black (heating/idle-hot), ramps to 1 (gray) while cooling
   const bgHeatTintRef = useRef(0)   // eased 0..1 strength of the red heating wash (fades out at auto-shutoff)
   const bgCoolTintRef = useRef(0)   // eased 0..1 strength of the blue cooling wash
@@ -1128,6 +1279,20 @@ export default function GlassViewer() {
     const sandMeltCrisp = document.createElement('canvas')
     sandMeltCrisp.width = BOX_SIZE; sandMeltCrisp.height = BOX_SIZE
     const smctx2        = sandMeltCrisp.getContext('2d', { willReadFrequently: true })
+    // Metaball halo, pre-rendered ONCE: drawing this sprite per blob orb replaces a fresh
+    // createRadialGradient + arc fill per orb per frame (~1600 gradients/frame when hot).
+    const HALO_SPRITE_R = 32
+    const haloSprite = document.createElement('canvas')
+    haloSprite.width = haloSprite.height = HALO_SPRITE_R * 2
+    {
+      const hc = haloSprite.getContext('2d')
+      const grad = hc.createRadialGradient(HALO_SPRITE_R, HALO_SPRITE_R, 0, HALO_SPRITE_R, HALO_SPRITE_R, HALO_SPRITE_R)
+      grad.addColorStop(0,   'rgba(255,255,255,1.0)')
+      grad.addColorStop(0.3, 'rgba(220,220,220,0.65)')
+      grad.addColorStop(1,   'rgba(0,0,0,0)')
+      hc.fillStyle = grad
+      hc.beginPath(); hc.arc(HALO_SPRITE_R, HALO_SPRITE_R, HALO_SPRITE_R, 0, Math.PI * 2); hc.fill()
+    }
     // Cooled-glass look: a CPU-readable copy of the soft halo field (the blob's "height") and the
     // per-pixel glass output (see the glass pass after Pass 1B).
     const glassFieldOff = document.createElement('canvas')
@@ -1242,6 +1407,7 @@ export default function GlassViewer() {
     function frame(ts) {
       const s    = boxSimRef.current
       const phys = physRef.current
+      const _fc0 = performance.now()   // frame work time → adaptive quality
 
       // Frame-to-frame elapsed, independent of the physics accumulator
       const frameElapsed = s.lastFrameTs ? Math.min((ts - s.lastFrameTs) / 1000, 0.05) : 0
@@ -1328,6 +1494,7 @@ export default function GlassViewer() {
           }
         }
 
+        bpStart(); if (window._bulkProf) _bp.frames++
         if (s.boxState === 'sand') {
           if (!phys.naBlobs) phys.naBlobs = []
           if (!phys.blobMct) phys.blobMct = {}
@@ -1354,12 +1521,21 @@ export default function GlassViewer() {
             }
           } else if (!s.sandPaused && !timeStoppedRef.current) {
             phys.accumulator += elapsed
+            // Physics TIME BUDGET per frame (per quality tier). Without it a slow machine spirals:
+            // a long frame demands more fixed steps, which makes the next frame longer, until the
+            // 0.05 s clamp (6 steps/frame) — bistable, measured 33 ↔ 50 ms frames at 4× throttle.
+            // Past the budget we drop the backlog: weak machines run mildly slow-motion but smooth.
+            const physBudget = capsRef.current.physBudgetMs ?? 12
+            const physT0 = performance.now()
             while (phys.accumulator >= FIXED_DT) {
               stepNaBlobSprings(phys.naBlobs, FIXED_DT, box.boxAngle, s.temp)
               stepSandPhysics(phys.sandParticles, FIXED_DT, HS, box.boxAngle, phys.naBlobs)
               checkNaBlobMerges(phys.naBlobs, phys.blobMct, phys.sandParticles, s.temp)
               phys.accumulator -= FIXED_DT
+              if (window._bulkProf) _bp.steps++
+              if (performance.now() - physT0 > physBudget) { phys.accumulator = Math.min(phys.accumulator, FIXED_DT * 0.5); break }
             }
+            bpMark('physics')
             // Na₂O grain merging — only while the macro melt is BELOW the temperature's target,
             // so it melts up to the matched degree and then holds (no creeping when paused).
             if (macroMeltFrac(phys) < macroMeltTarget(s.temp)) {
@@ -1370,6 +1546,7 @@ export default function GlassViewer() {
               lastMeltStatRef.current = ts
               setBoxMeltFrac(macroMeltFrac(phys))
             }
+            bpMark('meld')
           }
         } else {
           // Freeze/unfreeze transition
@@ -1440,6 +1617,7 @@ export default function GlassViewer() {
 
           ctx.fillStyle = boxBgTint(22, 18, 16, _heatTint, _coolTint, _bgGray, s.temp)
           ctx.fillRect(-HS, -HS, BOX_SIZE, BOX_SIZE)
+          bpMark('bg')
 
           const _isSoda   = presetIdRef.current === 'soda'
           // Na grains switch to metaball rendering at 700°C so they merge visually
@@ -1459,34 +1637,52 @@ export default function GlassViewer() {
             }
           }
 
-          // Individual grain render — sand hexagons, plus Na circles when below melt temp
+          bpMark('sandGlow prep')
+          // Individual grain render — sand hexagons, plus Na circles when below melt temp.
+          // Batched: one path per colour (sand has ~12 colours + the Na colour) → one fill + one
+          // stroke per group, instead of a colour string, path, fill and stroke PER GRAIN
+          // (~3600 draw calls/frame). Same shapes, colours and outline as before.
           ctx.lineWidth = 0.5
-          for (const g of phys.sandParticles) {
-            if (g.type === 'na-sub' || g.type === 'na-ctr') continue
-            if (_naAsMeta && g.type === 'na') continue
-            if (g.type === 'silicate') continue
-            if (heatT > 0) {
-              const blend = heatT * heatT * 0.6
-              ctx.fillStyle = `rgb(${Math.round(g._cr + (hotR - g._cr) * blend)},${Math.round(g._cg + (hotG - g._cg) * blend)},${Math.round(g._cb + (hotB - g._cb) * blend)})`
-            } else {
-              ctx.fillStyle = g.color
+          {
+            const groups = grainGroupsRef.current
+            groups.clear()
+            for (const g of phys.sandParticles) {
+              if (g.type === 'na-sub' || g.type === 'na-ctr') continue
+              if (_naAsMeta && g.type === 'na') continue
+              if (g.type === 'silicate') continue
+              const key = g.type === 'na' ? 'na:' + g.color : g.color
+              let arr = groups.get(key)
+              if (!arr) { arr = []; groups.set(key, arr) }
+              arr.push(g)
             }
-            ctx.beginPath()
-            if (g.type === 'na') {
-              ctx.arc(g.x, g.y, g.r, 0, Math.PI * 2)
-              ctx.closePath(); ctx.fill()
-              ctx.strokeStyle = 'rgba(160,210,240,0.35)'; ctx.stroke()
-            } else {
-              for (let k = 0; k < 6; k++) {
-                const a = g.angle + k * Math.PI / 3
-                const hx = g.x + g.r * Math.cos(a), hy = g.y + g.r * Math.sin(a)
-                k === 0 ? ctx.moveTo(hx, hy) : ctx.lineTo(hx, hy)
+            const blend = heatT > 0 ? heatT * heatT * 0.6 : 0
+            for (const [key, arr] of groups) {
+              const g0 = arr[0], isNa = g0.type === 'na'
+              ctx.fillStyle = blend > 0
+                ? `rgb(${Math.round(g0._cr + (hotR - g0._cr) * blend)},${Math.round(g0._cg + (hotG - g0._cg) * blend)},${Math.round(g0._cb + (hotB - g0._cb) * blend)})`
+                : g0.color
+              ctx.beginPath()
+              for (const g of arr) {
+                if (isNa) { ctx.moveTo(g.x + g.r, g.y); ctx.arc(g.x, g.y, g.r, 0, Math.PI * 2) }
+                else {
+                  // corner offsets cached per grain (recomputed only if its size/angle changes)
+                  let h = g._hex
+                  if (!h || g._hexR !== g.r || g._hexA !== g.angle) {
+                    h = g._hex = new Float32Array(12); g._hexR = g.r; g._hexA = g.angle
+                    for (let k = 0; k < 6; k++) { const a = g.angle + k * Math.PI / 3; h[k * 2] = g.r * Math.cos(a); h[k * 2 + 1] = g.r * Math.sin(a) }
+                  }
+                  ctx.moveTo(g.x + h[0], g.y + h[1])
+                  for (let k = 1; k < 6; k++) ctx.lineTo(g.x + h[k * 2], g.y + h[k * 2 + 1])
+                  ctx.closePath()
+                }
               }
-              ctx.closePath(); ctx.fill()
-              ctx.strokeStyle = `rgba(0,0,0,0.35)`; ctx.stroke()
+              ctx.fill()
+              ctx.strokeStyle = isNa ? 'rgba(160,210,240,0.35)' : 'rgba(0,0,0,0.35)'
+              ctx.stroke()
             }
           }
 
+          bpMark('grains')
           if (heatT > 0 && !_isSoda && capsRef.current.blobGlowBlur) {
             ctx.filter = `blur(${Math.round(heatT * 12)}px)`
             ctx.globalCompositeOperation = 'lighter'
@@ -1495,6 +1691,7 @@ export default function GlassViewer() {
             ctx.globalCompositeOperation = 'source-over'
           }
 
+          bpMark('sandGlow blur')
           // Na and silicate grains: hard-edged solid circles, same gradual heat tint as sand
           if (_naAsMeta) {
             if (heatT > 0) {
@@ -1509,6 +1706,7 @@ export default function GlassViewer() {
             }
           }
 
+          bpMark('naCircles')
           // Na₂O blobs — solid fill + separate transparent glow overlay (same as sand)
           if (phys.naBlobs?.length) {
             const t = Math.max(0, Math.min(1, (s.temp - 700) / 500))
@@ -1520,28 +1718,47 @@ export default function GlassViewer() {
             for (const blob of phys.naBlobs) {
               for (const p of blob.particles) {
                 if (p.type !== 'na-sub') continue
-                const px = p.x + HS, py = p.y + HS
                 const br = p.r * 8
-                const grad = smctx.createRadialGradient(px, py, 0, px, py, br)
-                grad.addColorStop(0,   'rgba(255,255,255,1.0)')
-                grad.addColorStop(0.3, 'rgba(220,220,220,0.65)')
-                grad.addColorStop(1,   'rgba(0,0,0,0)')
-                smctx.fillStyle = grad
-                smctx.beginPath(); smctx.arc(px, py, br, 0, Math.PI * 2); smctx.fill()
+                smctx.drawImage(haloSprite, p.x + HS - br, p.y + HS - br, br * 2, br * 2)
               }
             }
             smctx.globalCompositeOperation = 'source-over'
 
+            bpMark('blob 1A halos')
             // Pass 1B: contrast → near-binary mask, then hard-threshold alpha to true binary
+            // (no contrast(9999) filter any more: it only binarised RGB, and everything downstream —
+            // the source-in fill, the glow blur, the glass height — reads the mask's ALPHA only)
+            // Threshold alpha > 64 on the GPU via the SVG filter #gvAlphaThresh (no GPU→CPU readback
+            // — that readback was most of this pass). The first time, self-test it against the CPU
+            // threshold and fall back to the readback if the browser's result differs.
             smctx2.clearRect(0, 0, BOX_SIZE, BOX_SIZE)
-            smctx2.filter = 'contrast(9999)'
-            smctx2.drawImage(sandMeltOff, 0, 0)
-            smctx2.filter = 'none'
-            const imgD = smctx2.getImageData(0, 0, BOX_SIZE, BOX_SIZE)
-            const px = imgD.data
-            for (let i = 3; i < px.length; i += 4) px[i] = px[i] > 64 ? 255 : 0
-            smctx2.putImageData(imgD, 0, 0)
+            if (gpuThreshRef.current === true) {
+              smctx2.filter = 'url(#gvAlphaThresh)'
+              smctx2.drawImage(sandMeltOff, 0, 0)
+              smctx2.filter = 'none'
+            } else {
+              smctx2.drawImage(sandMeltOff, 0, 0)
+              const imgD = smctx2.getImageData(0, 0, BOX_SIZE, BOX_SIZE)
+              const px = imgD.data
+              for (let i = 3; i < px.length; i += 4) px[i] = px[i] > 64 ? 255 : 0
+              smctx2.putImageData(imgD, 0, 0)
+              if (gpuThreshRef.current === null) {   // one-time self-test of the GPU path
+                gpuThreshRef.current = false
+                try {
+                  const tc = document.createElement('canvas'); tc.width = tc.height = BOX_SIZE
+                  const tx = tc.getContext('2d', { willReadFrequently: true })
+                  tx.filter = 'url(#gvAlphaThresh)'; tx.drawImage(sandMeltOff, 0, 0); tx.filter = 'none'
+                  const A = tx.getImageData(0, 0, BOX_SIZE, BOX_SIZE).data
+                  let diff = 0, on = 0
+                  for (let i = 3; i < px.length; i += 4) { if ((A[i] > 127) !== (px[i] > 127)) diff++; if (px[i]) on++ }
+                  // too little blob to judge yet → leave untested (null) and retry on a later frame
+                  gpuThreshRef.current = on > 200 ? diff <= Math.max(4, on * 0.002) : null
+                  window._gpuThreshTest = { diff, on, ok: gpuThreshRef.current }
+                } catch { gpuThreshRef.current = false }
+              }
+            }
 
+            bpMark('blob 1B mask')
             // ── Cooled glass (steps 1–3 of the glass look) ─────────────────────────────
             // glassAmt crossfades the old self-lit fill → glass as the melt cools 1000 → 500 °C.
             // The crisp blob mask, BLURRED by GL.gain px, is treated as the blob's HEIGHT (a pillow:
@@ -1586,23 +1803,25 @@ export default function GlassViewer() {
                   const a  = ea * ea * (3 - 2 * ea)
                   const gx = (F[(i + 1) * 4 + 3] - F[(i - 1) * 4 + 3]) / 510
                   const gy = (F[(i + W) * 4 + 3] - F[(i - W) * 4 + 3]) / 510
-                  const gm = Math.hypot(gx, gy), g = gm * gain
-                  const nz = 1 / Math.sqrt(1 + g * g)                  // normal's view-facing component
-                  const fres = Math.pow(1 - nz, 2.2)                   // Fresnel: peaks at the outline
+                  const k = i * 4
+                  // Flat interior (no slope → faces the viewer, no rim): plain body colour. Most
+                  // blob pixels take this path, skipping the lighting maths below.
+                  if (gx * gx + gy * gy < 1e-7) { O[k] = vr; O[k + 1] = vg; O[k + 2] = vb; O[k + 3] = 255 * a; continue }
+                  const gm = Math.sqrt(gx * gx + gy * gy), g = gm * gain
+                  const fres = _FRES_LUT[Math.min(_FRES_N - 1, (g * _FRES_SCALE) | 0)]   // Fresnel (1 − 1/√(1+g²))^2.2, tabulated
                   // outward in-plane normal (height rises inward) → screen space → light term
                   let ndl = 0
                   if (gm > 1e-6) {
                     const nx = -gx / gm, ny = -gy / gm
                     ndl = (nx * bc - ny * bs) * Lx + (nx * bs + ny * bc) * Ly
                   }
-                  const lit   = ndl > 0 ? Math.pow(ndl, 1.3) : 0
+                  const lit   = ndl > 0 ? _LIT_LUT[(ndl * 255) | 0] : 0       // ndl^1.3, tabulated
                   const back  = ndl < 0 ? ndl * ndl : 0
                   const bright = Math.min(1, fres * rimB * (AMB + (1 - AMB) * lit) + fres * 0.35 * back)  // lit rim + faint exit glow
                   const shade  = Math.min(1, fres * (1 - lit) * 0.6)                                   // shadow-side edge
                   let r = vr, gg = vg, b = vb
                   r += (er - r) * shade; gg += (eg - gg) * shade; b += (eb - b) * shade
                   r += (tr - r) * bright; gg += (tg - gg) * bright; b += (tb - b) * bright
-                  const k = i * 4
                   O[k] = r; O[k + 1] = gg; O[k + 2] = b
                   O[k + 3] = 255 * a                                  // opaque body (bg colour + tint)
                 }
@@ -1610,6 +1829,7 @@ export default function GlassViewer() {
               gctx.putImageData(glassImg, 0, 0)
             }
 
+            bpMark('blob glass')
             // Pass 1C: colorize mask with solid fill color → draw onto scene (fades out as glass fades in)
             smctx.clearRect(0, 0, BOX_SIZE, BOX_SIZE)
             smctx.drawImage(sandMeltCrisp, 0, 0)
@@ -1629,6 +1849,7 @@ export default function GlassViewer() {
               ctx.globalAlpha = 1
             }
 
+            bpMark('blob 1C fill')
             // Pass 2: soft glow overlay — blur the crisp mask, tint at low alpha, draw
             // lighter. Decorative; dropped on 'simple'. The crisp metaball mask itself is
             // kept, so the melt still reads as a blob.
@@ -1650,6 +1871,7 @@ export default function GlassViewer() {
               ctx.globalCompositeOperation = 'source-over'
             }
 
+            bpMark('blob 2 glow')
             // Pass 3: same heat glow as pure sand, using blob sub-circles as sources.
             // Decorative; dropped on 'simple'.
             if (heatT > 0 && capsRef.current.blobGlowBlur && glassAmt < 1) {
@@ -1674,6 +1896,7 @@ export default function GlassViewer() {
               ctx.globalCompositeOperation = 'source-over'
             }
 
+            bpMark('blob 3 heatglow')
             window._naBlobs = phys.naBlobs
             window._blobMct = phys.blobMct
           }
@@ -1727,6 +1950,7 @@ export default function GlassViewer() {
         }
 
         ctx.restore()
+        bpMark('misc')
 
         // Container border — colour + glow announces the active heat/cool RATE:
         //   fast heat → hot glowing red; slow heat → dim red; fast cool → icy glowing blue;
@@ -1744,6 +1968,7 @@ export default function GlassViewer() {
         ctx.strokeRect(-HS, -HS, BOX_SIZE, BOX_SIZE)
         if (_glow > 0) { ctx.strokeRect(-HS, -HS, BOX_SIZE, BOX_SIZE); ctx.shadowBlur = 0 }  // 2nd pass = stronger glow
         ctx.restore()
+        bpMark('border')
 
         // Non-sand entity count — diagnostic HUD (dev mode only)
         if (s.sandDevMode && s.boxState === 'sand' && phys.sandParticles) {
@@ -2102,6 +2327,10 @@ export default function GlassViewer() {
         }
       }
 
+      // Adaptive quality sample: real Bulk frame work. Skipped while time is stopped (no physics →
+      // misleadingly cheap) and during the hidden heat-up catch-up (flat-out → misleadingly heavy).
+      if (tabRef.current === 'glass' && !timeStoppedRef.current && !s.heatReplay && !s.sandPaused)
+        recordFrameCost(performance.now() - _fc0)
       raf = requestAnimationFrame(frame)
     }
 
@@ -2191,6 +2420,13 @@ export default function GlassViewer() {
 
   return (
     <div className="app">
+      {/* Alpha threshold for the Bulk metaball mask (alpha > 64/255 → 1), used as a canvas
+          filter so the mask needs no GPU→CPU readback. 4-step table: [0,.25)→0, [.25,1]→1. */}
+      <svg width="0" height="0" style={{ position:'absolute' }} aria-hidden="true">
+        <filter id="gvAlphaThresh" colorInterpolationFilters="sRGB">
+          <feComponentTransfer><feFuncA type="discrete" tableValues="0 1 1 1" /></feComponentTransfer>
+        </filter>
+      </svg>
 
       {/* ── Top bar: steel control panel (v4 style) ── */}
       <header className="top-bar">
@@ -2260,7 +2496,20 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 87</span>
+                  }}>Field Test Version 91
+                    {/* Quality: set by the startup speed test (bonds' benchmark), auto-adjusted at
+                        runtime; a manual pick becomes the ceiling. */}
+                    <select value={quality} onChange={e => pickQuality(e.target.value)}
+                      title={(() => { const st = detectPerformanceTier(); return `Speed test: gradient ${st.grad?.toFixed(1)} ms, trail ${st.trail?.toFixed(1)} ms → ${st.tier ?? 'n/a'}${st.low ? ' (very slow machine)' : ''}. Adjusts automatically; your pick is the ceiling.` })()}
+                      style={{ pointerEvents:'auto', marginLeft:8, fontSize:10, fontWeight:700, letterSpacing:'0.04em',
+                        textTransform:'uppercase', fontFamily:'inherit', cursor:'pointer', padding:'1px 2px', borderRadius:3,
+                        background:'rgba(255,255,255,0.18)', color: detectPerformanceTier().low && quality === 'simple' ? 'rgba(170,40,30,0.9)' : 'rgba(70,70,70,0.9)',
+                        border: detectPerformanceTier().low && quality === 'simple' ? '1px solid rgba(190,60,50,0.55)' : '1px solid rgba(90,90,90,0.35)' }}>
+                      <option value="hires">Hi-res</option>
+                      <option value="detailed">Detailed</option>
+                      <option value="simple">Simple</option>
+                    </select>
+                  </span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),
@@ -2691,18 +2940,16 @@ export default function GlassViewer() {
                 Mini photo view
               </label>
 
-              {/* ── Quality tier ── global, so it lives outside the per-tab blocks.
-                  Manual override: the real speed test is not wired up yet (see
-                  detectPerformanceTier at the top of this file), so this is how the
-                  Simple path gets exercised in the meantime. */}
+              {/* ── Quality tier ── global, so it lives outside the per-tab blocks. Same as the
+                  toolbar dropdown: a manual pick (sets the auto-quality ceiling). */}
               <div style={{fontSize:11, color:'#aaa', marginBottom:4, letterSpacing:'0.06em'}}>── Quality ──</div>
               <div style={{fontSize:11, color:'#888', marginBottom:4}}>
                 Tier <span style={{color:'#a090d0'}}>{quality}</span>
-                {detectPerformanceTier() === null && <span style={{color:'#666'}}> (speed test not wired yet)</span>}
+                <span style={{color:'#666'}}> (speed test {detectPerformanceTier().tier ?? 'n/a'}, trail {detectPerformanceTier().trail?.toFixed(1)} ms; ceiling {adaptRef.current.ceiling})</span>
               </div>
               <div style={{display:'flex', gap:3}}>
                 {['hires','detailed','simple'].map(q => (
-                  <button key={q} onClick={() => setQuality(q)}
+                  <button key={q} onClick={() => pickQuality(q)}
                     style={{fontSize:10, padding:'2px 7px', cursor:'pointer', userSelect:'none',
                       background: quality===q ? '#6050a0' : '#2a2a3a',
                       color: quality===q ? '#fff' : '#aaa',
@@ -2930,7 +3177,7 @@ export default function GlassViewer() {
               meltTemp={meltLocalTemp} simSpeed={simSpeed} speedMult={speedMult} coolingMode={coolingMode}
               onTempUpdate={handleTempUpdate} onEnergyUpdate={handleEnergyUpdate}
               onBondCounts={handleBondCounts}
-              graphCanvasRef={graphCanvasRef} graphUiRef={graphUiRef} heatRateRef={meltTempRef} timePaused={timeStopped} replayInfoRef={replayInfoRef} heatLeadSteps={heatLeadSteps}
+              graphCanvasRef={graphCanvasRef} graphUiRef={graphUiRef} onFrameCost={recordFrameCost} heatRateRef={meltTempRef} timePaused={timeStopped} replayInfoRef={replayInfoRef} heatLeadSteps={heatLeadSteps}
               cumulativeEnergyRef={meltCumulativeEnergyRef}
               graphXMaxRef={graphXMaxRef}
               replayFrame={replayFrame} onReplayReady={handleReplayReady}

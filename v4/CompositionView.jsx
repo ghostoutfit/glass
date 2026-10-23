@@ -340,7 +340,7 @@ function countBonds(phys) {
   return counts
 }
 
-export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, attractK = 0, attractFalloff = 1, debug = false, bondNums = false, meltTemp = 50, simSpeed = 1, speedMult = 1, coolingMode = null, onTempUpdate = null, onEnergyUpdate = null, onBondCounts = null, replayFrame = null, onReplayReady = null, graphCanvasRef = null, graphUiRef = null, cumulativeEnergyRef = null, graphXMaxRef = null, darkMode = true, showCharge = false, chargeLite = false, showField = true, fieldBlur = true, interpolate = false, longerCooledBonds = true, atomColorMode = 'normal', showBrokenBonds = false, showLiveStats = false, useEmaStrain = true, hcPlateau = 4, active = true, resetToken = 0, targetTempLine = null, meltRestore = null, coolCommitted = null, heatRateRef = null, heatLeadSteps = 30, timePaused = false, replayInfoRef = null }) {
+export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, attractK = 0, attractFalloff = 1, debug = false, bondNums = false, meltTemp = 50, simSpeed = 1, speedMult = 1, coolingMode = null, onTempUpdate = null, onEnergyUpdate = null, onBondCounts = null, replayFrame = null, onReplayReady = null, graphCanvasRef = null, graphUiRef = null, cumulativeEnergyRef = null, graphXMaxRef = null, darkMode = true, showCharge = false, chargeLite = false, showField = true, fieldBlur = true, interpolate = false, longerCooledBonds = true, atomColorMode = 'normal', showBrokenBonds = false, showLiveStats = false, useEmaStrain = true, hcPlateau = 4, active = true, resetToken = 0, targetTempLine = null, meltRestore = null, coolCommitted = null, heatRateRef = null, heatLeadSteps = 30, timePaused = false, replayInfoRef = null, onFrameCost = null }) {
   const types = useMemo(
     () => buildGrid(sio2Pct, na2oPct, caoPct),
     [sio2Pct, na2oPct, caoPct]
@@ -428,6 +428,8 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
   // decimation (drop every other frame, double the interval) so memory stays bounded (~10 MB).
   const replayRef           = useRef({ frames: [], every: 2, acc: 0, lastNotify: 0 })
   const timePausedRef       = useRef(timePaused)
+  const onFrameCostRef      = useRef(onFrameCost)
+  onFrameCostRef.current    = onFrameCost
   timePausedRef.current     = timePaused
   const replayInfoRefRef    = useRef(replayInfoRef)
   replayInfoRefRef.current  = replayInfoRef
@@ -916,6 +918,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
 
     function frame(ts) {
       const cm = coolingRef.current
+      const _fc0 = performance.now()   // frame work time → adaptive quality (GlassViewer)
 
       // ── Detect ramp mode change ───────────────────────────────────
       if (cm !== prevCoolingRef.current) {
@@ -1176,6 +1179,8 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
           lastBondCountTsRef.current = ts
           onBondCountsRef.current(countBonds(phys))
         }
+        // live, active, time running → a representative frame for adaptive quality
+        if (!timePausedRef.current) onFrameCostRef.current?.(performance.now() - _fc0)
       }
       rafRef.current = requestAnimationFrame(frame)
     }

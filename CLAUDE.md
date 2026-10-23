@@ -44,6 +44,57 @@ To look at it running: `npx vite preview` then open `/glass/v3/index.html`.
 
 ---
 
+# ⚡ v4 performance + quality tiers (Oct 2026) — read first; the v3 notes below are history
+
+**Bulk tab, measured at 4× CPU throttle** (headless Chromium, Detailed tier; `bulkprof` harness —
+heat on the Bulk tab to the state, throttle, sample 60 RAF intervals + `bulkPerf()`):
+
+| State | frame before → after | CPU/frame before → after |
+|---|---|---|
+| pure sand 1500 °C | 50 → 16.7 ms (20 → 60 fps) | 49 → 14 ms |
+| soda 1000 °C (mid-melt) | 200 → 16.7 ms (5 → 60 fps) | 194 → 18 ms |
+| soda 1500 °C (hot) | 200 → 16.7 ms (5 → 60 fps) | 200 → 18 ms |
+| soda 300 °C (cooled glass) | 167 → 16.7 ms (6 → 60 fps) | 162 → 22 ms |
+
+Before: physics was 85–90 % of every frame; rendering ~10 ms. What changed (all in `sandPhysics.js`
+unless noted) — keep these when editing:
+- **PBD solve on packed Float64 arrays** (`_sX/_sY/_sR/_sCT/_sRB`), synced out/in only around the
+  rigid/hardening shape matches. Bit-identical to the object version (verified).
+- **Forward half-stencil** neighbour loop (own cell with `bi > ai` + E, SW, S, SE cells, all pairs):
+  each pair visited once instead of twice. Uses each grain's cell **at grid-build time**
+  (`_cellX/_cellY`) — recomputing from the moving position skipped pairs (max overlap 20 → 65 %).
+  Contact order differs from before (physically equivalent; mean overlap 2.5 → 2.8 %, pile shape same).
+- **Large grains** (r > CELL/2) scan grid cells within reach, not every grain (was ~18 %).
+- **Merges** (`mergeSodaGrains`, `mergeSilicateGrains`) use the grid (`_prepNear`/`_nearCandidates`)
+  instead of n² pairs (was ~20 ms/frame mid-melt at 4×); removals compact in one pass, not splice.
+- **`checkNaBlobMerges`** numeric pair keys (a template string per blob pair per step was a big GC
+  cost under throttle).
+- **Physics time budget per frame** (`GlassViewer` box loop, `caps.physBudgetMs` 14/12/8): past it the
+  backlog is dropped. Without it a slow machine spiralled (longer frame → more fixed steps → longer
+  frame) to the 0.05 s clamp — bistable 33 ↔ 50 ms frames. Weak machines now run slightly slow-mo but
+  smooth; fast machines never hit it.
+- Render (`GlassViewer`): metaball halos are one pre-rendered **sprite** per orb (was a new radial
+  gradient per orb per frame); the mask's `contrast(9999)` filter is gone (everything downstream reads
+  alpha only) and the alpha threshold runs on the GPU via SVG filter `#gvAlphaThresh` — self-tested
+  once against the CPU threshold (0 px diff), falls back to the readback if it differs; sand grains
+  batched per colour with cached hexagon corners; glass lighting uses LUTs + a flat-interior fast path.
+- Early-exit of PBD passes was tried and rejected: the solve never converges (max push stays ~0.5 px).
+- `bulkPerf()` (console; set `window._bulkProf = true` first) prints ms per Bulk-frame section.
+
+**Speed test + tiers** (`GlassViewer`, ported verbatim from ssp/bonds): `_runPerfBenchmark` (gradients
++ shadowBlur) and `_runTrailBenchmark` (dense quadratic strokes), min of 2 timed passes. Trail time →
+tier: ≤ 8 ms hires · 8–13 detailed · > 13 simple (bonds' > 40 ms "low" maps to simple, shown red).
+Measured: 1× → hires (trail 2.7 ms), 4× → detailed (10.2), 8× → simple (22.1). Runtime adaptation
+(bonds' algorithm and constants: median of 40 frame-WORK samples from both tabs, down at > 0.9×budget,
+up at < 0.4× (0.15× into hires), 2.5 s cooldown, 12 s anti-flap lock, ceiling = startup verdict or the
+user's pick). Dropdown sits after the FIELD TEST VERSION tag. Console: `perfReport()`,
+`setAutoQuality(false)`, `window._perfLog = true` to log tier changes.
+
+⚠️ `candidates.generated.js` (Bulk restore states) is stale — generated before the blob-centre and
+merge fixes (192 separate blobs at 1450 °C vs one live). `scripts/gen-candidates.mjs` duplicates the
+melt formulas and has drifted (old 700→1300 curve, no `naBlobs` to `stepSandPhysics`); update it to
+match `GlassViewer.meldSandFrame`/`macroMeltTarget` before regenerating.
+
 # ⚡ Performance — read this before touching the hot paths
 
 **The sim does not hit 60 fps.** Measured in headless Chromium (Playwright + Chromium 1194,

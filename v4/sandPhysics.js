@@ -38,6 +38,26 @@ function allocGrid(HS) {
   _nodeNxt = new Int32Array(N_GRAINS)
 }
 
+// Packed per-grain arrays for the PBD solve (see stepSandPhysics step 3); grown on demand.
+let _sX = null, _sY = null, _sR = null, _sCT = null, _sRB = null
+const _FWD_DX = [0, 1, -1, 0, 1], _FWD_DY = [0, 0, 1, 1, 1]   // own, E, SW, S, SE
+let _cellX = null, _cellY = null   // each grain's cell AT grid-build time (forward stencil needs it)
+function rebuildGridXY(X, Y, n, HS) {
+  if (!_gridH) allocGrid(HS)
+  if (!_nodeG || _nodeG.length < n) { _nodeG = new Int32Array(n); _nodeNxt = new Int32Array(n) }
+  if (!_cellX || _cellX.length < n) { _cellX = new Int32Array(Math.max(n, N_GRAINS)); _cellY = new Int32Array(Math.max(n, N_GRAINS)) }
+  _gridH.fill(-1)
+  for (let i = 0; i < n; i++) {
+    const cx = Math.min(_gridW - 1, Math.max(0, (X[i] + HS) / CELL | 0))
+    const cy = Math.min(_gridW - 1, Math.max(0, (Y[i] + HS) / CELL | 0))
+    const k  = cy * _gridW + cx
+    _nodeNxt[i] = _gridH[k]
+    _nodeG[i]   = i
+    _gridH[k]   = i
+    _cellX[i] = cx; _cellY[i] = cy
+  }
+}
+
 function rebuildGrid(grains, HS) {
   if (!_gridH) allocGrid(HS)   // restored sims skip initSandParticles, so the grid may be unallocated
   // Grains grow past N_GRAINS as Na blobs add sub-circles; grow the node arrays to match or the
@@ -126,22 +146,62 @@ export function initSandParticles(HS, multiRadius = true, na2oPct = 0, nGrains =
 // ── Na₂O and silicate grain merging ─────────────────────────────────────
 const SILICATE_MAX_R = 20
 
-const _toAbsorb = new Uint8Array(N_GRAINS)
+// Merge passes used to test EVERY pair (n²/2 ≈ 2.4M at 2200 grains, every frame — ~20 ms at 4×
+// throttle mid-melt). Instead: build the grid once and, per grain, collect partners bi > ai from
+// the cells within reach (own radius + the largest radius present). Same candidate set for any
+// pair that can touch; merges are random per touching pair, so visiting order doesn't matter.
+let _cand = new Int32Array(4096)
+function _prepNear(grains, HS) {
+  rebuildGrid(grains, HS)
+  let rMax = 0
+  for (const g of grains) if (g.r > rMax) rMax = g.r
+  return rMax
+}
+function _nearCandidates(grains, ai, HS, rMax) {
+  const a = grains[ai], reach = Math.ceil((a.r + rMax) / CELL)
+  const acx = Math.min(_gridW - 1, Math.max(0, (a.x + HS) / CELL | 0))
+  const acy = Math.min(_gridW - 1, Math.max(0, (a.y + HS) / CELL | 0))
+  let m = 0
+  for (let cy = Math.max(0, acy - reach); cy <= Math.min(_gridW - 1, acy + reach); cy++) {
+    for (let cx = Math.max(0, acx - reach); cx <= Math.min(_gridW - 1, acx + reach); cx++) {
+      let ni = _gridH[cy * _gridW + cx]
+      while (ni !== -1) {
+        const bi = _nodeG[ni]; ni = _nodeNxt[ni]
+        if (bi <= ai) continue
+        if (m >= _cand.length) { const t = new Int32Array(_cand.length * 2); t.set(_cand); _cand = t }
+        _cand[m++] = bi
+      }
+    }
+  }
+  return m
+}
+// Remove flagged grains in one pass (order kept) — repeated splice() was O(n) per removal.
+function _compactAbsorbed(grains, n) {
+  let w = 0
+  for (let i = 0; i < grains.length; i++) if (!(i < n && _toAbsorb[i])) grains[w++] = grains[i]
+  grains.length = w
+}
+
+let _toAbsorb = new Uint8Array(N_GRAINS)
 
 // Call once per visual frame (not per physics tick).
 // Returns count of merges performed.
-export function mergeSodaGrains(grains, meldProb) {
+export function mergeSodaGrains(grains, meldProb, HS = 160) {
   if (meldProb <= 0) return 0
   const MAX_R = NA_R * 10
   const n = grains.length
+  if (_toAbsorb.length < n) _toAbsorb = new Uint8Array(n * 2)
   _toAbsorb.fill(0, 0, n)
   let merged = 0
+  const rMax = _prepNear(grains, HS)
 
   for (let ai = 0; ai < n; ai++) {
     if (_toAbsorb[ai]) continue
     const a = grains[ai]
     if (a.type !== 'na') continue
-    for (let bi = ai + 1; bi < n; bi++) {
+    const m = _nearCandidates(grains, ai, HS, rMax)
+    for (let c = 0; c < m; c++) {
+      const bi = _cand[c]
       if (_toAbsorb[bi]) continue
       const b = grains[bi]
       if (b.type !== 'na') continue
@@ -163,19 +223,19 @@ export function mergeSodaGrains(grains, meldProb) {
     }
   }
 
-  for (let i = n - 1; i >= 0; i--) {
-    if (_toAbsorb[i]) grains.splice(i, 1)
-  }
+  _compactAbsorbed(grains, n)
   return merged
 }
 
 // Na + Sand → silicate, and silicate + silicate → silicate.
 // Called once per visual frame. Returns merge count.
-export function mergeSilicateGrains(grains, naSandProb, silSilProb, maxMerges = 5) {
+export function mergeSilicateGrains(grains, naSandProb, silSilProb, maxMerges = 5, HS = 160) {
   if (naSandProb <= 0 && silSilProb <= 0) return 0
   const n = grains.length
+  if (_toAbsorb.length < n) _toAbsorb = new Uint8Array(n * 2)
   _toAbsorb.fill(0, 0, n)
   let merged = 0
+  const rMax = _prepNear(grains, HS)
 
   for (let ai = 0; ai < n; ai++) {
     if (merged >= maxMerges) break
@@ -186,7 +246,9 @@ export function mergeSilicateGrains(grains, naSandProb, silSilProb, maxMerges = 
     const isSil = a.type === 'silicate'
     if (!isNa && !isSi && !isSil) continue
 
-    for (let bi = ai + 1; bi < n; bi++) {
+    const m = _nearCandidates(grains, ai, HS, rMax)
+    for (let c = 0; c < m; c++) {
+      const bi = _cand[c]
       if (_toAbsorb[bi]) continue
       const b = grains[bi]
 
@@ -219,9 +281,7 @@ export function mergeSilicateGrains(grains, naSandProb, silSilProb, maxMerges = 
     }
   }
 
-  for (let i = n - 1; i >= 0; i--) {
-    if (_toAbsorb[i]) grains.splice(i, 1)
-  }
+  _compactAbsorbed(grains, n)
   return merged
 }
 
@@ -261,73 +321,107 @@ export function stepSandPhysics(grains, dt, HS, boxAngle, naBlobs = null) {
     g.y  += g.vy * dt
   }
 
-  // 3. Position-only constraint solve (no velocity changes here)
+  // 3. Position-only constraint solve (no velocity changes here).
+  // Runs on packed Float64 arrays (SoA) instead of grain objects: the neighbour loop is ~80% of
+  // the Bulk tab's CPU, and typed-array reads are far cheaper than object property loads. Same
+  // pair order and arithmetic as the object version, so results are identical; positions are
+  // written back for the shape-match passes (rigid/hardening blobs work on orb objects).
+  if (!_sX || _sX.length < n) {
+    const m = Math.max(n, N_GRAINS)
+    _sX = new Float64Array(m); _sY = new Float64Array(m); _sR = new Float64Array(m)
+    _sCT = new Uint8Array(m); _sRB = new Int32Array(m)
+  }
+  const X = _sX, Y = _sY, R = _sR, CT = _sCT, RB = _sRB
+  let rMax = 0, large = null
+  for (let i = 0; i < n; i++) {
+    const g = grains[i]
+    X[i] = g.x; Y[i] = g.y; R[i] = g.r
+    CT[i] = g.type === 'na-ctr' ? 1 : 0
+    RB[i] = g._rigid ? g.blobId : -1
+    if (g.r > rMax) rMax = g.r
+    if (g.r > LARGE_R) (large ??= []).push(i)
+  }
+  const fits = rigid || semi
   for (let pass = 0; pass < RESOLVE_PASSES; pass++) {
-    rebuildGrid(grains, HS)
+    rebuildGridXY(X, Y, n, HS)
 
+    // Forward half-stencil: own cell (each pair once via bi > ai) + the 4 "forward" neighbour cells
+    // (E, SW, S, SE), all pairs. Every unordered neighbour pair is visited exactly once — the old
+    // 9-cell scan visited each twice and discarded one visit (bi <= ai), so this halves the loop.
+    // Cells are the ones assigned at grid-build time (NOT recomputed from the moving position):
+    // otherwise a grain drifting across a cell edge mid-pass can flip the forward/backward
+    // relation and the pair is skipped by both sides.
     for (let ai = 0; ai < n; ai++) {
-      const a   = grains[ai]
-      const acx = Math.min(_gridW - 1, Math.max(0, (a.x + HS) / CELL | 0))
-      const acy = Math.min(_gridW - 1, Math.max(0, (a.y + HS) / CELL | 0))
-      for (let dcy = -1; dcy <= 1; dcy++) {
-        const cy = acy + dcy
-        if (cy < 0 || cy >= _gridW) continue
-        for (let dcx = -1; dcx <= 1; dcx++) {
-          const cx = acx + dcx
-          if (cx < 0 || cx >= _gridW) continue
+      const acx = _cellX[ai], acy = _cellY[ai]
+      for (let s5 = 0; s5 < 5; s5++) {
+        const cx = acx + _FWD_DX[s5], cy = acy + _FWD_DY[s5]
+        if (cx < 0 || cx >= _gridW || cy >= _gridW) continue
+        const own = s5 === 0
+        let ni = _gridH[cy * _gridW + cx]
+        while (ni !== -1) {
+          const bi = _nodeG[ni]; ni = _nodeNxt[ni]
+          if (own && bi <= ai) continue
+          const dx   = X[bi] - X[ai], dy = Y[bi] - Y[ai]
+          const d2   = dx * dx + dy * dy
+          const minD = R[ai] + R[bi]
+          if (d2 >= minD * minD || d2 < 1e-6) continue
+          if (CT[ai] || CT[bi]) continue
+          if (RB[ai] >= 0 && RB[ai] === RB[bi]) continue   // same solid: no internal contacts
+          const d    = Math.sqrt(d2)
+          const nx   = dx / d, ny = dy / d
+          const push = (minD - d) * 0.5
+          X[ai] -= nx * push; Y[ai] -= ny * push
+          X[bi] += nx * push; Y[bi] += ny * push
+        }
+      }
+    }
+
+    // Large grains (r > CELL/2): the ±1-cell scan above can miss their contacts. Instead of the
+    // old linear scan over EVERY grain (O(n) per large grain per pass, ~18% of the physics), scan
+    // only the grid cells within reach (own radius + the largest radius present).
+    if (large) for (const ai of large) {
+      const reach = Math.ceil((R[ai] + rMax) / CELL)
+      const acx = Math.min(_gridW - 1, Math.max(0, (X[ai] + HS) / CELL | 0))
+      const acy = Math.min(_gridW - 1, Math.max(0, (Y[ai] + HS) / CELL | 0))
+      for (let cy = Math.max(0, acy - reach); cy <= Math.min(_gridW - 1, acy + reach); cy++) {
+        for (let cx = Math.max(0, acx - reach); cx <= Math.min(_gridW - 1, acx + reach); cx++) {
           let ni = _gridH[cy * _gridW + cx]
           while (ni !== -1) {
             const bi = _nodeG[ni]; ni = _nodeNxt[ni]
             if (bi <= ai) continue
-            const b    = grains[bi]
-            const dx   = b.x - a.x, dy = b.y - a.y
-            const d2   = dx * dx + dy * dy
-            const minD = a.r + b.r
+            const dx = X[bi] - X[ai], dy = Y[bi] - Y[ai]
+            const d2 = dx * dx + dy * dy
+            const minD = R[ai] + R[bi]
             if (d2 >= minD * minD || d2 < 1e-6) continue
-            if (a.type === 'na-ctr' || b.type === 'na-ctr') continue
-            if (a._rigid && b._rigid && a.blobId === b.blobId) continue   // same solid: no internal contacts
-            const d    = Math.sqrt(d2)
-            const nx   = dx / d, ny = dy / d
+            const d = Math.sqrt(d2)
+            const nx = dx / d, ny = dy / d
             const push = (minD - d) * 0.5
-            a.x -= nx * push; a.y -= ny * push
-            b.x += nx * push; b.y += ny * push
+            X[ai] -= nx * push; Y[ai] -= ny * push
+            X[bi] += nx * push; Y[bi] += ny * push
           }
         }
       }
     }
 
-    // Large-grain linear scan: grid ±1 misses collisions when r > CELL/2.
-    // Only runs for merged grains; pure sand never triggers it.
-    for (let ai = 0; ai < n; ai++) {
-      const a = grains[ai]
-      if (a.r <= LARGE_R) continue
-      for (let bi = ai + 1; bi < n; bi++) {
-        const b = grains[bi]
-        const dx = b.x - a.x, dy = b.y - a.y
-        const d2 = dx * dx + dy * dy
-        const minD = a.r + b.r
-        if (d2 >= minD * minD || d2 < 1e-6) continue
-        const d = Math.sqrt(d2)
-        const nx = dx / d, ny = dy / d
-        const push = (minD - d) * 0.5
-        a.x -= nx * push; a.y -= ny * push
-        b.x += nx * push; b.y += ny * push
-      }
-    }
-
     for (let i = 0; i < n; i++) {
-      const g = grains[i], hi = HS - g.r
-      if (g.x < -hi) g.x = -hi
-      if (g.x >  hi) g.x =  hi
-      if (g.y < -hi) g.y = -hi
-      if (g.y >  hi)  g.y =  hi
+      const hi = HS - R[i]
+      if (X[i] < -hi) X[i] = -hi
+      if (X[i] >  hi) X[i] =  hi
+      if (Y[i] < -hi) Y[i] = -hi
+      if (Y[i] >  hi) Y[i] =  hi
     }
 
     // Shape-match every rigid blob at the end of each pass, so the NEXT pass already sees the
-    // solid's corrected pose — contacts push the whole body rather than denting it.
-    if (rigid) for (const b of rigid) fitRigidNaBlob(b, HS)
-    if (semi)  for (const b of semi)  hardenNaBlob(b)   // partial shape match while hardening
+    // solid's corrected pose — contacts push the whole body rather than denting it. These work on
+    // orb objects, so sync positions out and back around them.
+    if (fits) {
+      for (let i = 0; i < n; i++) { grains[i].x = X[i]; grains[i].y = Y[i] }
+      if (rigid) for (const b of rigid) fitRigidNaBlob(b, HS)
+      if (semi)  for (const b of semi)  hardenNaBlob(b)   // partial shape match while hardening
+      for (let i = 0; i < n; i++) { X[i] = grains[i].x; Y[i] = grains[i].y }
+    }
   }
+  for (let i = 0; i < n; i++) { grains[i].x = X[i]; grains[i].y = Y[i] }
 
   // 4. Derive velocity from total displacement; apply wall restitution + damping.
   //    A settled grain barely moves → derived velocity ≈ 0, no damping needed.
@@ -739,7 +833,8 @@ export function checkNaBlobMerges(naBlobs, mct, grains, temp = 1000) {
   let didMerge = false
   for (let i = 0; i < naBlobs.length && !didMerge; i++) {
     for (let j = i + 1; j < naBlobs.length && !didMerge; j++) {
-      const key = `${naBlobs[i].id},${naBlobs[j].id}`
+      // numeric pair key (was a template string per pair per step — ~18k strings/step mid-melt)
+      const key = (naBlobs[i].id % 65536) * 65536 + (naBlobs[j].id % 65536)
       const ctrA = naBlobs[i].particles[0]
       const ctrB = naBlobs[j].particles[0]
       const dx = ctrB.x - ctrA.x, dy = ctrB.y - ctrA.y
