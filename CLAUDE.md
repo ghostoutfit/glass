@@ -809,6 +809,15 @@ temperature. `startCooling` zeroes `energyInput`, leaving the ramp as the only d
 **Cooling gate:** Slow/Fast Cool are disabled unless `meltLocalTemp >= COOL_MIN_TEMP` (1500 °C).
 An already-active mode can still be clicked off.
 
+**v4 heat lead** (dev panel → "Tune these" → *Heat lead*, default 30 sim steps, 0 = off): Fast/Slow
+Heat in v4 is `GlassViewer`'s `integrateMelt` (not a CompositionView ramp). Particle bond breaking
+takes ~30–40 sim steps to respond to a temperature change, so Na–O breakup trailed Fast Heat by
+100–200 °C. While heating, `CompositionView` steps the physics at where the ramp will be N steps
+ahead — the integrator's constant power (`meltTempRef.heatPower`) integrated forward through
+`heatCap` — eased in/out. Only the `stepPhysics` target is led; LCD, graph and energy bookkeeping
+use the true temperature. Headless: Na–O error vs held-at-T 5.8 → ~2–3 points. `phys.stepTargetC`
+records the temperature each step actually ran at.
+
 **GO box:** type a target temperature; `GlassViewer` ramps to it through the heat-capacity
 integrator and stops on arrival. Capped at 1800 °C.
 

@@ -608,6 +608,7 @@ export default function GlassViewer() {
   const [meanEffThreshold, setMeanEffThreshold] = useState(0)
   const [useEmaStrain,   setUseEmaStrain]   = useState(false)
   const [grainFeedback,  setGrainFeedbackState] = useState(true)   // per-grain Si-O break feedback
+  const [heatLeadSteps,  setHeatLeadSteps] = useState(30)   // particle physics runs this many sim steps ahead of a heating ramp
   const [sevTriggerDist, setSevTriggerDistState] = useState(13)
   const [feedbackGainMult, setFeedbackGainMultState] = useState(40)
   const [sevFireRate,    setSevFireRate]    = useState(0)
@@ -944,6 +945,7 @@ export default function GlassViewer() {
       const st = meltTempRef.current
       const elapsed = st.lastTs ? Math.min((ts - st.lastTs) / 1000, 0.05) : 0
       st.lastTs = ts
+      st.heatPower = 0  // heating power (°C·heat-capacity per wall-second) — read by CompositionView's heat lead
       if (!boxSimRef.current.sandPaused && s.energyInput !== 0 && elapsed > 0) {
         const input      = s.energyInput
         const atFloor    = st.temp <= 0    && input < 0
@@ -960,6 +962,7 @@ export default function GlassViewer() {
           const pr       = PRESETS.find(x => x.id === presetIdRef.current) ?? PRESETS[0]
           const hcFactor = meltHeatCapacity(st.temp, pr.na2o, hcPlateauRef.current)
           st.temp = Math.max(0, Math.min(1800, st.temp + rawDelta / hcFactor))
+          if (input > 0) st.heatPower = (input / 100) * s.baseRate
           // GO ramp: stop when the target is reached.
           const gt = gotoTargetRef.current
           if (gt != null && ((input > 0 && st.temp >= gt) || (input < 0 && st.temp <= gt))) {
@@ -2093,7 +2096,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 63</span>
+                  }}>Field Test Version 64</span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),
@@ -2425,6 +2428,19 @@ export default function GlassViewer() {
 
             {showDev && <>
               <div className="viz-section-title">Dev (type "dev" to hide)</div>
+              {/* ── Tune these ── newest params / ones flagged for tuning live HERE, at the top, so they're
+                  easy to find. Move a control down into its normal section once its value is settled. */}
+              <div style={{border:'1px solid #6a5a9a', borderRadius:4, padding:'6px 8px 8px', marginBottom:10, background:'rgba(106,90,154,0.12)'}}>
+                <div style={{fontSize:11, color:'#c8b8ff', marginBottom:6, letterSpacing:'0.06em'}}>── Tune these ──</div>
+                <div style={{fontSize:11, color:'#888', marginBottom:2}}>Heat lead (Particles): <span style={{color:'#a090d0'}}>{heatLeadSteps === 0 ? 'off' : `${heatLeadSteps} steps`}</span></div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={0} max={80} step={5} value={heatLeadSteps} onChange={e => setHeatLeadSteps(+e.target.value)} />
+                <div style={{fontSize:10, color:'#777', marginBottom:8}}>While heating, particle physics runs this many sim steps ahead of the ramp so bond breaking keeps up (0 = off). Readout and graph are unaffected.</div>
+                <label style={{display:'flex', alignItems:'center', gap:6, fontSize:12, color:'#ccc', cursor:'pointer'}}>
+                  <input type="checkbox" checked={grainFeedback} onChange={e => { setGrainFeedbackState(e.target.checked); setGrainFeedback(e.target.checked) }} style={{accentColor:'#88ddaa'}} />
+                  Per-grain Si-O feedback — uncheck for global
+                </label>
+              </div>
               <button onClick={regenCandidates} disabled={genProgress !== null}
                 style={{width:'100%', padding:'6px 8px', marginBottom:8, fontSize:12, cursor: genProgress!==null?'default':'pointer',
                   background: genProgress!==null ? '#3a3a2a' : '#4a3a6a', color:'#e0d0ff',
@@ -2583,10 +2599,6 @@ export default function GlassViewer() {
                   <input type="checkbox" checked={useEmaStrain} onChange={e => setUseEmaStrain(e.target.checked)} style={{accentColor:'#88ddaa'}} />
                   EMA strain (α=0.1) — uncheck for instant break
                 </label>
-                <label style={{display:'flex', alignItems:'center', gap:6, fontSize:12, color:'#ccc', marginBottom:8, cursor:'pointer'}}>
-                  <input type="checkbox" checked={grainFeedback} onChange={e => { setGrainFeedbackState(e.target.checked); setGrainFeedback(e.target.checked) }} style={{accentColor:'#88ddaa'}} />
-                  Per-grain Si-O feedback — uncheck for global
-                </label>
                 <div style={{fontSize:11, color:'#888', marginBottom:2}}>Si-O r₀: <span style={{color:'#a090d0'}}>{sioR0} px</span></div>
                 <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
                   min={5} max={15} step={0.5} value={sioR0} onChange={e => setSioR0(+e.target.value)} />
@@ -2704,7 +2716,7 @@ export default function GlassViewer() {
               meltTemp={meltLocalTemp} simSpeed={simSpeed} speedMult={speedMult} coolingMode={coolingMode}
               onTempUpdate={handleTempUpdate} onEnergyUpdate={handleEnergyUpdate}
               onBondCounts={handleBondCounts}
-              graphCanvasRef={graphCanvasRef}
+              graphCanvasRef={graphCanvasRef} heatRateRef={meltTempRef} heatLeadSteps={heatLeadSteps}
               cumulativeEnergyRef={meltCumulativeEnergyRef}
               graphXMaxRef={graphXMaxRef}
               replayFrame={replayFrame} onReplayReady={handleReplayReady}

@@ -239,7 +239,7 @@ function countBonds(phys) {
   return counts
 }
 
-export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, attractK = 0, attractFalloff = 1, debug = false, bondNums = false, meltTemp = 50, simSpeed = 1, speedMult = 1, coolingMode = null, onTempUpdate = null, onEnergyUpdate = null, onBondCounts = null, replayFrame = null, onReplayReady = null, graphCanvasRef = null, cumulativeEnergyRef = null, graphXMaxRef = null, darkMode = true, showCharge = false, chargeLite = false, showField = true, fieldBlur = true, interpolate = false, longerCooledBonds = true, atomColorMode = 'normal', showBrokenBonds = false, showLiveStats = false, useEmaStrain = true, hcPlateau = 4, active = true, resetToken = 0, targetTempLine = null, meltRestore = null, coolCommitted = null }) {
+export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, attractK = 0, attractFalloff = 1, debug = false, bondNums = false, meltTemp = 50, simSpeed = 1, speedMult = 1, coolingMode = null, onTempUpdate = null, onEnergyUpdate = null, onBondCounts = null, replayFrame = null, onReplayReady = null, graphCanvasRef = null, cumulativeEnergyRef = null, graphXMaxRef = null, darkMode = true, showCharge = false, chargeLite = false, showField = true, fieldBlur = true, interpolate = false, longerCooledBonds = true, atomColorMode = 'normal', showBrokenBonds = false, showLiveStats = false, useEmaStrain = true, hcPlateau = 4, active = true, resetToken = 0, targetTempLine = null, meltRestore = null, coolCommitted = null, heatRateRef = null, heatLeadSteps = 30 }) {
   const types = useMemo(
     () => buildGrid(sio2Pct, na2oPct, caoPct),
     [sio2Pct, na2oPct, caoPct]
@@ -293,6 +293,12 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
   // (same start, same progress, same rate, replay kept) instead of starting a new one. Cleared by
   // a heat ramp or when the parent's coolCommitted lock is released (Reset / composition change).
   const coolRunRef          = useRef(null)
+  // Heat lead: while GlassViewer's integrator is heating, the physics is stepped at the temperature
+  // the ramp will reach heatLeadSteps sim steps from now. Bond breaking
+  // takes ~30–40 steps to respond, so without it Na–O breakup trailed Fast Heat by 100–200 °C.
+  const heatLeadRef         = useRef(0)       // eased lead, °C
+  const heatLeadStepsRef    = useRef(heatLeadSteps)
+  heatLeadStepsRef.current  = heatLeadSteps
   const onTempUpdateRef     = useRef(onTempUpdate)
   const onEnergyUpdateRef   = useRef(onEnergyUpdate)
   const attractKRef         = useRef(attractK)
@@ -881,6 +887,31 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
         if (!coolRunRef.current) coolGraphERef.current = null
       }
 
+      // Heat lead (see heatLeadRef). Applied ONLY to the stepPhysics target below — the readout,
+      // graph and energy bookkeeping keep the true ramp temperature. Eased so it fades in/out
+      // smoothly when heating starts or stops (ceiling, GO arrival, Cool).
+      // The lead is WHERE THE RAMP WILL BE after heatLeadSteps sim steps: integrate the integrator's
+      // constant heating power forward through the heat-capacity curve (not a straight-line
+      // extrapolation, which overshot by ~2× just before the 500–750 °C heat-capacity rise).
+      {
+        const power  = cm === null ? (heatRateRef?.current?.heatPower ?? 0) : 0
+        let target = 0
+        if (power > 0 && heatLeadStepsRef.current > 0) {
+          const T0 = ePerParticle / ENERGY_UNIT - 273
+          let T = T0, budget = power * heatLeadStepsRef.current / Math.max(1e-6, BASE_STEPS_PER_SEC * speed)
+          while (budget > 1e-6 && T < 1800) {
+            const h = heatCap(T, na2oPctRef.current, hcPlateauRef.current)
+            const dT = Math.min(5, budget / h)
+            T += dT; budget -= dT * h
+          }
+          target = T - T0
+        }
+        heatLeadRef.current += (target - heatLeadRef.current) * 0.15
+      }
+      const physE = heatLeadRef.current > 0.5
+        ? (Math.min(1800, ePerParticle / ENERGY_UNIT - 273 + heatLeadRef.current) + 273) * ENERGY_UNIT
+        : ePerParticle
+
       // Propagate slider-equivalent energy value to parent (throttled to ~10×/s by wall-clock)
       if (onTempUpdateRef.current && isRamping && nowMs - lastRampSyncRef.current > 100) {
         lastRampSyncRef.current = nowMs
@@ -947,7 +978,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
         // Run the sim steps scheduled for this frame by the wall-clock pacer above.
         for (let s = 0; s < stepsThisFrame; s++) {
           for (const p of phys.particles) { p.px = p.x; p.py = p.y }
-          stepPhysics(phys, ePerParticle, 1.0, attractKRef.current, cm, speedMultRef.current, attractFalloffRef.current)
+          stepPhysics(phys, physE, 1.0, attractKRef.current, cm, speedMultRef.current, attractFalloffRef.current)
           stepCallCountRef.current++
           if (!diagDoneRef.current && stepCallCountRef.current <= 10) {
             const meanSpd = phys.particles.reduce((s, p) => s + Math.hypot(p.vx, p.vy), 0) / phys.n

@@ -683,6 +683,7 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
   // Bond-breaking uses the TARGET temperature (from ePerParticle) so it responds to
   // the user's energy input directly, not to the lagging measured KE temperature.
   const totalEnergy = ePerParticle / ENERGY_UNIT - 273
+  phys.stepTargetC = totalEnergy   // diagnostic: the temperature this step actually ran at (incl. heat lead)
 
   // Temperature-dependent Si-O capture range (see SIO_COLD_MULT / SIO_HOT_MULT constants).
   // Computed once per step from measured KE temperature, stored for rebuildBonds.
