@@ -5,7 +5,7 @@ import { initPhysics, stepPhysics, setSiOr0,
          setNaAnchorK, setNaLiberateFrac, setNaBreakStrain, setLatticeSpeedMult, setFreedSpeedMult,
          resetLibStats, getLibStats, measureStrain95, meltStructure, setUseEmaStrain,
          verifyHashPairs, setMeltHash, setCoolBondScale, restoreMelt } from './meltPhysics.js'
-import { drawScene, QTY_COLORS, setVisualScale, findAtomNear, getVisualScale, getLastHudLines, effectiveDpr } from './renderer.js'
+import { drawScene, QTY_COLORS, ENERGY_KJ_MULT, setVisualScale, findAtomNear, getVisualScale, getLastHudLines, effectiveDpr } from './renderer.js'
 import { buildGrid, buildAllAtoms } from './meltGrid.js'
 import { T as GT } from './glassTemps.js'
 import { MELT_CANDIDATES } from './candidates.melt.generated.js'   // precomputed catch-up states (bundled)
@@ -112,14 +112,25 @@ function rampEnergyLinearInContent(startE, endTemp, t, na2oPct, plateau) {
   return (T + 273) * ENERGY_UNIT
 }
 const GRAPH_E_MIN = 0
-function drawTEGraph(canvas, hist, darkMode = true, eMax = 4e-3, targetTempLine = null) {
+// Graph geometry (CSS px) — shared by drawing and by pointer hit-testing.
+const GRAPH_PAD = { L: 46, R: 10, T: 10, B: 30 }
+const GRAPH_MAX_MARKERS = 3
+// ui (optional, GlassViewer's graphUiRef.current): { mouse: {x,y}|null, clicks: [{x,y}], markers: [{e}] }.
+//  · hover within 14 px of the curve → coordinate readout (kJ · °C) at the nearest point
+//  · click empty plot area → fixed dotted marker at that energy (≤3); click a marker → remove it
+//  · each marker labels its kJ and every temperature where the curve crosses it (heating + cooling)
+function drawTEGraph(canvas, hist, darkMode = true, eMax = 4e-3, targetTempLine = null, ui = null) {
   const s = setupCanvas(canvas)
   if (!s) return
   const { ctx, w, h } = s
-  const pL = 46, pR = 10, pT = 10, pB = 30
+  const pL = GRAPH_PAD.L, pR = GRAPH_PAD.R, pT = GRAPH_PAD.T, pB = GRAPH_PAD.B
   const pw = w - pL - pR, ph = h - pT - pB
 
   const tMax = 1800
+  const kJ  = e => Math.round(e / ENERGY_UNIT * ENERGY_KJ_MULT)   // same scale as the toolbar kJ LCD
+  const toX = e => pL + Math.max(0, Math.min(1, (e - GRAPH_E_MIN) / (eMax - GRAPH_E_MIN))) * pw
+  const toY = t => pT + ph - (Math.max(0, t) / tMax) * ph
+  const inPlot = m => m && m.x >= pL && m.x <= pL + pw && m.y >= pT && m.y <= pT + ph
 
   ctx.clearRect(0, 0, w, h)
   ctx.fillStyle = darkMode ? 'rgba(8,6,4,0.82)' : 'rgba(224,219,210,0.95)'   // off-white, matches viz-panel
@@ -138,8 +149,10 @@ function drawTEGraph(canvas, hist, darkMode = true, eMax = 4e-3, targetTempLine 
   ctx.fillText(String(tMax), pL - 4, pT + 2)
   ctx.fillText('0', pL - 4, pT + ph)
   ctx.fillStyle = eCol; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'
-  ctx.fillText('energy added / particle', pL + pw / 2, h - 4)
-  ctx.fillStyle = tCol
+  ctx.fillText('energy added (kJ)', pL + pw / 2, h - 4)
+  ctx.font = "bold 11px Lexend, system-ui, sans-serif"; ctx.textAlign = 'right'
+  ctx.fillText(String(kJ(eMax)), pL + pw, h - 4)
+  ctx.fillStyle = tCol; ctx.font = "bold 14px Lexend, system-ui, sans-serif"
   ctx.save(); ctx.translate(14, pT + ph / 2); ctx.rotate(-Math.PI / 2)
   ctx.textBaseline = 'alphabetic'
   ctx.fillText('Temp °C', 0, 0)
@@ -156,23 +169,91 @@ function drawTEGraph(canvas, hist, darkMode = true, eMax = 4e-3, targetTempLine 
     ctx.fillText(`${Math.round(targetTempLine)}°`, pL + pw, ly - 2)
   }
 
-  const n = hist.length
-  if (n < 2) return
-
-  ctx.strokeStyle = darkMode ? '#ff9050' : '#c04000'; ctx.lineWidth = 2.5; ctx.lineJoin = 'round'
-  ctx.beginPath()
-  for (let i = 0; i < n; i++) {
-    const x = pL + Math.max(0, Math.min(1, (hist[i].e - GRAPH_E_MIN) / (eMax - GRAPH_E_MIN))) * pw
-    const y = pT + ph - (Math.max(0, hist[i].t) / tMax) * ph
-    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)
+  // ── Clicks: add / remove marker lines ──
+  const markers = ui ? ui.markers : []
+  const markerAt = x => markers.findIndex(m => Math.abs(toX(m.e) - x) <= 6)
+  if (ui && ui.clicks.length) {
+    for (const c of ui.clicks) {
+      if (!inPlot(c)) continue
+      const hit = markerAt(c.x)
+      if (hit >= 0) markers.splice(hit, 1)
+      else if (markers.length < GRAPH_MAX_MARKERS) markers.push({ e: (c.x - pL) / pw * (eMax - GRAPH_E_MIN) + GRAPH_E_MIN })
+    }
+    ui.clicks.length = 0
   }
-  ctx.stroke()
 
-  // Current point dot
-  const last = hist[n - 1]
-  const lx = pL + Math.max(0, Math.min(1, (last.e - GRAPH_E_MIN) / (eMax - GRAPH_E_MIN))) * pw
-  const ly = pT + ph - (Math.max(0, last.t) / tMax) * ph
-  ctx.fillStyle = darkMode ? '#ffcc80' : '#e05500'; ctx.beginPath(); ctx.arc(lx, ly, 4, 0, Math.PI * 2); ctx.fill()
+  const n = hist.length
+  if (n >= 2) {
+    ctx.strokeStyle = darkMode ? '#ff9050' : '#c04000'; ctx.lineWidth = 2.5; ctx.lineJoin = 'round'
+    ctx.beginPath()
+    for (let i = 0; i < n; i++) {
+      const x = toX(hist[i].e), y = toY(hist[i].t)
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)
+    }
+    ctx.stroke()
+    // Current point dot
+    const last = hist[n - 1]
+    ctx.fillStyle = darkMode ? '#ffcc80' : '#e05500'; ctx.beginPath(); ctx.arc(toX(last.e), toY(last.t), 4, 0, Math.PI * 2); ctx.fill()
+  }
+
+  const labelBox = (parts, x, y) => {   // parts: [[text, colour], …]; drawn on a soft backing box
+    ctx.font = 'bold 12px Lexend, system-ui, sans-serif'; ctx.textBaseline = 'middle'; ctx.textAlign = 'left'
+    const widths = parts.map(([t]) => ctx.measureText(t).width), tw = widths.reduce((a, b) => a + b, 0)
+    const bx = Math.max(2, Math.min(w - tw - 10, x)), by = Math.max(2, Math.min(h - 20, y))
+    ctx.fillStyle = darkMode ? 'rgba(0,0,0,0.72)' : 'rgba(255,255,255,0.85)'
+    ctx.fillRect(bx, by, tw + 8, 18)
+    let cx = bx + 4
+    parts.forEach(([t, col], k) => { ctx.fillStyle = col; ctx.fillText(t, cx, by + 9); cx += widths[k] })
+  }
+  const textCol = darkMode ? '#ccc' : '#444'
+
+  // ── Marker lines: dotted vertical at a fixed energy + every temperature where the curve crosses ──
+  for (const m of markers) {
+    const x = toX(m.e)
+    ctx.strokeStyle = eCol; ctx.lineWidth = 1.5; ctx.setLineDash([4, 4])
+    ctx.beginPath(); ctx.moveTo(x, pT); ctx.lineTo(x, pT + ph); ctx.stroke()
+    ctx.setLineDash([])
+    labelBox([[`${kJ(m.e)} kJ`, eCol]], x + 4, pT + 1)
+    const cross = []
+    for (let i = 1; i < n; i++) {
+      const a = hist[i - 1], b = hist[i]
+      if ((a.e - m.e) * (b.e - m.e) > 0 || a.e === b.e) continue
+      const t = a.t + (b.t - a.t) * (m.e - a.e) / (b.e - a.e)
+      if (!cross.some(c => Math.abs(c - t) < 40)) cross.push(t)
+    }
+    let lastY = -1e9, flip = false
+    for (const t of cross.slice(0, 3).sort((a, b) => b - a)) {
+      const y = toY(t)
+      ctx.fillStyle = tCol; ctx.beginPath(); ctx.arc(x, y, 3.5, 0, Math.PI * 2); ctx.fill()
+      // close branches (e.g. near the top of the loop): put the next label on the other side of
+      // the line so the two readings don't overlap
+      flip = Math.abs(y - lastY) < 19 ? !flip : false
+      ctx.font = 'bold 12px Lexend, system-ui, sans-serif'
+      const lw = ctx.measureText(`${Math.round(t)} °C`).width + 8
+      labelBox([[`${Math.round(t)} °C`, tCol]], flip ? x - 6 - lw : x + 6, y - 9)
+      lastY = y
+    }
+  }
+
+  // ── Hover: nearest curve point within 14 px → coordinate pair with units ──
+  const mo = ui?.mouse
+  let overMarker = false, overCurve = false
+  if (mo) {
+    overMarker = inPlot(mo) && markerAt(mo.x) >= 0
+    let best = -1, bd = 14 * 14
+    for (let i = 0; i < n; i++) {
+      const dx = toX(hist[i].e) - mo.x, dy = toY(hist[i].t) - mo.y, d2 = dx * dx + dy * dy
+      if (d2 < bd) { bd = d2; best = i }
+    }
+    if (best >= 0) {
+      overCurve = true
+      const p = hist[best], x = toX(p.e), y = toY(p.t)
+      ctx.strokeStyle = darkMode ? '#fff' : '#222'; ctx.lineWidth = 1.5
+      ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.stroke()
+      labelBox([[`${kJ(p.e)} kJ`, eCol], ['  ·  ', textCol], [`${Math.round(p.t)} °C`, tCol]], x + 8, y - 24)
+    }
+  }
+  canvas.style.cursor = overMarker ? 'pointer' : (overCurve ? 'default' : (inPlot(mo) ? 'crosshair' : 'default'))
 }
 
 function drawBarGraph(canvas, ke, pe, n) {
@@ -241,7 +322,7 @@ function countBonds(phys) {
   return counts
 }
 
-export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, attractK = 0, attractFalloff = 1, debug = false, bondNums = false, meltTemp = 50, simSpeed = 1, speedMult = 1, coolingMode = null, onTempUpdate = null, onEnergyUpdate = null, onBondCounts = null, replayFrame = null, onReplayReady = null, graphCanvasRef = null, cumulativeEnergyRef = null, graphXMaxRef = null, darkMode = true, showCharge = false, chargeLite = false, showField = true, fieldBlur = true, interpolate = false, longerCooledBonds = true, atomColorMode = 'normal', showBrokenBonds = false, showLiveStats = false, useEmaStrain = true, hcPlateau = 4, active = true, resetToken = 0, targetTempLine = null, meltRestore = null, coolCommitted = null, heatRateRef = null, heatLeadSteps = 30 }) {
+export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, attractK = 0, attractFalloff = 1, debug = false, bondNums = false, meltTemp = 50, simSpeed = 1, speedMult = 1, coolingMode = null, onTempUpdate = null, onEnergyUpdate = null, onBondCounts = null, replayFrame = null, onReplayReady = null, graphCanvasRef = null, graphUiRef = null, cumulativeEnergyRef = null, graphXMaxRef = null, darkMode = true, showCharge = false, chargeLite = false, showField = true, fieldBlur = true, interpolate = false, longerCooledBonds = true, atomColorMode = 'normal', showBrokenBonds = false, showLiveStats = false, useEmaStrain = true, hcPlateau = 4, active = true, resetToken = 0, targetTempLine = null, meltRestore = null, coolCommitted = null, heatRateRef = null, heatLeadSteps = 30 }) {
   const types = useMemo(
     () => buildGrid(sio2Pct, na2oPct, caoPct),
     [sio2Pct, na2oPct, caoPct]
@@ -268,6 +349,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
   const speedRef            = useRef(simSpeed)
   const coolingRef          = useRef(coolingMode)
   const graphCanvasRefRef        = useRef(graphCanvasRef)
+  const graphUiRefRef            = useRef(graphUiRef)
   const cumulativeEnergyRefRef   = useRef(cumulativeEnergyRef)
   const na2oPctRef               = useRef(na2oPct)
   const targetTempLineRef        = useRef(null)
@@ -353,10 +435,12 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
   useEffect(() => { onReplayReadyRef.current = onReplayReady }, [onReplayReady])
   useEffect(() => { onBondCountsRef.current = onBondCounts }, [onBondCounts])
   useEffect(() => { graphCanvasRefRef.current = graphCanvasRef }, [graphCanvasRef])
+  useEffect(() => { graphUiRefRef.current = graphUiRef }, [graphUiRef])
   // Reset the energy graph when the material (composition) changes — clear the history and
   // redraw the empty graph immediately, so stale curves don't linger even if the tab is hidden.
   useEffect(() => {
     histRef.current = []
+    if (graphUiRefRef.current?.current) graphUiRefRef.current.current.markers.length = 0   // markers belong to this graph
     const ext = graphCanvasRefRef.current?.current
     if (ext) drawTEGraph(ext, [], darkModeRef.current, 4e-3, targetTempLineRef.current)
   }, [sio2Pct, na2oPct, caoPct])
@@ -497,6 +581,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
     lastTsRef.current = 0   // restart elapsed-time pacing cleanly after a rebuild
     setCoolBondScale(1)     // reset "longer cooled bonds" on a fresh build
     histRef.current = []
+    if (graphUiRefRef.current?.current) graphUiRefRef.current.current.markers.length = 0   // markers belong to this graph
 
     window.bondAudit = () => {
       const phys = physRef.current
@@ -950,7 +1035,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
         const extCanvas = graphCanvasRefRef.current?.current
         if (extCanvas) {
           const eMax = energyContent(1800, na2oPctRef.current, hcPlateauRef.current) * 1.05
-          drawTEGraph(extCanvas, histRef.current, darkModeRef.current, eMax, targetTempLineRef.current)
+          drawTEGraph(extCanvas, histRef.current, darkModeRef.current, eMax, targetTempLineRef.current, graphUiRefRef.current?.current)
         }
       }
 

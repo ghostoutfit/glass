@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useRef } from 'react'
 import CompositionView from './CompositionView'
 import { initParticles, stepPhysics, stepFloorPhysics, PARTICLE_R, FIXED_DT, T_RIGID, freezeParticles, syncParticlesToRigidBody, stepRigidBody } from './glassPhysics.js'
 import { setSioHotMult, setFreeAttractSiOMult, setSioExclMult, setCrystJiggleMult, setBreakStrain, setReformStrain, setCrystAnchorK, setLiberateFrac, setSioK, setNaOK, setNaAnchorK, setNaLiberateFrac, setNaBreakStrain, setLatticeSpeedMult, setFreedSpeedMult, setReintBondN, setReintFrameM, setBreakStrainSpread, setSevTriggerDist, setGrainFeedback, setBondLockTemp, setCrystTemplate, setTemplK, setTemplHi, setTemplReint, setFeedbackGainMult, setSiSiRepR0, setMotifStrength, setMotifAlign, setBondStiffMult, setFreedTau, setNaNaRepR0, setSevCooldown, setSevPullK } from './meltPhysics.js'
-import { setVisualScale, setMaxDpr, effectiveDpr, setMotionCold, setMotionFullT, QTY_COLORS } from './renderer.js'
+import { setVisualScale, setMaxDpr, effectiveDpr, setMotionCold, setMotionFullT, QTY_COLORS, ENERGY_KJ_MULT } from './renderer.js'
 import { initSandParticles, stepSandPhysics, mergeSodaGrains, mergeSilicateGrains, convertLargeNaGrains, stepNaBlobSprings, checkNaBlobMerges, absorbNearbyGrains, snapshotSand, restoreSand, GRAIN_R as SAND_GRAIN_R, NA_BLOB_R_CTR } from './sandPhysics.js'
 import { T as GT } from './glassTemps.js'
 import { BULK_CANDIDATES } from './candidates.generated.js'   // precomputed melt snapshots (dev-regenerated, bundled)
@@ -465,7 +465,6 @@ function pickBulkCandidate(cands, temp) {
 }
 
 const COOL_MIN_TEMP = 1500   // Slow/Fast Cool only engage from a full melt
-const ENERGY_KJ_MULT = 0.2   // arbitrary display scale: energy content × this → kJ readout
 
 // ── Performance tier ────────────────────────────────────────────────────────
 // Other sims in this project run a speed test that classifies the machine as
@@ -559,6 +558,9 @@ export default function GlassViewer() {
   const [showCount, setShowCount] = useState(false)  // bond-count table (Particles tab only)
   const [showGoBox, setShowGoBox] = useState(false)  // dev: show the temperature + GO box
   const graphCanvasRef  = useRef(null)
+  // Graph interaction: raw pointer state written here, resolved + drawn by CompositionView's
+  // drawTEGraph (it owns the curve data). mouse = hover point; clicks = queued click points.
+  const graphUiRef      = useRef({ mouse: null, clicks: [], markers: [] })
   const graphXMaxRef    = useRef(5000)
   const graphDragRef    = useRef(null)   // { startX, startXMax } while dragging
   const [showCharge, setShowCharge] = useState(false)
@@ -2118,7 +2120,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 73</span>
+                  }}>Field Test Version 74</span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),
@@ -2362,6 +2364,9 @@ export default function GlassViewer() {
             {showGraph && (
               <canvas ref={graphCanvasRef}
                 style={{ display:'block', width:'100%', height:200, marginBottom:4 }}
+                onMouseMove={e => { const r = e.currentTarget.getBoundingClientRect(); graphUiRef.current.mouse = { x: e.clientX - r.left, y: e.clientY - r.top } }}
+                onMouseLeave={() => { graphUiRef.current.mouse = null }}
+                onClick={e => { const r = e.currentTarget.getBoundingClientRect(); graphUiRef.current.clicks.push({ x: e.clientX - r.left, y: e.clientY - r.top }) }}
               />
             )}
 
@@ -2762,7 +2767,7 @@ export default function GlassViewer() {
               meltTemp={meltLocalTemp} simSpeed={simSpeed} speedMult={speedMult} coolingMode={coolingMode}
               onTempUpdate={handleTempUpdate} onEnergyUpdate={handleEnergyUpdate}
               onBondCounts={handleBondCounts}
-              graphCanvasRef={graphCanvasRef} heatRateRef={meltTempRef} heatLeadSteps={heatLeadSteps}
+              graphCanvasRef={graphCanvasRef} graphUiRef={graphUiRef} heatRateRef={meltTempRef} heatLeadSteps={heatLeadSteps}
               cumulativeEnergyRef={meltCumulativeEnergyRef}
               graphXMaxRef={graphXMaxRef}
               replayFrame={replayFrame} onReplayReady={handleReplayReady}

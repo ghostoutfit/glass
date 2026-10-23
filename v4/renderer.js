@@ -71,6 +71,10 @@ export const getVisualScale = () => _visualScale
 
 // Quantity colours shared by the toolbar readout labels (ENERGY / TEMP) and the graph axes, so the
 // label above each LCD matches its axis. Muted on purpose — a subtle cue, not a highlight.
+// Display scale for the kJ readout: energy content (°C·heat-capacity units) × this → "kJ".
+// Shared by the toolbar LCD (GlassViewer) and the graph's kJ axis/readouts (CompositionView).
+export const ENERGY_KJ_MULT = 0.2
+
 export const QTY_COLORS = {
   energy: { light: 'rgba(40,100,150,0.88)', dark: '#86b6dc' },   // x-axis: energy added
   temp:   { light: 'rgba(165,72,40,0.88)',  dark: '#e3967a' },   // y-axis: temperature
