@@ -2131,10 +2131,10 @@ export default function GlassViewer() {
                     <div style={{ position:'absolute', left:'calc(100% + 1px)', top:'calc(100% + 20px)', transform:'translateX(-50%)', display:'flex', gap:4, zIndex:1 }}>
                   {/* Pause — just left of the turtle (absolute, so turtle/rabbit stay centred on the
                       split). Shown on BOTH tabs: it stops time everywhere. */}
-                  <button className={`action-btn replay-btn${timePaused ? ' active' : ''}`}
-                    style={{position:'absolute', right:'100%', marginRight:4, top:0, bottom:0, width:38, padding:0, fontSize:13, fontWeight:900, display:'flex', alignItems:'center', justifyContent:'center', color:'#90c8f0'}}
-                    title={timePaused ? 'Resume time' : 'Pause — stop time'}
-                    onClick={() => setTimePaused(p => !p)}>{timePaused ? '▶' : '❚❚'}</button>
+                  <button className={`time-btn ${timePaused ? 'paused' : 'running'}`}
+                    style={{position:'absolute', right:'100%', marginRight:6, top:0, bottom:0, width:58, padding:0, fontSize:13}}
+                    title={timePaused ? 'GO — resume time' : 'Pause — stop time'}
+                    onClick={() => setTimePaused(p => !p)}>{timePaused ? '▶ GO' : '❙ ❙'}</button>
                   <button className={`action-btn replay-btn${replayPlaying === 'slow' ? ' active' : ''}`} style={{padding:'2px 9px', fontSize:11, flexShrink:0, display:'flex', alignItems:'center', justifyContent:'center', visibility: tab === 'melt' ? 'visible' : 'hidden'}}
                     disabled={replayFrameCount < 2} title="Replay history slowly"
                     onClick={() => playReplay('slow')}
@@ -2154,7 +2154,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 80</span>
+                  }}>Field Test Version 81</span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),

@@ -463,3 +463,47 @@ body[data-theme='light'] .bond-bar-label    { color: #666; }
 body[data-theme='light'] .bond-bar-val      { color: #555; }
 body[data-theme='light'] .charge-label      { color: #666; }
 body[data-theme='light'] .particle-area     { background: #ede8df; }
+
+/* ── Time toggle (ported from the fission repo's GO button) ──
+   Running → "❙ ❙" with fission's red glow (click = pause). Paused → "▶ GO" with an accent glow
+   (click = resume from the exact same moment). Fixed width so the label swap never reflows. */
+.time-btn {
+  position: relative;
+  border-radius: 3px;
+  font-family: inherit;
+  font-weight: 800;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  outline: none;
+  display: flex; align-items: center; justify-content: center;
+  color: rgba(255,255,255,0.85);
+  transition: background 0.15s, box-shadow 0.15s;
+}
+.time-btn:active { transform: translateY(1px); }
+.time-btn.running {
+  border: 1px solid #ff4040;
+  background: rgba(120,18,18,0.62);
+  box-shadow:
+    inset 0 0 6px rgba(255,40,40,0.22),
+    0 0 2px #ff4040,
+    0 0 8px #ff4040,
+    0 0 18px rgba(255,40,40,0.5),
+    0 0 40px rgba(255,40,40,0.2);
+  text-shadow: 0 0 4px rgba(255,255,255,0.5), 0 0 10px #ff4040, 0 0 22px rgba(255,80,80,0.6);
+  letter-spacing: 1px;
+}
+.time-btn.running:hover { background: rgba(150,28,28,0.72); }
+.time-btn.paused {
+  border: 1px solid #4ade80;
+  background: rgba(16,80,40,0.62);
+  box-shadow:
+    inset 0 0 6px rgba(74,222,128,0.22),
+    0 0 2px #4ade80,
+    0 0 8px #4ade80,
+    0 0 18px rgba(74,222,128,0.5),
+    0 0 40px rgba(74,222,128,0.2);
+  text-shadow: 0 0 4px rgba(255,255,255,0.5), 0 0 10px #4ade80, 0 0 22px rgba(74,222,128,0.6);
+  letter-spacing: 1px;
+}
+.time-btn.paused:hover { background: rgba(24,100,52,0.72); }
