@@ -845,6 +845,11 @@ positions:
   crystal 4.6, 70–100 Si-Si pairs inside r0). The whole cooling-attract loop is therefore dead
   by default — and it's a full O(n²) pass per substep when enabled.
 - Re-integration + `promoteBonds` is what actually makes the cooled network solid; see above.
+- **v4: "longer cooled bonds" (×1.1 rest length) applies only to MELTED bonds** — `promoted`, or
+  touching an atom in `phys.everFreed` (ever left the lattice this run; `latticeFreed` alone is
+  cleared by re-integration). Applied to every bond, it tore intact pure-SiO₂ grains apart on
+  cooling (182 bonds broken fast / 282 slow); gated, pure SiO₂ cools with 0 broken, 0 freed, and
+  fast vs slow differ only in speed. The mix is unaffected (1158/1191 bonds still scaled).
 
 **Headless results** (soda, 1500 °C melt then cool, `attractK` 0, motif 0.004, single seed):
 fast cool ends at local order 0.55 / ψ6 0.60; slow cool 0.72 / 0.73. O-Si-O angle error goes

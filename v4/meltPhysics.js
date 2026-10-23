@@ -713,6 +713,14 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
   // Freed atoms lose the crystAnchor spring and the tight wander clamp.
   if (!phys.latticeFreed) phys.latticeFreed = new Uint8Array(n)
   const latticeFreed = phys.latticeFreed
+  // everFreed: atoms that have EVER left the lattice this run (latticeFreed is cleared again on
+  // re-integration). "Longer cooled bonds" applies only to bonds touching such atoms, or bonds
+  // formed during cooling (promoted) — i.e. to re-solidifying melt. A grain that never came apart
+  // keeps its true bond lengths and just cools; stretching ALL bonds 10% tore intact pure-SiO₂
+  // grains apart on cooling (180–375 bonds broken).
+  const everFreed = phys.everFreed ??= new Uint8Array(n)
+  for (let i = 0; i < n; i++) if (latticeFreed[i]) everFreed[i] = 1
+  const coolScaleOf = rb => (rb.promoted || everFreed[rb.i] || everFreed[rb.j]) ? _coolBondScale : 1
   if (phys.rigidBonds) {
     for (const rb of phys.rigidBonds) {
       if (!rb.broken && !rb.breakable) { crystAnchor[rb.i] = 1; crystAnchor[rb.j] = 1 }
@@ -1058,12 +1066,13 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
         const pi = particles[rb.i], pj = particles[rb.j]
         const spec = PAIR_TABLE[pi.typeId][pj.typeId]
         if (!spec) continue
-        const r0e = rb.r0 * _coolBondScale   // "Longer cooled bonds" lengthens the rest length
+        const cs  = coolScaleOf(rb)
+        const r0e = rb.r0 * cs   // "Longer cooled bonds" lengthens the rest length (melted bonds only)
         const dx = miDx(pj.x - pi.x), dy = miDy(pj.y - pi.y)
         const d  = Math.hypot(dx, dy)
         if (d <= r0e || d < 0.01) continue   // stretch only; compression handled by hard-sphere
         const stiff   = _bondStiffMult
-        const capture = spec.r0 * _coolBondScale * (spec === PAIR_TABLE[0][1] ? sioMult : spec.mult)
+        const capture = spec.r0 * cs * (spec === PAIR_TABLE[0][1] ? sioMult : spec.mult)
         const kEff    = d < capture ? spec.k * Math.max(0, stiff - 1) : spec.k * stiff
         const f = kEff * (d - r0e)
         const nx = dx / d, ny = dy / d
@@ -1193,7 +1202,7 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
         if (rb.broken) continue
         if (totalEnergy > rb.projectionCutoff) continue
         const pi = particles[rb.i], pj = particles[rb.j]
-        const r0e = rb.r0 * _coolBondScale   // "Longer cooled bonds" lengthens the rest length
+        const r0e = rb.r0 * coolScaleOf(rb)   // "Longer cooled bonds" (melted bonds only)
         const dx = miDx(pj.x - pi.x), dy = miDy(pj.y - pi.y)
         const d  = Math.hypot(dx, dy)
         if (d < 0.01 || d > r0e * 3) continue
