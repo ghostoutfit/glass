@@ -1288,6 +1288,20 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
   }
   const fBrokenSiO = totSiO > 0 ? brokeSiO / totSiO : 0
   const fBrokenMod = totMod > 0 ? brokeMod / totMod : 0
+  // PROTOTYPE (window._grainFeedback, default off): Si-O feedback per GRAIN instead of global.
+  // With the global fraction, grains that broke early raise the threshold for everyone, so a
+  // grain that lags (e.g. one with no Na₂O neighbours) is shielded and stays whole even at 1800.
+  // Per grain, each grain's threshold rises only with its OWN breakage, so laggards catch up.
+  let gBroke = null, gTot = null
+  if (_win._grainFeedback && phys.rigidBonds) {
+    const nc = phys._nChunks ??= 1 + particles.reduce((m, p) => Math.max(m, p.chunkIdx ?? 0), 0)
+    gBroke = new Float64Array(nc); gTot = new Float64Array(nc)
+    for (const rb of phys.rigidBonds) {
+      if (!rb.breakable || !rb.isSiO) continue
+      const c = particles[rb.i].chunkIdx ?? 0
+      gTot[c]++; if (rb.broken) gBroke[c]++
+    }
+  }
   const fBroken    = (brokeSiO + brokeMod) / Math.max(1, totSiO + totMod)   // HUD only
   const sio2Pct    = phys.sio2Pct ?? 70
   const GAIN       = FEEDBACK_GAIN_SILICA + (FEEDBACK_GAIN_SODA - FEEDBACK_GAIN_SILICA) * Math.max(0, Math.min(1, (100 - sio2Pct) / 30))
@@ -1309,7 +1323,9 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
       const d  = Math.hypot(dx, dy)
       const strain = (d - rb.r0) / rb.r0
       rb.avgStrain  = _useEmaStrain ? rb.avgStrain * 0.9 + strain * 0.1 : strain
-      const effThreshold = rb.breakStrain * (1 + GAIN * _feedbackGainMult * (rb.isSiO ? fBrokenSiO : fBrokenMod))
+      let fSelf = rb.isSiO ? fBrokenSiO : fBrokenMod
+      if (gBroke && rb.isSiO) { const c = particles[rb.i].chunkIdx ?? 0; fSelf = gTot[c] > 0 ? gBroke[c] / gTot[c] : 0 }
+      const effThreshold = rb.breakStrain * (1 + GAIN * _feedbackGainMult * fSelf)
       rb.effThreshold = effThreshold
       if (!rb.broken) {
         strainSum += rb.avgStrain; thrSum += effThreshold; strainCount++
