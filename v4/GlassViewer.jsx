@@ -555,7 +555,7 @@ export default function GlassViewer() {
   const verTagRef   = useRef(null)
   const toolbarRef  = useRef(null)
   const [showGraph, setShowGraph] = useState(true)   // energy graph panel (both tabs)
-  const [showCount, setShowCount] = useState(false)  // bond-count table (Particles tab only)
+  const [showCount, setShowCount] = useState(true)   // bond-count table (Particles tab only) — shown above the graph
   const [showGoBox, setShowGoBox] = useState(false)  // dev: show the temperature + GO box
   const graphCanvasRef  = useRef(null)
   // Graph interaction: raw pointer state written here, resolved + drawn by CompositionView's
@@ -2120,7 +2120,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 74</span>
+                  }}>Field Test Version 75</span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),
@@ -2360,16 +2360,6 @@ export default function GlassViewer() {
               </svg>
             )}
 
-            {/* Graph in sidebar */}
-            {showGraph && (
-              <canvas ref={graphCanvasRef}
-                style={{ display:'block', width:'100%', height:200, marginBottom:4 }}
-                onMouseMove={e => { const r = e.currentTarget.getBoundingClientRect(); graphUiRef.current.mouse = { x: e.clientX - r.left, y: e.clientY - r.top } }}
-                onMouseLeave={() => { graphUiRef.current.mouse = null }}
-                onClick={e => { const r = e.currentTarget.getBoundingClientRect(); graphUiRef.current.clicks.push({ x: e.clientX - r.left, y: e.clientY - r.top }) }}
-              />
-            )}
-
             {/* Bond count table — mirrors concrete v4 layout (Particles tab only) */}
             {tab === 'melt' && showCount && bondCounts && (() => {
               const initial = initialBondCounts ?? bondCounts
@@ -2451,6 +2441,16 @@ export default function GlassViewer() {
                 </div>
               )
             })()}
+
+            {/* Graph in sidebar */}
+            {showGraph && (
+              <canvas ref={graphCanvasRef}
+                style={{ display:'block', width:'100%', height:200, marginBottom:4 }}
+                onMouseMove={e => { const r = e.currentTarget.getBoundingClientRect(); graphUiRef.current.mouse = { x: e.clientX - r.left, y: e.clientY - r.top } }}
+                onMouseLeave={() => { graphUiRef.current.mouse = null }}
+                onClick={e => { const r = e.currentTarget.getBoundingClientRect(); graphUiRef.current.clicks.push({ x: e.clientX - r.left, y: e.clientY - r.top }) }}
+              />
+            )}
 
             {showDev && <>
               <div className="viz-section-title">Dev (type "dev" to hide)</div>

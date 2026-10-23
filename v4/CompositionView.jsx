@@ -115,10 +115,12 @@ const GRAPH_E_MIN = 0
 // Graph geometry (CSS px) — shared by drawing and by pointer hit-testing.
 const GRAPH_PAD = { L: 46, R: 10, T: 10, B: 30 }
 const GRAPH_MAX_MARKERS = 3
-// ui (optional, GlassViewer's graphUiRef.current): { mouse: {x,y}|null, clicks: [{x,y}], markers: [{e}] }.
+// ui (optional, GlassViewer's graphUiRef.current): { mouse: {x,y}|null, clicks: [{x,y}], markers: [{t}] }.
+// Markers ANNOTATE the curve — they can only be placed on it, never on bare axis:
 //  · hover within 14 px of the curve → coordinate readout (kJ · °C) at the nearest point
-//  · click empty plot area → fixed dotted marker at that energy (≤3); click a marker → remove it
-//  · each marker labels its kJ and every temperature where the curve crosses it (heating + cooling)
+//  · click the curve → fixed dotted horizontal line at that point's temperature (≤3);
+//    click a line → remove it
+//  · each line labels its °C and the kJ at every place the curve crosses it (heating + cooling)
 function drawTEGraph(canvas, hist, darkMode = true, eMax = 4e-3, targetTempLine = null, ui = null) {
   const s = setupCanvas(canvas)
   if (!s) return
@@ -130,7 +132,6 @@ function drawTEGraph(canvas, hist, darkMode = true, eMax = 4e-3, targetTempLine 
   const kJ  = e => Math.round(e / ENERGY_UNIT * ENERGY_KJ_MULT)   // same scale as the toolbar kJ LCD
   const toX = e => pL + Math.max(0, Math.min(1, (e - GRAPH_E_MIN) / (eMax - GRAPH_E_MIN))) * pw
   const toY = t => pT + ph - (Math.max(0, t) / tMax) * ph
-  const inPlot = m => m && m.x >= pL && m.x <= pL + pw && m.y >= pT && m.y <= pT + ph
 
   ctx.clearRect(0, 0, w, h)
   ctx.fillStyle = darkMode ? 'rgba(8,6,4,0.82)' : 'rgba(224,219,210,0.95)'   // off-white, matches viz-panel
@@ -169,20 +170,41 @@ function drawTEGraph(canvas, hist, darkMode = true, eMax = 4e-3, targetTempLine 
     ctx.fillText(`${Math.round(targetTempLine)}°`, pL + pw, ly - 2)
   }
 
-  // ── Clicks: add / remove marker lines ──
+  const n = hist.length
   const markers = ui ? ui.markers : []
-  const markerAt = x => markers.findIndex(m => Math.abs(toX(m.e) - x) <= 6)
+  // nearest curve point within 14 px of a pointer position (−1 if none)
+  const nearestOnCurve = m => {
+    let best = -1, bd = 14 * 14
+    if (m) for (let i = 0; i < n; i++) {
+      const dx = toX(hist[i].e) - m.x, dy = toY(hist[i].t) - m.y, d2 = dx * dx + dy * dy
+      if (d2 < bd) { bd = d2; best = i }
+    }
+    return best
+  }
+  // where the curve crosses temperature t: [kJ-energy …], de-duplicated by screen distance
+  const crossingsAt = t => {
+    const out = []
+    for (let i = 1; i < n; i++) {
+      const a = hist[i - 1], b = hist[i]
+      if ((a.t - t) * (b.t - t) > 0 || a.t === b.t) continue
+      const e = a.e + (b.e - a.e) * (t - a.t) / (b.t - a.t)
+      if (!out.some(q => Math.abs(toX(q) - toX(e)) < 14)) out.push(e)
+    }
+    return out.sort((p, q) => p - q)
+  }
+  const markerAt = m => m ? markers.findIndex(mk => Math.abs(toY(mk.t) - m.y) <= 5 && m.x >= pL && m.x <= pL + pw) : -1
+
+  // ── Clicks: on a line → remove it; on the curve → add a line at that temperature ──
   if (ui && ui.clicks.length) {
     for (const c of ui.clicks) {
-      if (!inPlot(c)) continue
-      const hit = markerAt(c.x)
-      if (hit >= 0) markers.splice(hit, 1)
-      else if (markers.length < GRAPH_MAX_MARKERS) markers.push({ e: (c.x - pL) / pw * (eMax - GRAPH_E_MIN) + GRAPH_E_MIN })
+      const hit = markerAt(c)
+      if (hit >= 0) { markers.splice(hit, 1); continue }
+      const k = nearestOnCurve(c)
+      if (k >= 0 && markers.length < GRAPH_MAX_MARKERS) markers.push({ t: Math.round(hist[k].t) })
     }
     ui.clicks.length = 0
   }
 
-  const n = hist.length
   if (n >= 2) {
     ctx.strokeStyle = darkMode ? '#ff9050' : '#c04000'; ctx.lineWidth = 2.5; ctx.lineJoin = 'round'
     ctx.beginPath()
@@ -207,53 +229,44 @@ function drawTEGraph(canvas, hist, darkMode = true, eMax = 4e-3, targetTempLine 
   }
   const textCol = darkMode ? '#ccc' : '#444'
 
-  // ── Marker lines: dotted vertical at a fixed energy + every temperature where the curve crosses ──
-  for (const m of markers) {
-    const x = toX(m.e)
-    ctx.strokeStyle = eCol; ctx.lineWidth = 1.5; ctx.setLineDash([4, 4])
-    ctx.beginPath(); ctx.moveTo(x, pT); ctx.lineTo(x, pT + ph); ctx.stroke()
+  // ── Marker lines: dotted horizontal at a fixed temperature, kJ labelled at each crossing ──
+  for (const mk of markers) {
+    const y = toY(mk.t), cross = crossingsAt(mk.t)
+    const xEnd = cross.length ? Math.min(pL + pw, toX(cross[cross.length - 1]) + 10) : pL + 30
+    ctx.strokeStyle = tCol; ctx.lineWidth = 1.5; ctx.setLineDash([4, 4])
+    ctx.beginPath(); ctx.moveTo(pL, y); ctx.lineTo(xEnd, y); ctx.stroke()
     ctx.setLineDash([])
-    labelBox([[`${kJ(m.e)} kJ`, eCol]], x + 4, pT + 1)
-    const cross = []
-    for (let i = 1; i < n; i++) {
-      const a = hist[i - 1], b = hist[i]
-      if ((a.e - m.e) * (b.e - m.e) > 0 || a.e === b.e) continue
-      const t = a.t + (b.t - a.t) * (m.e - a.e) / (b.e - a.e)
-      if (!cross.some(c => Math.abs(c - t) < 40)) cross.push(t)
-    }
-    let lastY = -1e9, flip = false
-    for (const t of cross.slice(0, 3).sort((a, b) => b - a)) {
-      const y = toY(t)
-      ctx.fillStyle = tCol; ctx.beginPath(); ctx.arc(x, y, 3.5, 0, Math.PI * 2); ctx.fill()
-      // close branches (e.g. near the top of the loop): put the next label on the other side of
-      // the line so the two readings don't overlap
-      flip = Math.abs(y - lastY) < 19 ? !flip : false
+    // °C label at the line's right end, past the last crossing, so it never collides with the
+    // kJ crossing labels (falls back to just above the line's end if there's no room)
+    ctx.font = 'bold 12px Lexend, system-ui, sans-serif'
+    const tw = ctx.measureText(`${Math.round(mk.t)} °C`).width + 8
+    if (xEnd + 4 + tw <= w) labelBox([[`${Math.round(mk.t)} °C`, tCol]], xEnd + 4, y - 9)
+    else labelBox([[`${Math.round(mk.t)} °C`, tCol]], xEnd - tw, y - 22)
+    let lastX = -1e9, below = false
+    for (const e of cross.slice(0, 3)) {
+      const x = toX(e)
+      ctx.fillStyle = eCol; ctx.beginPath(); ctx.arc(x, y, 3.5, 0, Math.PI * 2); ctx.fill()
+      // close crossings (narrow loop): alternate the label above / below the line
+      below = x - lastX < 62 ? !below : false
       ctx.font = 'bold 12px Lexend, system-ui, sans-serif'
-      const lw = ctx.measureText(`${Math.round(t)} °C`).width + 8
-      labelBox([[`${Math.round(t)} °C`, tCol]], flip ? x - 6 - lw : x + 6, y - 9)
-      lastY = y
+      const lw = ctx.measureText(`${kJ(e)} kJ`).width + 8
+      labelBox([[`${kJ(e)} kJ`, eCol]], x - lw / 2, below ? y + 4 : y - 22)
+      lastX = x
     }
   }
 
   // ── Hover: nearest curve point within 14 px → coordinate pair with units ──
   const mo = ui?.mouse
-  let overMarker = false, overCurve = false
-  if (mo) {
-    overMarker = inPlot(mo) && markerAt(mo.x) >= 0
-    let best = -1, bd = 14 * 14
-    for (let i = 0; i < n; i++) {
-      const dx = toX(hist[i].e) - mo.x, dy = toY(hist[i].t) - mo.y, d2 = dx * dx + dy * dy
-      if (d2 < bd) { bd = d2; best = i }
-    }
-    if (best >= 0) {
-      overCurve = true
-      const p = hist[best], x = toX(p.e), y = toY(p.t)
-      ctx.strokeStyle = darkMode ? '#fff' : '#222'; ctx.lineWidth = 1.5
-      ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.stroke()
-      labelBox([[`${kJ(p.e)} kJ`, eCol], ['  ·  ', textCol], [`${Math.round(p.t)} °C`, tCol]], x + 8, y - 24)
-    }
+  const overMarker = markerAt(mo) >= 0
+  const best = nearestOnCurve(mo)
+  if (best >= 0) {
+    const p = hist[best], x = toX(p.e), y = toY(p.t)
+    ctx.strokeStyle = darkMode ? '#fff' : '#222'; ctx.lineWidth = 1.5
+    ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.stroke()
+    labelBox([[`${kJ(p.e)} kJ`, eCol], ['  ·  ', textCol], [`${Math.round(p.t)} °C`, tCol]], x + 8, y - 24)
   }
-  canvas.style.cursor = overMarker ? 'pointer' : (overCurve ? 'default' : (inPlot(mo) ? 'crosshair' : 'default'))
+  // pointer = clickable (a line to remove, or the curve to annotate); empty space does nothing
+  canvas.style.cursor = (overMarker || best >= 0) ? 'pointer' : 'default'
 }
 
 function drawBarGraph(canvas, ke, pe, n) {
