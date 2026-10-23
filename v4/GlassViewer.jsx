@@ -355,11 +355,18 @@ function macroMeltTarget(T) {
   return u * u * (3 - 2 * u)   // smoothstep
 }
 
-function meldSandFrame(phys, temp, isSoda, probMult = 1) {
+function meldSandFrame(phys, temp, isSoda, probMult = 1, realTemp = temp) {
   if (!(isSoda && phys.sandParticles && phys.nNaOriginal > 0)) return
-  const tempFactor = Math.max(0, Math.min(1, (temp - GT.MELT_ONSET) / (GT.MELT_FULL - GT.MELT_ONSET)))
+  // White Na₂O grain merging follows the REAL temperature over the macro-melt span (700→1500),
+  // not the 1500 drive temp. At the drive temp meldProb was 1 → every touching Na pair merged
+  // instantly the moment melting began (r≈6 by 750 °C, r≈12 by 800 °C), and since Na+Na merges
+  // don't count toward macroMeltFrac the target gate never held them back.
+  // Live-tunable: window._naMeldMult (×, default 1).
+  const naOnset    = window._macroMeltOnset ?? GT.MELT_ONSET
+  const naFull     = window._macroMeltFull  ?? (GT.MELT_FULL + 200)
+  const tempFactor = Math.max(0, Math.min(1, (realTemp - naOnset) / Math.max(1, naFull - naOnset)))
   const meldFrac   = Math.min(1, phys.meldCount / phys.nNaOriginal)
-  const meldProb   = Math.min(1, (tempFactor >= 1 ? 1 : tempFactor * 0.015 * (1 + meldFrac * 5)) * probMult)
+  const meldProb   = Math.min(1, tempFactor * 0.015 * (1 + meldFrac * 5) * (window._naMeldMult ?? 1) * probMult)
   // Scale the per-call ABSOLUTE caps by probMult so one coarse replay pass does the work of
   // ~probMult live frames — without this the 1-per-frame/3-per-frame caps throttle the replay
   // and mixed melting never catches up (live-callers pass probMult=1, so caps stay 1/3/1).
@@ -391,7 +398,7 @@ function runHeatReplayChunk(phys, s, HS, box, isSoda, fast = false) {
   if (R.soak === undefined) R.soak = 0
   const deadline = performance.now() + budgetMs
   while (goal > 0 && macroMeltFrac(phys) < goal && R.soak < soakCap && performance.now() < deadline) {
-    meldSandFrame(phys, MELT_DRIVE_TEMP, isSoda, soakK)
+    meldSandFrame(phys, MELT_DRIVE_TEMP, isSoda, soakK, R.target)
     if (R.frame % settleEvery === 0) {
       stepNaBlobSprings(phys.naBlobs, FIXED_DT, box.boxAngle, R.target)
       stepSandPhysics(phys.sandParticles, FIXED_DT, HS, box.boxAngle, phys.naBlobs)
@@ -440,10 +447,10 @@ function stepBulkGen(G, budgetMs = 60) {
       if (++G.benchIdx >= BULK_BENCH_TEMPS.length) G.done = true
       continue
     }
-    meldSandFrame(G.phys, MELT_DRIVE_TEMP, G.na2o > 0, GEN_MELD_K)
+    meldSandFrame(G.phys, MELT_DRIVE_TEMP, G.na2o > 0, GEN_MELD_K, T)
     if (G.frame % 6 === 0) {
       stepNaBlobSprings(G.phys.naBlobs, FIXED_DT, 0, T)
-      stepSandPhysics(G.phys.sandParticles, FIXED_DT, G.HS, 0)
+      stepSandPhysics(G.phys.sandParticles, FIXED_DT, G.HS, 0, G.phys.naBlobs)
       checkNaBlobMerges(G.phys.naBlobs, G.phys.blobMct, G.phys.sandParticles, T)
     }
     G.frame++
@@ -1295,7 +1302,7 @@ export default function GlassViewer() {
             // Na₂O grain merging — only while the macro melt is BELOW the temperature's target,
             // so it melts up to the matched degree and then holds (no creeping when paused).
             if (macroMeltFrac(phys) < macroMeltTarget(s.temp)) {
-              meldSandFrame(phys, MELT_DRIVE_TEMP, presetIdRef.current === 'soda')
+              meldSandFrame(phys, MELT_DRIVE_TEMP, presetIdRef.current === 'soda', 1, s.temp)
             }
             // Throttled stats for the dev panel (compare against particle fBroken to calibrate).
             if (ts - lastMeltStatRef.current > 200) {
@@ -2085,7 +2092,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 58</span>
+                  }}>Field Test Version 59</span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),

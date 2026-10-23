@@ -703,8 +703,16 @@ export function absorbNearbyGrains(grains, naBlobs, temp, maxPerBlob = 1) {
 
   for (const blob of naBlobs) {
     let absorbCount = 0
-    const ctr0 = blob.particles[0]
-    const aabbR = blob.blobR + NA_R + 3 + 2  // conservative AABB radius
+    const blobOrbs = blob.orbs ?? blob.particles
+    // Pre-cull against the blob's ACTUAL extent (orb bounding box), not a circle of blobR around
+    // its centre: blobR is an area-equivalent radius, so a blob flattened along the floor reaches
+    // well past it, and grains at its ends were culled forever.
+    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity
+    for (const p of blobOrbs) {
+      if (p.x < x0) x0 = p.x; if (p.x > x1) x1 = p.x
+      if (p.y < y0) y0 = p.y; if (p.y > y1) y1 = p.y
+    }
+    if (x0 === Infinity) continue
 
     for (let i = grains.length - 1; i >= 0 && absorbCount < maxPerBlob; i--) {
       const g = grains[i]
@@ -716,14 +724,13 @@ export function absorbNearbyGrains(grains, naBlobs, temp, maxPerBlob = 1) {
       const prob = isSand ? sandProb : naSilProb
       if (prob <= 0) continue
 
-      // AABB pre-cull against blob center before doing the per-sub-circle scan
-      if (Math.abs(g.x - ctr0.x) > aabbR || Math.abs(g.y - ctr0.y) > aabbR) continue
-
-      // Check proximity to nearest sub-circle (catches grains inside the hull
-      // even when the phantom center has drifted away from them)
-      let minD2 = Infinity
+      // Margin includes the grain's OWN radius — without it a large grain's centre always sits
+      // outside the box even while its edge touches the blob (the r≈10–15 white Na₂O holdouts).
       const contactR = g.r + NA_R + 3
-      const blobOrbs = blob.orbs ?? blob.particles
+      if (g.x < x0 - contactR || g.x > x1 + contactR || g.y < y0 - contactR || g.y > y1 + contactR) continue
+
+      // Check proximity to nearest sub-circle (catches grains inside the hull too)
+      let minD2 = Infinity
       for (const p of blobOrbs) {
         if (p.type !== 'na-sub') continue
         const dx = g.x - p.x, dy = g.y - p.y
@@ -734,28 +741,40 @@ export function absorbNearbyGrains(grains, naBlobs, temp, maxPerBlob = 1) {
       if (Math.random() >= prob) continue
 
       blob.blobR = Math.sqrt(blob.blobR ** 2 + g.r ** 2)
-      g.type   = 'na-sub'
-      g.blobId = blob.id
-      g.color  = '#fff'; g._cr = 255; g._cg = 255; g._cb = 255
-      blob.particles.push(g)
-      if (blob.orbs) blob.orbs.push(g)
-
-      if (!blob.merged) {
-        const ctr = blob.particles[0]
-        const dx = g.x - ctr.x, dy = g.y - ctr.y
-        const dr = Math.sqrt(dx * dx + dy * dy) || 1
-        blob.springs.push({ a: ctr, b: g, rest: dr, k: NA_BLOB_K_RAD })
-        const thresh2 = (NA_BLOB_PITCH * 1.5) ** 2
-        for (const p of blob.particles) {
-          if (p === g || p.type === 'na-ctr') continue
-          const pdx = p.x - g.x, pdy = p.y - g.y
-          const pd2 = pdx * pdx + pdy * pdy
-          if (pd2 < thresh2) blob.springs.push({ a: g, b: p, rest: Math.sqrt(pd2), k: NA_BLOB_K_NBR })
-        }
+      if (g.r >= ABSORB_PACK_R) {
+        // Large grain: dissolve it into blob-sized sub-circles (same hex pack as makeNaBlob)
+        // instead of bolting on ONE giant sub-circle, which read as an awkward outgrowth.
+        grains.splice(i, 1)
+        const packed = makeNaBlob(g.x, g.y, g.vx, g.vy, g.r).orbs
+        for (const o of packed) { grains.push(o); addOrbToBlob(blob, o) }
+      } else {
+        g.type = 'na-sub'
+        g.color = '#fff'; g._cr = 255; g._cg = 255; g._cb = 255
+        addOrbToBlob(blob, g)
       }
-
       absorbCount++
     }
+  }
+}
+
+// Large absorbed grains (r ≥ this) are hex-packed into small sub-circles — see absorbNearbyGrains.
+const ABSORB_PACK_R = 4
+
+function addOrbToBlob(blob, g) {
+  g.blobId = blob.id
+  g._rigid = false
+  blob.particles.push(g)
+  if (blob.orbs) blob.orbs.push(g)
+  if (blob.merged) return   // merged blobs carry no springs (cohesion comes from contacts)
+  const ctr = blob.particles[0]
+  const dx = g.x - ctr.x, dy = g.y - ctr.y
+  blob.springs.push({ a: ctr, b: g, rest: Math.sqrt(dx * dx + dy * dy) || 1, k: NA_BLOB_K_RAD })
+  const thresh2 = (NA_BLOB_PITCH * 1.5) ** 2
+  for (const p of blob.particles) {
+    if (p === g || p.type === 'na-ctr') continue
+    const pdx = p.x - g.x, pdy = p.y - g.y
+    const pd2 = pdx * pdx + pdy * pdy
+    if (pd2 < thresh2) blob.springs.push({ a: g, b: p, rest: Math.sqrt(pd2), k: NA_BLOB_K_NBR })
   }
 }
 
