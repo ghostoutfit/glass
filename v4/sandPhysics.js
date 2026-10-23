@@ -233,8 +233,8 @@ export function stepSandPhysics(grains, dt, HS, boxAngle, naBlobs = null) {
   const gy = GRAVITY * Math.cos(boxAngle)
   const n  = grains.length
   // Cooled-solid blobs (frozen by stepNaBlobSprings below NA_RIGID_TEMP) — see fitRigidNaBlob.
-  let rigid = null
-  if (naBlobs) for (const b of naBlobs) if (b.rb) (rigid ??= []).push(b)
+  let rigid = null, semi = null
+  if (naBlobs) for (const b of naBlobs) { if (b.rb) (rigid ??= []).push(b); else if (b.semi) (semi ??= []).push(b) }
 
   // 1. Store pre-step positions for velocity derivation
   for (let i = 0; i < n; i++) {
@@ -326,6 +326,7 @@ export function stepSandPhysics(grains, dt, HS, boxAngle, naBlobs = null) {
     // Shape-match every rigid blob at the end of each pass, so the NEXT pass already sees the
     // solid's corrected pose — contacts push the whole body rather than denting it.
     if (rigid) for (const b of rigid) fitRigidNaBlob(b, HS)
+    if (semi)  for (const b of semi)  hardenNaBlob(b)   // partial shape match while hardening
   }
 
   // 4. Derive velocity from total displacement; apply wall restitution + damping.
@@ -342,7 +343,8 @@ export function stepSandPhysics(grains, dt, HS, boxAngle, naBlobs = null) {
     if (g.y >=  hi - 0.05 && g.vy > 0) g.vy *= -WALL_RESTITUTION
     // Velocity-dependent damping (carry-over to next step)
     const t = Math.min(1, (g.vx * g.vx + g.vy * g.vy) / SPEED_SQ_MAX)
-    const d = DAMPING_SLOW + (DAMPING_FAST - DAMPING_SLOW) * t
+    const d0 = DAMPING_SLOW + (DAMPING_FAST - DAMPING_SLOW) * t
+    const d  = g._hard ? d0 + (1 - d0) * g._hard : d0   // hardening blob orbs: damping fades → falls like a solid
     g.vx *= d
     g.vy *= d
   }
@@ -369,6 +371,9 @@ export function stepSandPhysics(grains, dt, HS, boxAngle, naBlobs = null) {
     const ctr = b.particles[0]
     if (ctr && ctr.type === 'na-ctr') { ctr.vx = rb.vx; ctr.vy = rb.vy }
   }
+
+  // Hardening blobs: the remembered shape creeps toward the current one (plastic flow, fading out).
+  if (semi) for (const b of semi) creepNaBlob(b)
 
   // Pin every soft blob's phantom centre to its orbs' centre of mass. The centre never collides,
   // and a MERGED blob has no springs holding it, so it used to fall through everything to the
@@ -457,8 +462,66 @@ export function makeNaBlob(cx, cy, vx, vy, blobR) {
 // fit the best rigid translation + rotation to wherever contacts pushed the orbs, then snap all
 // orbs onto it. A push on one edge therefore moves/turns the whole solid instead of denting it —
 // zero deformation — and the body falls at full gravity (no per-step velocity kill).
-// Tunable: window._naRigidTemp (°C).
-export const NA_RIGID_TEMP = 400
+// Hardening is GRADUAL above that: between _naHardenTemp (900 °C) and _naRigidTemp (500 °C) each blob
+// is pulled partway toward a remembered shape every PBD pass (partial shape matching), with the
+// pull ramping 0 → 1 and the remembered shape "creeping" after the current one (plastic flow)
+// less and less as it cools — viscous melt → stiff glass → (≤500) true rigid body. Dev panel.
+export const NA_RIGID_TEMP = 500
+let _naRigidTemp  = NA_RIGID_TEMP
+let _naHardenTemp = 900
+export const setNaRigidTemp  = v => { _naRigidTemp = v }
+export const setNaHardenTemp = v => { _naHardenTemp = v }
+const SEMI_CREEP_MAX = 0.08   // per step: how fast the remembered shape follows the current one at the soft end
+const naHardness = temp => {  // 0 at/above _naHardenTemp → 1 at _naRigidTemp (smoothstep)
+  const u = Math.max(0, Math.min(1, (_naHardenTemp - temp) / Math.max(1, _naHardenTemp - _naRigidTemp)))
+  return u * u * (3 - 2 * u)
+}
+// Remembered shape for a hardening blob: orb offsets from the CM in the blob's own (unrotated) frame.
+function initSemiNaBlob(blob) {
+  const o = blob.orbs, n = o.length
+  let cx = 0, cy = 0; for (const p of o) { cx += p.x; cy += p.y }; cx /= n; cy /= n
+  const refX = new Float32Array(n), refY = new Float32Array(n)
+  for (let i = 0; i < n; i++) { refX[i] = o[i].x - cx; refY[i] = o[i].y - cy }
+  blob.semi = { n, refX, refY, alpha: 0, beta: 0, creep: 0 }
+}
+// Best-fit pose (CM + rotation) of the orbs against a reference shape — shared by rigid + hardening.
+function fitPose(orbs, n, refX, refY) {
+  let cx = 0, cy = 0
+  for (let i = 0; i < n; i++) { cx += orbs[i].x; cy += orbs[i].y }
+  cx /= n; cy /= n
+  let sc = 0, ss = 0
+  for (let i = 0; i < n; i++) {
+    const qx = orbs[i].x - cx, qy = orbs[i].y - cy
+    sc += refX[i] * qx + refY[i] * qy
+    ss += refX[i] * qy - refY[i] * qx
+  }
+  return { cx, cy, th: (sc === 0 && ss === 0) ? 0 : Math.atan2(ss, sc) }
+}
+// One partial shape-match pass: move each orb β of the way toward its place in the best-fit
+// remembered shape (β per pass compounds to α per step over the solver's passes).
+function hardenNaBlob(blob) {
+  const S = blob.semi, o = blob.orbs
+  if (!S || S.beta <= 0 || S.n !== o.length) return
+  const { cx, cy, th } = fitPose(o, S.n, S.refX, S.refY)
+  const c = Math.cos(th), s = Math.sin(th)
+  for (let i = 0; i < S.n; i++) {
+    const gx = cx + S.refX[i] * c - S.refY[i] * s, gy = cy + S.refX[i] * s + S.refY[i] * c
+    o[i].x += (gx - o[i].x) * S.beta
+    o[i].y += (gy - o[i].y) * S.beta
+  }
+}
+// Plastic creep: the remembered shape drifts toward the current (un-rotated) one.
+function creepNaBlob(blob) {
+  const S = blob.semi, o = blob.orbs
+  if (!S || S.creep <= 0 || S.n !== o.length) return
+  const { cx, cy, th } = fitPose(o, S.n, S.refX, S.refY)
+  const c = Math.cos(-th), s = Math.sin(-th)
+  for (let i = 0; i < S.n; i++) {
+    const qx = o[i].x - cx, qy = o[i].y - cy
+    S.refX[i] += (qx * c - qy * s - S.refX[i]) * S.creep
+    S.refY[i] += (qx * s + qy * c - S.refY[i]) * S.creep
+  }
+}
 const RB_DAMP_LIN  = 0.9995   // per step — near-frictionless, like v2
 const RB_DAMP_ROT  = 0.995    // per step — slight rotational drag
 const RB_MAX_SPEED = 1200     // px/s hard cap (v2)
@@ -546,15 +609,25 @@ export function stepNaBlobSprings(naBlobs, dt, boxAngle = 0, temp = 1000) {
   // Below rigidT the blob is a true rigid body (freezeNaBlob / fitRigidNaBlob, run inside
   // stepSandPhysics) — no springs, no velocity kill. Small hysteresis so it can't flicker.
   const _w     = typeof window !== 'undefined' ? window : {}
-  const rigidT = _w._naRigidTemp ?? NA_RIGID_TEMP
+  const rigidT = _naRigidTemp
+  const hard   = naHardness(temp)
 
   for (const blob of naBlobs) {
     const orbsR = blob.orbs ?? (blob.orbs = blob.particles.filter(p => p.type === 'na-sub'))
     if (blob.rb && (temp > rigidT + 15 || blob.rb.n !== orbsR.length)) thawNaBlob(blob)
     if (temp <= rigidT && orbsR.length > 0) {
       if (!blob.rb) freezeNaBlob(blob)
+      if (blob.semi) { blob.semi = null; for (const p of orbsR) p._hard = 0 }
       continue
     }
+    // Gradual hardening above the rigid temp (see naHardness / hardenNaBlob).
+    if (hard > 0 && orbsR.length >= 3) {
+      if (!blob.semi || blob.semi.n !== orbsR.length) initSemiNaBlob(blob)
+      blob.semi.alpha = hard
+      blob.semi.beta  = 1 - Math.pow(1 - Math.min(0.999, hard), 1 / RESOLVE_PASSES)
+      blob.semi.creep = SEMI_CREEP_MAX * (1 - hard)
+      for (const p of orbsR) p._hard = hard
+    } else if (blob.semi) { blob.semi = null; for (const p of orbsR) p._hard = 0 }
     for (const s of blob.springs) {
       const a = s.a, b = s.b
       const dx = b.x - a.x, dy = b.y - a.y
@@ -569,8 +642,9 @@ export function stepNaBlobSprings(naBlobs, dt, boxAngle = 0, temp = 1000) {
     if (orbs.length < 1) continue
 
     // Kill inertia — dominant at cold temps, zero at hot
-    if (velDamp > 0) {
-      for (const p of orbs) { p.vx *= (1 - velDamp); p.vy *= (1 - velDamp) }
+    const vd = velDamp * (1 - hard)   // fades as the blob hardens — a solid falls freely
+    if (vd > 0) {
+      for (const p of orbs) { p.vx *= (1 - vd); p.vy *= (1 - vd) }
     }
 
     // Project toward CM velocity — makes blob move as one rigid piece when cold

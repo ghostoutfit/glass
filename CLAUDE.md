@@ -1200,8 +1200,15 @@ of `na-sub` circles. `na` grains also merge directly into each other.
   (`k` 100) springs. Spring integration, velocity kill, rigid-body projection and gravitational
   flattening are all cubic in `(1 − t)` and near zero above 800 °C. Conversion is rate-limited to
   one grain per frame.
-- **Cooled solid = true rigid body (v4)**: at or below `NA_RIGID_TEMP` (400 °C, `window._naRigidTemp`;
-  thaws above +15 °C) `stepNaBlobSprings` freezes each blob (`freezeNaBlob` — v2 `freezeParticles`
+- **Gradual hardening (v4)**: between `_naHardenTemp` (900 °C) and `_naRigidTemp` (500 °C; both dev
+  sliders) each blob keeps a remembered shape (`blob.semi`, orb offsets in its own frame). Every PBD
+  pass moves orbs β toward the best-fit pose of that shape (β compounds to α = smoothstep hardness per
+  step), and the remembered shape creeps toward the current one at `SEMI_CREEP_MAX`·(1−hardness) —
+  viscous → stiff → rigid. The soft-body velocity kill and the slow-grain PBD damping fade with
+  hardness (`p._hard`) so a hardening blob falls like a solid. Drop test (deform / height kept / land
+  step): 900 °C 153 % / 51 % / 161 → 800 38 / 71 / 152 → 700 22 / 83 / 125 → 600 19 / 90 / 97 → 500 0 / 97 / 88.
+- **Cooled solid = true rigid body (v4)**: at or below `_naRigidTemp` (500 °C — was a hard switch at
+  400 with a soft blob above it; thaws above +15 °C) `stepNaBlobSprings` freezes each blob (`freezeNaBlob` — v2 `freezeParticles`
   style ref offsets) and skips its springs. `stepSandPhysics(…, naBlobs)` then puts the orbs on the
   rigid velocity field before predict, and **shape-matches** each frozen blob at the end of every PBD
   pass (`fitRigidNaBlob`: Procrustes best-fit CM + rotation, snap orbs, CM-translate out of walls).
