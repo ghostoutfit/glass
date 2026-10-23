@@ -62,6 +62,13 @@ let _naLiberateFrac  = 0.5   // liberation fraction for Na2O atoms
 let _naBreakStrain   = 0.02  // break strain for Na-O bonds (independent of Si-O _breakStrain)
 let _breakStrainSpread = 0.15 // per-bond random ± factor drawn at buildRigidBondMap; 0 = uniform
 let _useEmaStrain     = false // true = EMA-smoothed strain for break check; false = instantaneous
+// Slow-cool crystal template: during slow cool the melt re-grows the ORIGINAL sand honeycomb (same
+// global lattice and orientation the grains were built on). See buildCrystTemplate / assignTemplate.
+let _crystTemplate    = true
+let _templK           = 0.05   // pull strength toward the assigned lattice site (per substep)
+let _templHi          = 1200   // °C: template starts ramping in (slow cool only)
+let _templLo          = 700    // °C: full strength
+let _templReint       = 300    // °C: slow+template — re-integration (bond locking) waits until atoms have reached their sites
 let _grainFeedback    = true // Si-O break feedback per GRAIN (true) vs global (false) — see bond breaking
 let _sevTriggerDist   = 13   // px — freed modifier ion must be within this distance of a Si or O to sever the Si-O bond
 // Feedback loop calibration: GAIN interpolated on sio2Pct between soda (70%) and silica (100%)
@@ -102,6 +109,12 @@ export const setBreakStrainSpread  = v => { _breakStrainSpread = v }
 export const setUseEmaStrain       = v => { _useEmaStrain = v }
 export const setSevTriggerDist     = v => { _sevTriggerDist = v }
 export const setGrainFeedback      = v => { _grainFeedback = !!v }
+export const setCrystTemplate      = v => { _crystTemplate = !!v }
+export const setTemplK             = v => { _templK = v }
+export const setTemplHi            = v => { _templHi = v }
+export const setTemplLo            = v => { _templLo = v }
+export const setTemplReint         = v => { _templReint = v }
+export const getTemplateDebug      = () => _templCache
 export const setFeedbackGainMult   = v => { _feedbackGainMult = v }
 export const setLatticeSpeedMult   = v => { _latticeSpeedMult = v }
 export const setFreedSpeedMult     = v => { _freedSpeedMult = v }
@@ -664,6 +677,115 @@ export function computePE(phys) {
 // coolingFactor: 1.0 = thermostat mode
 // attractK:     subtle pull strength, active only when coolingMode !== null
 // coolingMode:  null | 'fast' | 'slow' | 'fastHeat' | 'slowHeat'
+// ── Slow-cool crystal template ────────────────────────────────────────────
+// The global honeycomb every SiO₂ grain was cut from (meltGrid.buildHexLayer, a = 2·Si-O r0):
+// Si sites, O sites at nearest-neighbour midpoints, and ring centres (cages, 6 Si at distance a).
+let _templCache = null
+function buildCrystTemplate(a) {
+  if (_templCache && _templCache.a === a) return _templCache
+  const a1x = a * Math.sqrt(3), a2x = a * Math.sqrt(3) / 2, a2y = a * 1.5
+  const bDx = a * Math.sqrt(3) / 2, bDy = a * 0.5
+  const ni = Math.ceil(SIM_W / a1x) + 2, nj = Math.ceil(SIM_H / a2y) + 2
+  const si = [], ctr = []
+  for (let i = -Math.ceil(nj / 2) - 2; i <= ni; i++) for (let j = -1; j <= nj; j++) {
+    for (const [dx, dy] of [[0, 0], [bDx, bDy]]) {
+      const x = i * a1x + j * a2x + dx, y = j * a2y + dy
+      if (x >= 0 && x < SIM_W && y >= 0 && y < SIM_H) si.push([x, y])
+    }
+    const cx = i * a1x + j * a2x + bDx, cy = j * a2y - bDy
+    if (cx >= 0 && cx < SIM_W && cy >= 0 && cy < SIM_H) ctr.push([cx, cy])
+  }
+  const nn2 = (a * 1.05) ** 2
+  const oSite = [], oEnds = []
+  for (let u = 0; u < si.length; u++) for (let v = u + 1; v < si.length; v++) {
+    const dx = si[v][0] - si[u][0], dy = si[v][1] - si[u][1]
+    if (dx * dx + dy * dy < nn2) { oSite.push([(si[u][0] + si[v][0]) / 2, (si[u][1] + si[v][1]) / 2]); oEnds.push([u, v]) }
+  }
+  const ctrSi = ctr.map(([cx, cy]) => si.map((q, k) => [k, (q[0] - cx) ** 2 + (q[1] - cy) ** 2]).filter(e => e[1] < nn2).map(e => e[0]))
+  // bucket grid (cell = a) for nearest-site queries
+  const bucket = pts => { const g = new Map(); pts.forEach((q, k) => { const key = Math.floor(q[0] / a) + ',' + Math.floor(q[1] / a); (g.get(key) ?? g.set(key, []).get(key)).push(k) }); return g }
+  _templCache = { a, si, oSite, oEnds, ctr, ctrSi, gSi: bucket(si), gO: bucket(oSite), gC: bucket(ctr) }
+  return _templCache
+}
+function _nearSites(g, pts, x, y, a, maxD) {
+  const out = [], bx = Math.floor(x / a), by = Math.floor(y / a), r = Math.ceil(maxD / a)
+  for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
+    for (const k of g.get((bx + dx) + ',' + (by + dy)) ?? []) {
+      const d = Math.hypot(pts[k][0] - x, pts[k][1] - y)
+      if (d < maxD) out.push([d, k])
+    }
+  }
+  return out
+}
+// Assignment, recomputed every few steps while the template is active:
+//  1. CHOOSE a compact set of Si sites, one per Si atom: the sites where the melt's Si is densest
+//     (Gaussian-smoothed count), then a couple of cellular-automaton passes that drop sites with
+//     <2 chosen neighbours and add the best-scoring sites with ≥2 — so the crystal grows as solid
+//     patches instead of a perforated sheet spread over the whole box.
+//  2. Greedy nearest-exclusive: Si → chosen sites, O → O sites between chosen sites (bridging
+//     preferred, then non-bridging), Na → ring centres whose ring is (mostly) chosen.
+function assignTemplate(phys) {
+  const P = phys.particles, n = P.length, T = buildCrystTemplate(2 * PREFERRED['O-Si'].r0), a = T.a
+  const tgt = phys._templTgt ?? (phys._templTgt = new Int32Array(n))
+  tgt.fill(-1)
+  const siIdx = [], oIdx = [], naIdx = []
+  for (let i = 0; i < n; i++) { const t = P[i].typeId; if (t === 0) siIdx.push(i); else if (t === 1) oIdx.push(i); else if (t === 2) naIdx.push(i) }
+  // 1. density score per Si site (toroidal)
+  const nS = T.si.length, score = new Float64Array(nS), sig2 = 2 * (a * 1.3) ** 2, cut2 = (a * 3.5) ** 2
+  for (let k = 0; k < nS; k++) {
+    const [sx, sy] = T.si[k]
+    let sc = 0
+    for (const i of siIdx) { const dx = miDx(P[i].x - sx), dy = miDy(P[i].y - sy), d2 = dx * dx + dy * dy; if (d2 < cut2) sc += Math.exp(-d2 / sig2) }
+    score[k] = sc
+  }
+  T.siNbr ??= T.si.map((_, k) => T.oEnds.flatMap(([u, v]) => u === k ? [v] : v === k ? [u] : []))
+  const chosen = new Uint8Array(nS)
+  const order = [...Array(nS).keys()].sort((p, q) => score[q] - score[p])
+  const nPick = Math.min(nS, siIdx.length)
+  for (let r = 0; r < nPick; r++) chosen[order[r]] = 1
+  for (let pass = 0; pass < 3; pass++) {
+    const cn = k => T.siNbr[k].reduce((c, v) => c + chosen[v], 0)
+    const drop = order.filter(k => chosen[k] && cn(k) < 2).reverse()          // weakest first
+    const add  = order.filter(k => !chosen[k] && cn(k) >= 2)                    // best first
+    const m = Math.min(drop.length, add.length)
+    for (let r = 0; r < m; r++) { chosen[drop[r]] = 0; chosen[add[r]] = 1 }
+    if (!m) break
+  }
+  const greedy = (cands, nSites) => {
+    cands.sort((p, q) => p[0] - q[0])
+    const taken = new Uint8Array(nSites)
+    for (const [, i, k] of cands) if (tgt[i] < 0 && !taken[k]) { tgt[i] = k; taken[k] = 1 }
+    return taken
+  }
+  // 2. Si → chosen sites (reach 3a: atoms migrate in from the sparse melt)
+  const siC = []
+  for (const i of siIdx) for (const [d, k] of _nearSites(T.gSi, T.si, P[i].x, P[i].y, a, a * 3)) if (chosen[k]) siC.push([d, i, k])
+  greedy(siC, nS)
+  const oC = []
+  for (const i of oIdx) for (const [d, k] of _nearSites(T.gO, T.oSite, P[i].x, P[i].y, a, a * 2)) {
+    const [u, v] = T.oEnds[k], occ = chosen[u] + chosen[v]
+    if (occ > 0) oC.push([d + (occ === 2 ? 0 : 8), i, k])
+  }
+  greedy(oC, T.oSite.length)
+  const naC = []
+  for (const i of naIdx) for (const [d, k] of _nearSites(T.gC, T.ctr, P[i].x, P[i].y, a, a * 2)) {
+    let occ = 0; for (const u of T.ctrSi[k]) occ += chosen[u]
+    if (occ >= 4) naC.push([d + (6 - occ) * 4, i, k])
+  }
+  greedy(naC, T.ctr.length)
+  phys._templChosen = chosen
+  // Recrystallisation rearranges bonds: an intact rigid bond whose two atoms are assigned to
+  // sites that aren't neighbours (e.g. a rotated leftover fragment) would fight the lattice, so
+  // it breaks and is blocked from reforming while the conflict lasts (rb.templConflict).
+  const siteOf = i => { const k = tgt[i], t = P[i].typeId; return k < 0 ? null : t === 0 ? T.si[k] : t === 1 ? T.oSite[k] : t === 2 ? T.ctr[k] : null }
+  if (phys.rigidBonds) for (const rb of phys.rigidBonds) {
+    const si = siteOf(rb.i), sj = siteOf(rb.j)
+    const conflict = !!(si && sj && Math.hypot(si[0] - sj[0], si[1] - sj[1]) > rb.r0 + 5)
+    rb.templConflict = conflict
+    if (conflict && !rb.broken) rb.broken = true
+  }
+}
+
 export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 0, coolingMode = null, speedMult = 1, attractFalloff = 1) {
   const { particles, n, fx, fy } = phys
 
@@ -720,7 +842,7 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
   // grains apart on cooling (180–375 bonds broken).
   const everFreed = phys.everFreed ??= new Uint8Array(n)
   for (let i = 0; i < n; i++) if (latticeFreed[i]) everFreed[i] = 1
-  const coolScaleOf = rb => (rb.promoted || everFreed[rb.i] || everFreed[rb.j]) ? _coolBondScale : 1
+  const coolScaleOf = rb => (!(_crystTemplate && coolingMode === 'slow') && (rb.promoted || everFreed[rb.i] || everFreed[rb.j])) ? _coolBondScale : 1
   if (phys.rigidBonds) {
     for (const rb of phys.rigidBonds) {
       if (!rb.broken && !rb.breakable) { crystAnchor[rb.i] = 1; crystAnchor[rb.j] = 1 }
@@ -778,12 +900,20 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
   // Motif bias during cooling: ramps 0 → _motifStrength as target T falls 1500 → 600°C.
   // Fast: half strength, no orientation alignment → amorphous. Slow: full + alignment → crystal.
   const isCooling = coolingMode === 'fast' || coolingMode === 'slow'
+  // Slow-cool crystal template (see buildCrystTemplate). While active it supersedes the motif
+  // bias (which only re-angles bonds and can't fix ring topology) and the longer-cooled-bonds.
+  const templActive = _crystTemplate && coolingMode === 'slow' && totalEnergy < _templHi
+  const templKEff   = templActive ? _templK * Math.max(0, Math.min(1, (_templHi - totalEnergy) / Math.max(1, _templHi - _templLo))) : 0
+  if (templActive) {
+    phys._templStep = (phys._templStep ?? 0) + 1
+    if (!phys._templTgt || phys._templStep % 8 === 1) assignTemplate(phys)
+  }
   const motifRamp = isCooling ? Math.max(0, Math.min(1, (1500 - totalEnergy) / 900)) : 0
   // Slow cool drives the Si hex motif harder than fast (× slowBoost vs × 0.5) so clean
   // 6-ring crystal domains actually form instead of a slightly-tidier melt. Live-tunable via
   // window._slowCrystBoost; lock the value here once dialed in.
   const slowBoost = coolingMode === 'slow' ? (_win._slowCrystBoost ?? 4.0) : 0.5
-  const motifK    = motifRamp * _motifStrength * slowBoost
+  const motifK    = templActive ? 0 : motifRamp * _motifStrength * slowBoost
   let motif = null
   let orderedSi = null
   let crystalO = null   // O atoms belonging to the ordered Si network — the negative sites Na seeks
@@ -967,6 +1097,21 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
   for (let sub = 0; sub < SUBSTEPS; sub++) {
     fx.fill(0); fy.fill(0)
     if (motif) applyMotifForces(particles, motif, motifK, PREFERRED['O-Si'].r0, fx, fy)
+    if (templKEff > 0 && phys._templTgt) {
+      const T = _templCache, tg = phys._templTgt
+      for (let i = 0; i < n; i++) {
+        const k = tg[i]
+        if (k < 0 || !everFreed[i]) continue   // never-melted atoms are already on the lattice (anchored at x0)
+        const tid = particles[i].typeId
+        const site = tid === 0 ? T.si[k] : tid === 1 ? T.oSite[k] : tid === 2 ? T.ctr[k] : null
+        if (!site) continue
+        // spring toward the site, capped at a 6 px stretch so far-off atoms drift in, not fly
+        let dx = miDx(site[0] - particles[i].x), dy = miDy(site[1] - particles[i].y)
+        const d = Math.hypot(dx, dy); if (d > 6) { dx *= 6 / d; dy *= 6 / d }
+        fx[i] += templKEff * dx
+        fy[i] += templKEff * dy
+      }
+    }
     if (angleBendK > 0 && siOMap) applyAngleBend(particles, siOMap, angleBendK, fx, fy)
 
     // ── Na rejection (slow cool) ──────────────────────────────────
@@ -1351,7 +1496,7 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
         // No net bond formation above the crystallisation lock temperature during cooling —
         // keeps the melt mobile until it is cool enough to crystallise (see CRYST_LOCK).
         const allowReform = coolingMode === null || totalEnergy < CRYST_LOCK
-        if (allowReform && strain <= _reformStrain && !(rb.severFrames > 0)) rb.broken = false
+        if (allowReform && strain <= _reformStrain && !(rb.severFrames > 0) && !rb.templConflict) rb.broken = false
       }
       if (rb.broken !== wasBroken) {
         const half = (rb.bondDepth ?? 0) / 2
@@ -1420,7 +1565,8 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
   // Re-integration (locking atoms into the solid) is gated to the crystallisation window: during
   // cooling it only fires below CRYST_LOCK, so atoms stay mobile above it and don't freeze the
   // scrambled melt layout at high T (the bug that made slow look like fast).
-  const reintGate = coolingMode !== null ? CRYST_LOCK : sioProjCutoff(phys.sio2Pct ?? 70)
+  const reintGate = coolingMode === 'slow' && _crystTemplate ? Math.min(CRYST_LOCK, _templReint)
+                  : coolingMode !== null ? CRYST_LOCK : sioProjCutoff(phys.sio2Pct ?? 70)
   const reintActive = totalEnergy < reintGate
   if (phys.latticeFreed && phys.rigidBonds && phys.stableBondFrames && reintActive) {
     const sbf = phys.stableBondFrames
@@ -1443,6 +1589,13 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
           rrf[i] = REINT_RAMP_FRAMES
           const p = particles[i]
           p.x0 = p.x; p.y0 = p.y
+          // Slow + template: anchor to the assigned lattice site, so the anchor reinforces the
+          // crystal instead of freezing wherever the atom happened to be.
+          const tk = (coolingMode === 'slow' && _crystTemplate && phys._templTgt) ? phys._templTgt[i] : -1
+          if (tk >= 0 && _templCache) {
+            const tid = p.typeId, site = tid === 0 ? _templCache.si[tk] : tid === 1 ? _templCache.oSite[tk] : tid === 2 ? _templCache.ctr[tk] : null
+            if (site) { p.x0 = site[0]; p.y0 = site[1] }
+          }
           promoteBonds(phys, i)
         }
       } else {

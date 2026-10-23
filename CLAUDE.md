@@ -836,6 +836,29 @@ positions:
 - In `'slow'` only, each Si's φ moves `_motifAlign` (0.5) of the way toward its neighbours'
   orientation **mod 60°** (both honeycomb sublattices share φ mod 60°), so domains spread.
 
+### v4: slow cool re-grows the sand honeycomb (crystal template)
+
+Measured before: fast and slow cooled mix were equally amorphous (Si in 6-rings 2 % vs 6 %, global
+6-fold bond alignment 0.035 vs 0.073; the start sand is 78 % / 0.997) — motif bias only re-angles
+bonds and can't fix ring topology. Now, in **slow cool only** (`_crystTemplate`, default on; dev
+panel → "Tune these"):
+
+- `buildCrystTemplate(a = 2·Si-O r0)` — the same global honeycomb `meltGrid.buildHexLayer` cut the
+  grains from: Si sites, O sites at nearest-neighbour midpoints, ring centres (6 Si at distance a).
+- `assignTemplate` every 8 steps: picks a COMPACT set of Si sites (one per Si: Gaussian-smoothed Si
+  density, then CA passes dropping sites with <2 chosen neighbours), then greedy nearest-exclusive
+  Si → chosen sites (reach 3a), O → O sites between chosen sites (bridging preferred), **Na → ring
+  centres** of (mostly) chosen rings — 15.6 px from the ring's 6 O, ≈ Na–O bond length, a natural
+  cage. Intact rigid bonds whose atoms land on non-adjacent sites break and can't reform while the
+  conflict lasts (`rb.templConflict`) — leftover rotated fragments otherwise fought the lattice.
+- A spring (`_templK` 0.05, capped at a 6 px stretch) pulls ever-melted atoms to their sites,
+  ramping in from `_templHi` (1200 °C) to full at `_templLo` (700). Motif bias and longer-cooled-
+  bonds are off while it runs. Re-integration waits until `_templReint` (300 °C) and anchors
+  re-integrated atoms at their SITE, not their current position.
+- Real app (v67): slow → 39 % of Si in 6-rings, alignment 0.62; fast unchanged at 10 % / 0.09.
+  Headless 1440-step slow cool: 93 % of assigned Si on-site, 50 % in 6-rings, ~50/80 Na in ring
+  centres. Headless harness + PNG renders were throwaway scratchpad scripts.
+
 ### Other cooling behaviour
 
 - The freed-atom kick multiplier fades from `_freedSpeedMult` to `_latticeSpeedMult` as the
