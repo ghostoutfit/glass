@@ -852,7 +852,8 @@ panel → "Tune these"):
   cage. Intact rigid bonds whose atoms land on non-adjacent sites break and can't reform while the
   conflict lasts (`rb.templConflict`) — leftover rotated fragments otherwise fought the lattice.
 - A spring (`_templK` 0.05, capped at a 6 px stretch) pulls ever-melted atoms to their sites,
-  ramping in from `_templHi` (1200 °C) to full at `_templLo` (700). Motif bias and longer-cooled-
+  ramping in from `_templHi` (= `GT.CRYST_LOCK`, 1050 °C — was 1200, which made net bonds form
+  above the crystallisation lock) to full at `_templLo` (700). Motif bias and longer-cooled-
   bonds are off while it runs. Re-integration waits until `_templReint` (300 °C) and anchors
   re-integrated atoms at their SITE, not their current position.
 - Real app (v67): slow → 39 % of Si in 6-rings, alignment 0.62; fast unchanged at 10 % / 0.09.
@@ -875,6 +876,15 @@ Real app: 0 bond changes over 60 frames after cooling (was 6–77 flips/step thr
 Also made wrap-aware here (they weren't, and anchoring after the lock exposed it): the three anchor
 springs (`miDx(p.x − p.x0)`) and the renderer's `visOffset` / bond midpoints / `r0s`. An atom that
 crossed the box edge was yanked ~100 px back across it and drawn as a streak.
+
+### v4: drawn-bond hysteresis
+
+Dynamic (drawn) bonds used a hard capture cutoff re-tested every step, so pairs jiggling at the
+cutoff blinked — ~100 flips/step through 1000→800 °C on slow cool. Now a pair drawn last step
+(`phys._prevDyn`) keeps its bond out to `_bondHyst` (1.10) × capture, and incumbents win Si-O
+coordination ties. Slow cool at 800 °C: ~100 → 20 flips/step; 600 °C: 75 → 4. Dev panel "Tune these"
+→ *Bond flicker damping*. Note `phys.bonds` feeds `liveCount` (coordination / re-integration), so
+this slightly stabilises those too. Melt-hash cell (20 px) still covers the longest reach (Na-O 17.2).
 
 ### Other cooling behaviour
 

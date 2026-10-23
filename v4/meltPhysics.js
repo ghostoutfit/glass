@@ -66,13 +66,16 @@ let _useEmaStrain     = false // true = EMA-smoothed strain for break check; fal
 // global lattice and orientation the grains were built on). See buildCrystTemplate / assignTemplate.
 let _crystTemplate    = true
 let _templK           = 0.05   // pull strength toward the assigned lattice site (per substep)
-let _templHi          = 1200   // °C: template starts ramping in (slow cool only)
+let _templHi          = GT.CRYST_LOCK   // °C (1050): template starts ramping in (slow cool only) — no net bonds form above the crystallisation lock
 let _templLo          = 700    // °C: full strength
 let _templReint       = 300    // °C: slow+template — re-integration (bond locking) waits until atoms have reached their sites
 // Cooling bond lock: at _bondLockTemp during a fast/slow cool every bond present is locked in as a
 // rigid bond (measured length), melted Na gets 2–3 bonds to nearby O, and nothing breaks/forms
 // after — no flashing bonds or jitter in the cooled solid. Released if T rises 50 °C above it.
 let _bondLockTemp     = 400
+// Drawn-bond hysteresis: a dynamic bond appears inside the normal capture distance but, once drawn,
+// persists until its atoms are this much further apart — kills on/off flicker at the cutoff.
+let _bondHyst         = 1.10
 let _grainFeedback    = true // Si-O break feedback per GRAIN (true) vs global (false) — see bond breaking
 let _sevTriggerDist   = 13   // px — freed modifier ion must be within this distance of a Si or O to sever the Si-O bond
 // Feedback loop calibration: GAIN interpolated on sio2Pct between soda (70%) and silica (100%)
@@ -114,6 +117,7 @@ export const setUseEmaStrain       = v => { _useEmaStrain = v }
 export const setSevTriggerDist     = v => { _sevTriggerDist = v }
 export const setGrainFeedback      = v => { _grainFeedback = !!v }
 export const setBondLockTemp       = v => { _bondLockTemp = v }
+export const setBondHyst          = v => { _bondHyst = v }
 export const setCrystTemplate      = v => { _crystTemplate = !!v }
 export const setTemplK             = v => { _templK = v }
 export const setTemplHi            = v => { _templHi = v }
@@ -1870,6 +1874,8 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
   // Gate is spec.r0·renderMult ≤ 15.6px (Na-O) < cell size 20, so the hash is a safe superset.
   // The result set is visitation-order-independent: Si-O candidates are sorted by distance
   // and accepted nearest-first below, and non-Si-O bonds are a set regardless of push order.
+  // Hysteresis: pairs drawn last step keep their bond out to _bondHyst × the capture distance.
+  const prevDyn = phys._prevDyn ?? new Set(), nextDyn = new Set()
   const bondScanPair = (i, j) => {
     if (rigidPairSet.has(i * n + j)) return
     const pi = particles[i], pj = particles[j]
@@ -1878,12 +1884,15 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
     const isSiO      = spec === PAIR_TABLE[0][1]
     const effMult    = isSiO ? sioMult : spec.mult
     const renderMult = spec.viewMult ?? effMult
+    const had   = prevDyn.has(i * n + j)
+    const reach = spec.r0 * renderMult * (had ? _bondHyst : 1)
     const dx = miDx(pj.x - pi.x)
-    if (dx > spec.r0 * renderMult || dx < -spec.r0 * renderMult) return
+    if (dx > reach || dx < -reach) return
     const d = Math.hypot(dx, miDy(pj.y - pi.y))
-    if (d > spec.r0 * renderMult) return
+    if (d > reach) return
     const b = { i, j, strain: (d - spec.r0) / spec.r0, currentBreakStrain: 0.25, broken: false }
-    if (isSiO) { b.d = d; sioCands.push(b) } else bonds.push(b)
+    if (isSiO) { b.d = had ? d / _bondHyst : d; sioCands.push(b) }   // incumbents win ties for the coordination cap
+    else { bonds.push(b); nextDyn.add(i * n + j) }
   }
   if (_useMeltHash) eachMeltPair(particles, n, bondScanPair)
   else for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) bondScanPair(i, j)
@@ -1894,7 +1903,9 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
     sioCoord[b.i]++; sioCoord[b.j]++
     delete b.d
     bonds.push(b)
+    nextDyn.add(b.i * n + b.j)
   }
+  phys._prevDyn = nextDyn
   phys.bonds = bonds
   }
 

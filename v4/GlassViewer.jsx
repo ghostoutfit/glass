@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import CompositionView from './CompositionView'
 import { initParticles, stepPhysics, stepFloorPhysics, PARTICLE_R, FIXED_DT, T_RIGID, freezeParticles, syncParticlesToRigidBody, stepRigidBody } from './glassPhysics.js'
-import { setSioHotMult, setFreeAttractSiOMult, setSioExclMult, setCrystJiggleMult, setBreakStrain, setReformStrain, setCrystAnchorK, setLiberateFrac, setSioK, setNaOK, setNaAnchorK, setNaLiberateFrac, setNaBreakStrain, setLatticeSpeedMult, setFreedSpeedMult, setReintBondN, setReintFrameM, setBreakStrainSpread, setSevTriggerDist, setGrainFeedback, setBondLockTemp, setCrystTemplate, setTemplK, setTemplHi, setTemplReint, setFeedbackGainMult, setSiSiRepR0, setMotifStrength, setMotifAlign, setBondStiffMult, setFreedTau, setNaNaRepR0, setSevCooldown, setSevPullK } from './meltPhysics.js'
+import { setSioHotMult, setFreeAttractSiOMult, setSioExclMult, setCrystJiggleMult, setBreakStrain, setReformStrain, setCrystAnchorK, setLiberateFrac, setSioK, setNaOK, setNaAnchorK, setNaLiberateFrac, setNaBreakStrain, setLatticeSpeedMult, setFreedSpeedMult, setReintBondN, setReintFrameM, setBreakStrainSpread, setSevTriggerDist, setGrainFeedback, setBondLockTemp, setBondHyst, setCrystTemplate, setTemplK, setTemplHi, setTemplReint, setFeedbackGainMult, setSiSiRepR0, setMotifStrength, setMotifAlign, setBondStiffMult, setFreedTau, setNaNaRepR0, setSevCooldown, setSevPullK } from './meltPhysics.js'
 import { setVisualScale, setMaxDpr, effectiveDpr, setMotionCold, setMotionFullT, QTY_COLORS, ENERGY_KJ_MULT } from './renderer.js'
 import { initSandParticles, stepSandPhysics, mergeSodaGrains, mergeSilicateGrains, convertLargeNaGrains, stepNaBlobSprings, checkNaBlobMerges, absorbNearbyGrains, snapshotSand, restoreSand, GRAIN_R as SAND_GRAIN_R, NA_BLOB_R_CTR } from './sandPhysics.js'
 import { T as GT } from './glassTemps.js'
@@ -616,7 +616,8 @@ export default function GlassViewer() {
   const [bondLockTemp,   setBondLockTempState]  = useState(400)   // cooling: bonds lock in here (fast + slow)
   const [crystTemplate,  setCrystTemplateState] = useState(true)   // slow cool re-grows the sand honeycomb
   const [templK,         setTemplKState]        = useState(0.05)
-  const [templHi,        setTemplHiState]       = useState(1200)
+  const [templHi,        setTemplHiState]       = useState(1050)   // = CRYST_LOCK: no net bonds above it
+  const [bondHyst,       setBondHystState]      = useState(1.10)   // drawn-bond hysteresis (flicker damping)
   const [templReint,     setTemplReintState]    = useState(300)   // particle physics runs this many sim steps ahead of a heating ramp
   const [sevTriggerDist, setSevTriggerDistState] = useState(13)
   const [feedbackGainMult, setFeedbackGainMultState] = useState(40)
@@ -2120,7 +2121,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 77</span>
+                  }}>Field Test Version 78</span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),
@@ -2469,6 +2470,10 @@ export default function GlassViewer() {
                 <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
                   min={100} max={1000} step={25} value={motionFullT} onChange={e => { const v = +e.target.value; setMotionFullTState(v); setMotionFullT(v) }} />
                 <div style={{fontSize:10, color:'#777', marginBottom:8}}>Particles tab, render only: lattice-atom jiggle ramps linearly from the cold value at 0 °C to full here (bonds start going pink ~500 °C).</div>
+                <div style={{fontSize:11, color:'#888', marginBottom:2}}>Bond flicker damping: <span style={{color:'#a090d0'}}>{bondHyst <= 1.001 ? 'off' : `×${bondHyst.toFixed(2)}`}</span></div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={1} max={1.3} step={0.02} value={bondHyst} onChange={e => { const v = +e.target.value; setBondHystState(v); setBondHyst(v) }} />
+                <div style={{fontSize:10, color:'#777', marginBottom:8}}>A drawn bond appears at the normal distance but stays until its atoms are this much further apart — stops bonds blinking at the cutoff (Particles, all temps).</div>
                 <div style={{fontSize:11, color:'#888', marginBottom:2}}>Cooling bonds lock at: <span style={{color:'#a090d0'}}>{bondLockTemp} °C</span></div>
                 <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
                   min={100} max={900} step={25} value={bondLockTemp} onChange={e => { const v = +e.target.value; setBondLockTempState(v); setBondLockTemp(v) }} />
