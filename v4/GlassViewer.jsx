@@ -2093,7 +2093,22 @@ export default function GlassViewer() {
               <div style={{ display:'flex', alignItems:'center', gap:4, minWidth:0, flexWrap:'wrap' }}>
                 {/* Tab buttons — centered in the row (presets sit at the left via order:-1) */}
                 <div ref={tabGroupRef} style={{ display:'flex', gap:2, marginLeft:'auto', marginRight:'auto', position:'relative' }}>
-                  <button className={`tab-btn ${tab==='melt'?'active':''}`}  onClick={() => setTab('melt')}>Particles and Fields</button>
+                  {/* Replay (turtle / rabbit) hangs centred under the split between the two tab
+                      buttons: anchored to the first tab's right edge (+1px = half the 2px gap) and
+                      dropped to the second toolbar line. Absolute, so it never resizes either row. */}
+                  <span style={{ position:'relative', display:'inline-flex' }}>
+                    <button className={`tab-btn ${tab==='melt'?'active':''}`}  onClick={() => setTab('melt')}>Particles and Fields</button>
+                    <div style={{ position:'absolute', left:'calc(100% + 1px)', top:'calc(100% + 20px)', transform:'translateX(-50%)', display:'flex', gap:4, zIndex:1 }}>
+                  <button className="action-btn replay-btn" style={{padding:'2px 9px', fontSize:11, flexShrink:0, display:'flex', alignItems:'center', justifyContent:'center'}}
+                    disabled={replayFrameCount === 0}
+                    onClick={() => { setReplayPlaying(false); setReplayFrame(0) }}
+                  ><img src="/glass/Turtle.png" draggable={false} style={{ height: '1.5em', filter: 'brightness(0) invert(1) brightness(0.7) sepia(1) hue-rotate(166deg) brightness(0.95)', marginRight: 3 }} /><span style={{ fontSize: '1.4em', color: '#90c8f0', lineHeight: 1 }}>↺</span></button>
+                  <button className="action-btn replay-btn" style={{padding:'2px 9px', fontSize:11, flexShrink:0, display:'flex', alignItems:'center', justifyContent:'center'}}
+                    disabled={replayFrameCount === 0}
+                    onClick={() => { setReplayFrame(0); setReplayPlaying(true) }}
+                  ><img src="/glass/Rabbit.png" draggable={false} style={{ height: '1.5em', filter: 'brightness(0) invert(1) brightness(0.7) sepia(1) hue-rotate(166deg) brightness(0.95)', marginRight: 3 }} /><span style={{ fontSize: '1.4em', color: '#90c8f0', lineHeight: 1 }}>↺</span></button>
+                    </div>
+                  </span>
                   <button className={`tab-btn ${tab==='glass'?'active':''}`} onClick={() => setTab('glass')}>Bulk Material</button>
                   {/* Build marker, pinned to the right of "Bulk Material". Absolutely positioned so
                       it never shifts the centered tab pair; hidden by the effect when the toolbar
@@ -2103,7 +2118,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 69</span>
+                  }}>Field Test Version 70</span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),
@@ -2159,26 +2174,23 @@ export default function GlassViewer() {
                       disabled={!!coolLocked} title={coolLocked ? 'Cooling run in progress — press Reset' : undefined}>GO</button>
                   </>}
                   <div className="toolbar-divider" />
+                  {/* Readout labels sit ABOVE the LCDs (absolute — the toolbar height doesn't change) */}
+                  <div style={{ position:'relative', marginLeft:8 }}>
+                  <span style={{position:'absolute', bottom:'100%', left:0, right:0, marginBottom:2, textAlign:'center', whiteSpace:'nowrap', fontSize:10, fontWeight:700, letterSpacing:'0.08em', textTransform:'uppercase', color:'rgba(30,45,60,0.70)', pointerEvents:'none'}}>Energy <span style={{textTransform:'none'}}>(kJ)</span></span>
                   <div style={lcdStyle}>
                     <span style={{visibility:'hidden', display:'block', padding:'3px 6px'}}>9999</span>
                     <span style={{position:'absolute', inset:0, padding:'3px 6px', color:'rgba(60,60,60,0.15)', textAlign:'right'}}>8888</span>
                     <span style={{position:'absolute', inset:0, padding:'3px 6px', color:'rgba(60,60,60,0.75)', textAlign:'right'}}>{Math.round(energyContentKJ(meltLocalTemp, p.na2o, hcPlateau) * ENERGY_KJ_MULT)}</span>
                   </div>
-                  <span style={{fontSize:12, fontWeight:700, color:'rgba(30,45,60,0.70)'}}>kJ</span>
+                  </div>
+                  <div style={{ position:'relative', marginLeft:22 }}>   {/* room for the wider labels */}
+                  <span style={{position:'absolute', bottom:'100%', left:0, right:0, marginBottom:2, textAlign:'center', whiteSpace:'nowrap', fontSize:10, fontWeight:700, letterSpacing:'0.08em', textTransform:'uppercase', color:'rgba(30,45,60,0.70)', pointerEvents:'none'}}>Temp <span style={{textTransform:'none'}}>(°C)</span></span>
                   <div style={lcdStyle}>
                     <span style={{visibility:'hidden', display:'block', padding:'3px 6px'}}>1800</span>
                     <span style={{position:'absolute', inset:0, padding:'3px 6px', color:'rgba(60,60,60,0.15)', textAlign:'right'}}>1800</span>
                     <span style={{position:'absolute', inset:0, padding:'3px 6px', color:'rgba(60,60,60,0.75)', textAlign:'right'}}>{meltLocalTemp}</span>
                   </div>
-                  <span style={{fontSize:12, fontWeight:700, color:'rgba(30,45,60,0.70)'}}>°C</span>
-                  <button className="action-btn replay-btn" style={{padding:'2px 9px', fontSize:11, flexShrink:0, marginLeft:6, display:'flex', alignItems:'center', justifyContent:'center'}}
-                    disabled={replayFrameCount === 0}
-                    onClick={() => { setReplayPlaying(false); setReplayFrame(0) }}
-                  ><img src="/glass/Turtle.png" draggable={false} style={{ height: '1.5em', filter: 'brightness(0) invert(1) brightness(0.7) sepia(1) hue-rotate(166deg) brightness(0.95)', marginRight: 3 }} /><span style={{ fontSize: '1.4em', color: '#90c8f0', lineHeight: 1 }}>↺</span></button>
-                  <button className="action-btn replay-btn" style={{padding:'2px 9px', fontSize:11, flexShrink:0, display:'flex', alignItems:'center', justifyContent:'center'}}
-                    disabled={replayFrameCount === 0}
-                    onClick={() => { setReplayFrame(0); setReplayPlaying(true) }}
-                  ><img src="/glass/Rabbit.png" draggable={false} style={{ height: '1.5em', filter: 'brightness(0) invert(1) brightness(0.7) sepia(1) hue-rotate(166deg) brightness(0.95)', marginRight: 3 }} /><span style={{ fontSize: '1.4em', color: '#90c8f0', lineHeight: 1 }}>↺</span></button>
+                  </div>
                 </>}
 
                 {/* Bulk-only dev controls — heat/cool, presets and readouts are shared above;
