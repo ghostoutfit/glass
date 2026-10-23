@@ -2120,7 +2120,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 75</span>
+                  }}>Field Test Version 77</span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),
@@ -2251,25 +2251,25 @@ export default function GlassViewer() {
                 </div>
                 <div style={{display:'grid', gridTemplateColumns:'repeat(2, 78px)', gap:3}}>
                   {tab === 'glass' ? (<>
-                    <button className={`action-btn replay-btn${showGraph?' active':''}`}
-                      style={{padding:'3px 0', width:'100%'}} onClick={() => setShowGraph(f => !f)}>Graph</button>
+                    <button className="action-btn replay-btn" aria-hidden tabIndex={-1}
+                      style={{padding:'3px 0', width:'100%', visibility:'hidden'}}>Count</button>
                     <button className={`action-btn replay-btn${autoRotate?' active':''}`}
                       style={{padding:'3px 0', width:'100%'}}
                       onClick={() => {
                         const v = !autoRotate; setAutoRotate(v); boxSimRef.current.autoRotate = v
                         if (!v && boxSimRef.current.box) boxSimRef.current.box.boxAngularVel = 0
                       }}>Rotate</button>
-                    <button className="action-btn replay-btn" aria-hidden tabIndex={-1}
-                      style={{padding:'3px 0', width:'100%', visibility:'hidden'}}>Count</button>
+                    <button className={`action-btn replay-btn${showGraph?' active':''}`}
+                      style={{padding:'3px 0', width:'100%'}} onClick={() => setShowGraph(f => !f)}>Graph</button>
                     <button className="action-btn replay-btn" aria-hidden tabIndex={-1}
                       style={{padding:'3px 0', width:'100%', visibility:'hidden'}}>Field</button>
                   </>) : (<>
-                    <button className={`action-btn replay-btn${showGraph?' active':''}`}
-                      style={{padding:'3px 0', width:'100%'}} onClick={() => setShowGraph(f => !f)}>Graph</button>
-                    <button className={`action-btn replay-btn${showCharge?' active':''}`}
-                      style={{padding:'3px 0', width:'100%'}} onClick={() => setShowCharge(f => !f)}>Charge</button>
                     <button className={`action-btn replay-btn${showCount?' active':''}`}
                       style={{padding:'3px 0', width:'100%'}} onClick={() => setShowCount(f => !f)}>Count</button>
+                    <button className={`action-btn replay-btn${showCharge?' active':''}`}
+                      style={{padding:'3px 0', width:'100%'}} onClick={() => setShowCharge(f => !f)}>Charge</button>
+                    <button className={`action-btn replay-btn${showGraph?' active':''}`}
+                      style={{padding:'3px 0', width:'100%'}} onClick={() => setShowGraph(f => !f)}>Graph</button>
                     <button className={`action-btn replay-btn${effectiveShowField?' active':''}`}
                       style={{padding:'3px 0', width:'100%'}}
                       title={fieldBlur ? undefined : 'Simple quality: strain field drawn crisp (no blur)'}

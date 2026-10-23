@@ -120,7 +120,7 @@ const GRAPH_MAX_MARKERS = 3
 //  · hover within 14 px of the curve → coordinate readout (kJ · °C) at the nearest point
 //  · click the curve → fixed dotted horizontal line at that point's temperature (≤3);
 //    click a line → remove it
-//  · each line labels its °C and the kJ at every place the curve crosses it (heating + cooling)
+//  · each line labels its °C at the right end and dots every place the curve crosses it
 function drawTEGraph(canvas, hist, darkMode = true, eMax = 4e-3, targetTempLine = null, ui = null) {
   const s = setupCanvas(canvas)
   if (!s) return
@@ -229,29 +229,22 @@ function drawTEGraph(canvas, hist, darkMode = true, eMax = 4e-3, targetTempLine 
   }
   const textCol = darkMode ? '#ccc' : '#444'
 
-  // ── Marker lines: dotted horizontal at a fixed temperature, kJ labelled at each crossing ──
+  // ── Marker lines: dotted horizontal at a fixed temperature, dot at each curve crossing ──
   for (const mk of markers) {
     const y = toY(mk.t), cross = crossingsAt(mk.t)
     const xEnd = cross.length ? Math.min(pL + pw, toX(cross[cross.length - 1]) + 10) : pL + 30
     ctx.strokeStyle = tCol; ctx.lineWidth = 1.5; ctx.setLineDash([4, 4])
     ctx.beginPath(); ctx.moveTo(pL, y); ctx.lineTo(xEnd, y); ctx.stroke()
     ctx.setLineDash([])
-    // °C label at the line's right end, past the last crossing, so it never collides with the
-    // kJ crossing labels (falls back to just above the line's end if there's no room)
+    // °C label at the line's right end, past the last crossing (falls back to just above the
+    // line's end if there's no room)
     ctx.font = 'bold 12px Lexend, system-ui, sans-serif'
     const tw = ctx.measureText(`${Math.round(mk.t)} °C`).width + 8
     if (xEnd + 4 + tw <= w) labelBox([[`${Math.round(mk.t)} °C`, tCol]], xEnd + 4, y - 9)
     else labelBox([[`${Math.round(mk.t)} °C`, tCol]], xEnd - tw, y - 22)
-    let lastX = -1e9, below = false
+    // crossing dots only (temperature-coloured) — no kJ labels on the lines
     for (const e of cross.slice(0, 3)) {
-      const x = toX(e)
-      ctx.fillStyle = eCol; ctx.beginPath(); ctx.arc(x, y, 3.5, 0, Math.PI * 2); ctx.fill()
-      // close crossings (narrow loop): alternate the label above / below the line
-      below = x - lastX < 62 ? !below : false
-      ctx.font = 'bold 12px Lexend, system-ui, sans-serif'
-      const lw = ctx.measureText(`${kJ(e)} kJ`).width + 8
-      labelBox([[`${kJ(e)} kJ`, eCol]], x - lw / 2, below ? y + 4 : y - 22)
-      lastX = x
+      ctx.fillStyle = tCol; ctx.beginPath(); ctx.arc(toX(e), y, 3.5, 0, Math.PI * 2); ctx.fill()
     }
   }
 
