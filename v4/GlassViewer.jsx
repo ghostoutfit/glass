@@ -2118,7 +2118,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 71</span>
+                  }}>Field Test Version 72</span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),
@@ -2176,7 +2176,7 @@ export default function GlassViewer() {
                   <div className="toolbar-divider" />
                   {/* Readout labels sit ABOVE the LCDs (absolute — the toolbar height doesn't change) */}
                   <div style={{ position:'relative' }}>
-                  <span style={{position:'absolute', bottom:'100%', left:0, right:0, marginBottom:2, textAlign:'center', whiteSpace:'nowrap', fontSize:10, fontWeight:700, letterSpacing:'0.08em', textTransform:'uppercase', color:'rgba(30,45,60,0.70)', pointerEvents:'none'}}>Energy</span>
+                  <span style={{position:'absolute', bottom:'100%', left:0, right:0, marginBottom:2, textAlign:'center', whiteSpace:'nowrap', fontSize:13, fontWeight:700, letterSpacing:'0.08em', textTransform:'uppercase', color:'rgba(30,45,60,0.70)', pointerEvents:'none'}}>Energy</span>
                   <div style={lcdStyle}>
                     <span style={{visibility:'hidden', display:'block', padding:'3px 6px'}}>9999</span>
                     <span style={{position:'absolute', inset:0, padding:'3px 6px', color:'rgba(60,60,60,0.15)', textAlign:'right'}}>8888</span>
@@ -2185,7 +2185,7 @@ export default function GlassViewer() {
                   </div>
                   <span style={{fontSize:12, fontWeight:700, color:'rgba(30,45,60,0.70)'}}>kJ</span>
                   <div style={{ position:'relative' }}>
-                  <span style={{position:'absolute', bottom:'100%', left:0, right:0, marginBottom:2, textAlign:'center', whiteSpace:'nowrap', fontSize:10, fontWeight:700, letterSpacing:'0.08em', textTransform:'uppercase', color:'rgba(30,45,60,0.70)', pointerEvents:'none'}}>Temp</span>
+                  <span style={{position:'absolute', bottom:'100%', left:0, right:0, marginBottom:2, textAlign:'center', whiteSpace:'nowrap', fontSize:13, fontWeight:700, letterSpacing:'0.08em', textTransform:'uppercase', color:'rgba(30,45,60,0.70)', pointerEvents:'none'}}>Temp</span>
                   <div style={lcdStyle}>
                     <span style={{visibility:'hidden', display:'block', padding:'3px 6px'}}>1800</span>
                     <span style={{position:'absolute', inset:0, padding:'3px 6px', color:'rgba(60,60,60,0.15)', textAlign:'right'}}>1800</span>
