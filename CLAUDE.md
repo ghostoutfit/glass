@@ -908,7 +908,11 @@ selection/hover rings → charge halos → bond-count labels → live-stats HUD.
 - **Ghost copies** implement the toroidal wrap visually: atoms within `GHOST_ZONE` (25 px) of an
   edge are redrawn at ±`SIM_W` / ±`SIM_H`.
 - `_visualScale` (dev slider 0.5–10) amplifies displacement from `x0` for visibility without
-  touching physics. `canvasJitter` is a stub returning zero — real thermal motion supplies the
+  touching physics.
+- **v4 cold-motion ramp** (render only; dev panel → "Tune these"): lattice-atom offsets are also
+  × `motionK = cold + (1−cold)·clamp(T/fullT)`, defaults cold 0.1, fullT 500 °C. Physics thermal
+  speed ∝ √(T+273), so unscaled the jiggle at 0 °C was already 56 % of 600 °C; now 6 % → 93 % by
+  500 °C (where bonds start going pink). Freed atoms are drawn at true position, unscaled. `canvasJitter` is a stub returning zero — real thermal motion supplies the
   animation.
 - `COLOR_STOPS` (dark) and `COLOR_STOPS_LIGHT` are separate ramps; light mode also switches the
   field composite to `multiply` so low-energy bonds stay visible.

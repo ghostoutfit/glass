@@ -47,6 +47,15 @@ export const effectiveDpr = () => Math.min(window.devicePixelRatio || 1, _maxDpr
 
 let _visualScale = 3.3   // amplify lattice-atom displacement from x0; freed atoms unaffected
 export const setVisualScale = v => { _visualScale = v }
+// Cold-motion ramp (render only): lattice-atom jiggle is scaled by a temperature factor that goes
+// from _motionCold at 0 °C linearly to 1 at _motionFullT. Physics thermal speed is tied to absolute
+// temperature (°C+273), so unscaled the atoms already move ~56% as much at 0 °C as at 600 °C and
+// the 0→600 warm-up barely reads; this makes it start near-still and visibly rise before bonds go
+// pink (~500 °C). Physics, bonds and breaking are untouched. Dev panel → "Tune these".
+let _motionCold  = 0.1
+let _motionFullT = 500
+export const setMotionCold  = v => { _motionCold = v }
+export const setMotionFullT = v => { _motionFullT = v }
 // Only the first JIGGLE_PX of displacement from x0 is amplified — that's the thermal jiggle the
 // scale exists to show. Real drift (dissolving grains) is drawn 1:1, otherwise an atom drifted
 // 5px drew 16px away and its bonds to freed neighbours looked ~3× too long.
@@ -281,12 +290,14 @@ export function drawScene(canvas, phys, {
   // the display refreshes. riDx/riDy keep the interpolation on the short (min-image) path so an
   // atom wrapping across the toroidal edge doesn't streak. Lattice atoms barely move per step,
   // so they keep the plain visOffset path (and hit-testing stays on true positions).
+  const motionK = targetTempC == null ? 1
+    : _motionCold + (1 - _motionCold) * Math.max(0, Math.min(1, targetTempC / Math.max(1, _motionFullT)))
   const vx = (p, i) => latticeFreed?.[i]
     ? (interp >= 1 ? p.x : p.px + riDx(p.x - p.px) * interp)
-    : p.x0 + visOffset(p, visualScale)[0]
+    : p.x0 + visOffset(p, visualScale)[0] * motionK
   const vy = (p, i) => latticeFreed?.[i]
     ? (interp >= 1 ? p.y : p.py + riDy(p.y - p.py) * interp)
-    : p.y0 + visOffset(p, visualScale)[1]
+    : p.y0 + visOffset(p, visualScale)[1] * motionK
 
   // Overlay bond count — mirrors attract loop exactly: count ALL phys.bonds (including broken)
   let overlayBondCount = null
