@@ -1026,6 +1026,10 @@ Rules this layout depends on:
 - **Replay draw is non-destructive**: a display copy of `phys` (frame positions, frame bonds, all
   atoms drawn at true position, frame temperature for thermal colouring). The old replay wrote the
   frame INTO the live particles, so returning to live resumed from the wrong positions.
+  Grain outlines: each frame also stores a copy of `chunkDissolved` (grains only go intact →
+  dissolved, so 20 bytes/frame); the display copy gets its OWN copy plus `dissolveFrozen`, which
+  tells the renderer not to re-judge dissolution (replay draws every atom as "freed", which would
+  dissolve every grain — and, sharing the live array, did so permanently in v79).
 - **Time stop** (`timeStopped = timePaused || replayFrame !== null`): CompositionView zeroes elapsed →
   no steps, no ramp advance, no graph points; `integrateMelt` skips; the Bulk loop zeroes elapsed,
   skips rotation and the sand step/meld. Viewing history stops time (DVR); LIVE resumes it.

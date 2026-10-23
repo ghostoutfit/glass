@@ -354,8 +354,11 @@ export function drawScene(canvas, phys, {
       if (!chunk.pIdxs.length) return
       if (dissolved[ci]) return
       const freedCount = chunk.pIdxs.reduce((s, i) => s + (latticeFreed?.[i] ? 1 : 0), 0)
-      if ((chunkBondTotal[ci] > 0 && chunkBondBroken[ci] / chunkBondTotal[ci] >= BOND_FRAC) ||
-          (chunk.pIdxs.length > 0 && freedCount / chunk.pIdxs.length >= 0.25)) { dissolved[ci] = 1; return }
+      // Replay frames carry their own recorded dissolve state (phys.dissolveFrozen) — never re-judge
+      // it there: replay draws every atom as "freed", which would dissolve every grain.
+      if (!phys.dissolveFrozen &&
+          ((chunkBondTotal[ci] > 0 && chunkBondBroken[ci] / chunkBondTotal[ci] >= BOND_FRAC) ||
+           (chunk.pIdxs.length > 0 && freedCount / chunk.pIdxs.length >= 0.25))) { dissolved[ci] = 1; return }
       // Freeze the outline shape on first draw: once captured it never changes, so atom
       // rearrangement / x0 rebasing can't reshape the grain border. A dissolved grain is gone
       // forever (above); a surviving one keeps its original outline exactly.

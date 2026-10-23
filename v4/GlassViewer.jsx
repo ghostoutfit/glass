@@ -2154,7 +2154,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 79</span>
+                  }}>Field Test Version 80</span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),

@@ -1086,7 +1086,10 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
           for (let i = 0; i < n; i++) { const x = fr.pos[i * 2], y = fr.pos[i * 2 + 1]; dps[i] = { ...ps[i], x, y, px: x, py: y } }
           const nb = fr.bonds.length / 2, bonds = new Array(nb)
           for (let k = 0; k < nb; k++) bonds[k] = { i: fr.bonds[k * 2], j: fr.bonds[k * 2 + 1], strain: fr.strain[k] / 100, currentBreakStrain: 0.25, broken: false }
-          const disp = { ...phys, particles: dps, bonds, latticeFreed: allFreedRef.current }
+          // Grain outlines: this frame's own recorded dissolve state (a COPY — the live record
+          // must never be touched), frozen so the renderer doesn't re-judge it.
+          const disp = { ...phys, particles: dps, bonds, latticeFreed: allFreedRef.current,
+                         chunkDissolved: fr.dissolved ? fr.dissolved.slice() : undefined, dissolveFrozen: true }
           drawScene(canvasRef.current, disp, { ts, bondNums: bondNumsRef.current, darkMode: darkModeRef.current, showCharge: showChargeRef.current, chargeLite: chargeLiteRef.current, showField: showFieldRef.current, fieldBlur: fieldBlurRef.current, atomColorMode: atomColorModeRef.current, showBrokenBonds: false, showLiveStats: showLiveStatsRef.current, targetTempC: fr.t, hoverIdx: null, selectedIdx: -1 })
           rafRef.current = requestAnimationFrame(frame)
           return
@@ -1156,7 +1159,10 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
             }
             const t = Math.max(0, Math.round(ePerParticle / ENERGY_UNIT - 273))
             const e = coolGraphERef.current ?? energyContent(t, na2oPctRef.current, hcPlateauRef.current)
-            R.frames.push({ pos, bonds, strain, t, e })
+            // grains only ever go intact → dissolved, so a 20-byte copy per frame lets playback pop
+            // each outline back in exactly up to the frame it dissolved on
+            const dissolved = phys.chunkDissolved ? phys.chunkDissolved.slice() : null
+            R.frames.push({ pos, bonds, strain, t, e, dissolved })
             if (R.frames.length > REPLAY_MAX) { R.frames = R.frames.filter((_, k) => k % 2 === 0); R.every *= 2 }
             if (replayInfoRefRef.current) replayInfoRefRef.current.current = R.frames
             if (nowMs - R.lastNotify > 400) { R.lastNotify = nowMs; onReplayReadyRef.current?.(R.frames.length) }
