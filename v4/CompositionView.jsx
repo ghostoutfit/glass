@@ -5,7 +5,7 @@ import { initPhysics, stepPhysics, setSiOr0,
          setNaAnchorK, setNaLiberateFrac, setNaBreakStrain, setLatticeSpeedMult, setFreedSpeedMult,
          resetLibStats, getLibStats, measureStrain95, meltStructure, setUseEmaStrain,
          verifyHashPairs, setMeltHash, setCoolBondScale, restoreMelt } from './meltPhysics.js'
-import { drawScene, setVisualScale, findAtomNear, getVisualScale, getLastHudLines, effectiveDpr } from './renderer.js'
+import { drawScene, QTY_COLORS, setVisualScale, findAtomNear, getVisualScale, getLastHudLines, effectiveDpr } from './renderer.js'
 import { buildGrid, buildAllAtoms } from './meltGrid.js'
 import { T as GT } from './glassTemps.js'
 import { MELT_CANDIDATES } from './candidates.melt.generated.js'   // precomputed catch-up states (bundled)
@@ -120,26 +120,26 @@ function drawTEGraph(canvas, hist, darkMode = true, eMax = 4e-3, targetTempLine 
   const pw = w - pL - pR, ph = h - pT - pB
 
   const tMax = 1800
-  const ink     = darkMode ? '#999' : '#666'   // matches sidebar 'Energy in fields' label
-  const axisCol = darkMode ? '#888' : '#999'
 
   ctx.clearRect(0, 0, w, h)
   ctx.fillStyle = darkMode ? 'rgba(8,6,4,0.82)' : 'rgba(224,219,210,0.95)'   // off-white, matches viz-panel
   ctx.fillRect(0, 0, w, h)
 
-  // Axes
-  ctx.strokeStyle = axisCol; ctx.lineWidth = 1
-  ctx.beginPath()
-  ctx.moveTo(pL, pT); ctx.lineTo(pL, pT + ph)
-  ctx.lineTo(pL + pw, pT + ph)
-  ctx.stroke()
+  // Axes — colour-coded to match the ENERGY / TEMP labels above the toolbar LCDs (QTY_COLORS):
+  // y (temperature) warm, x (energy) blue.
+  const eCol = darkMode ? QTY_COLORS.energy.dark : QTY_COLORS.energy.light
+  const tCol = darkMode ? QTY_COLORS.temp.dark   : QTY_COLORS.temp.light
+  ctx.lineWidth = 1
+  ctx.strokeStyle = tCol; ctx.beginPath(); ctx.moveTo(pL, pT); ctx.lineTo(pL, pT + ph); ctx.stroke()
+  ctx.strokeStyle = eCol; ctx.beginPath(); ctx.moveTo(pL, pT + ph); ctx.lineTo(pL + pw, pT + ph); ctx.stroke()
 
   // Axis labels (2× size, high contrast)
-  ctx.fillStyle = ink; ctx.font = "bold 14px Lexend, system-ui, sans-serif"; ctx.textAlign = 'right'; ctx.textBaseline = 'middle'
+  ctx.fillStyle = tCol; ctx.font = "bold 14px Lexend, system-ui, sans-serif"; ctx.textAlign = 'right'; ctx.textBaseline = 'middle'
   ctx.fillText(String(tMax), pL - 4, pT + 2)
   ctx.fillText('0', pL - 4, pT + ph)
-  ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'
+  ctx.fillStyle = eCol; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'
   ctx.fillText('energy added / particle', pL + pw / 2, h - 4)
+  ctx.fillStyle = tCol
   ctx.save(); ctx.translate(14, pT + ph / 2); ctx.rotate(-Math.PI / 2)
   ctx.textBaseline = 'alphabetic'
   ctx.fillText('Temp °C', 0, 0)

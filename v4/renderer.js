@@ -69,6 +69,13 @@ function visOffset(p, scale) {
 }
 export const getVisualScale = () => _visualScale
 
+// Quantity colours shared by the toolbar readout labels (ENERGY / TEMP) and the graph axes, so the
+// label above each LCD matches its axis. Muted on purpose — a subtle cue, not a highlight.
+export const QTY_COLORS = {
+  energy: { light: 'rgba(40,100,150,0.88)', dark: '#86b6dc' },   // x-axis: energy added
+  temp:   { light: 'rgba(165,72,40,0.88)',  dark: '#e3967a' },   // y-axis: temperature
+}
+
 export const C = {
   Si:  '#d4a020',   // gold  — network former
   O:   '#cc3a3a',   // red

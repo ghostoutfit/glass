@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useRef } from 'react'
 import CompositionView from './CompositionView'
 import { initParticles, stepPhysics, stepFloorPhysics, PARTICLE_R, FIXED_DT, T_RIGID, freezeParticles, syncParticlesToRigidBody, stepRigidBody } from './glassPhysics.js'
 import { setSioHotMult, setFreeAttractSiOMult, setSioExclMult, setCrystJiggleMult, setBreakStrain, setReformStrain, setCrystAnchorK, setLiberateFrac, setSioK, setNaOK, setNaAnchorK, setNaLiberateFrac, setNaBreakStrain, setLatticeSpeedMult, setFreedSpeedMult, setReintBondN, setReintFrameM, setBreakStrainSpread, setSevTriggerDist, setGrainFeedback, setBondLockTemp, setCrystTemplate, setTemplK, setTemplHi, setTemplReint, setFeedbackGainMult, setSiSiRepR0, setMotifStrength, setMotifAlign, setBondStiffMult, setFreedTau, setNaNaRepR0, setSevCooldown, setSevPullK } from './meltPhysics.js'
-import { setVisualScale, setMaxDpr, effectiveDpr, setMotionCold, setMotionFullT } from './renderer.js'
+import { setVisualScale, setMaxDpr, effectiveDpr, setMotionCold, setMotionFullT, QTY_COLORS } from './renderer.js'
 import { initSandParticles, stepSandPhysics, mergeSodaGrains, mergeSilicateGrains, convertLargeNaGrains, stepNaBlobSprings, checkNaBlobMerges, absorbNearbyGrains, snapshotSand, restoreSand, GRAIN_R as SAND_GRAIN_R, NA_BLOB_R_CTR } from './sandPhysics.js'
 import { T as GT } from './glassTemps.js'
 import { BULK_CANDIDATES } from './candidates.generated.js'   // precomputed melt snapshots (dev-regenerated, bundled)
@@ -2118,7 +2118,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 72</span>
+                  }}>Field Test Version 73</span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),
@@ -2176,7 +2176,7 @@ export default function GlassViewer() {
                   <div className="toolbar-divider" />
                   {/* Readout labels sit ABOVE the LCDs (absolute — the toolbar height doesn't change) */}
                   <div style={{ position:'relative' }}>
-                  <span style={{position:'absolute', bottom:'100%', left:0, right:0, marginBottom:2, textAlign:'center', whiteSpace:'nowrap', fontSize:13, fontWeight:700, letterSpacing:'0.08em', textTransform:'uppercase', color:'rgba(30,45,60,0.70)', pointerEvents:'none'}}>Energy</span>
+                  <span style={{position:'absolute', bottom:'100%', left:0, right:0, marginBottom:2, textAlign:'center', whiteSpace:'nowrap', fontSize:13, fontWeight:700, letterSpacing:'0.08em', textTransform:'uppercase', color:QTY_COLORS.energy.light, pointerEvents:'none'}}>Energy</span>
                   <div style={lcdStyle}>
                     <span style={{visibility:'hidden', display:'block', padding:'3px 6px'}}>9999</span>
                     <span style={{position:'absolute', inset:0, padding:'3px 6px', color:'rgba(60,60,60,0.15)', textAlign:'right'}}>8888</span>
@@ -2185,7 +2185,7 @@ export default function GlassViewer() {
                   </div>
                   <span style={{fontSize:12, fontWeight:700, color:'rgba(30,45,60,0.70)'}}>kJ</span>
                   <div style={{ position:'relative' }}>
-                  <span style={{position:'absolute', bottom:'100%', left:0, right:0, marginBottom:2, textAlign:'center', whiteSpace:'nowrap', fontSize:13, fontWeight:700, letterSpacing:'0.08em', textTransform:'uppercase', color:'rgba(30,45,60,0.70)', pointerEvents:'none'}}>Temp</span>
+                  <span style={{position:'absolute', bottom:'100%', left:0, right:0, marginBottom:2, textAlign:'center', whiteSpace:'nowrap', fontSize:13, fontWeight:700, letterSpacing:'0.08em', textTransform:'uppercase', color:QTY_COLORS.temp.light, pointerEvents:'none'}}>Temp</span>
                   <div style={lcdStyle}>
                     <span style={{visibility:'hidden', display:'block', padding:'3px 6px'}}>1800</span>
                     <span style={{position:'absolute', inset:0, padding:'3px 6px', color:'rgba(60,60,60,0.15)', textAlign:'right'}}>1800</span>
