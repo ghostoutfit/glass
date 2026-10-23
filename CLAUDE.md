@@ -695,7 +695,7 @@ break in bulk — no separate subtraction term.
 
 ## Severance
 
-A freed Na⁺ or Ca²⁺ (`intactCount === 0`) within `_sevTriggerDist` (13 px) of **either** endpoint
+A freed Na⁺ or Ca²⁺ (`intactCount === 0`) within `_sevTriggerDist` (14 px) of **either** endpoint
 of an intact Si-O rigid bond breaks it, sets `rb.severFrames = _sevCooldown` (60) and registers
 a `phys.sevPulls` entry that drags the O toward the ion with strength `_sevPullK` (0.01).
 
@@ -964,7 +964,7 @@ Rules this layout depends on:
 | Na break strain | 0.005–0.15 | 0.02 | `_naBreakStrain` |
 | Feedback gain × | 0–200 | 40 | `_feedbackGainMult` |
 | Intact bond stiffness × | 0–5 | 1.0 | `_bondStiffMult` |
-| Sev trigger dist | 5–20 px | 13 | `_sevTriggerDist` |
+| Sev trigger dist | 5–20 px | 14 | `_sevTriggerDist` |
 | Sev cooldown | 0–300 steps | 60 | `_sevCooldown` |
 | Sev pull (ion→O) | 0–0.05 | 0.01 | `_sevPullK` |
 | Freed speed × | 0.25–15 | 5 | `_freedSpeedMult` |

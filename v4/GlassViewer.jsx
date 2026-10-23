@@ -607,7 +607,7 @@ export default function GlassViewer() {
   const [meanAvgStrain,  setMeanAvgStrain]  = useState(0)
   const [meanEffThreshold, setMeanEffThreshold] = useState(0)
   const [useEmaStrain,   setUseEmaStrain]   = useState(false)
-  const [sevTriggerDist, setSevTriggerDistState] = useState(13)
+  const [sevTriggerDist, setSevTriggerDistState] = useState(14)
   const [feedbackGainMult, setFeedbackGainMultState] = useState(40)
   const [sevFireRate,    setSevFireRate]    = useState(0)
   const [simSpeed, setSimSpeed]   = useState(0.3)   // was 0.5; hash ~2× the frame rate, so the
@@ -2092,7 +2092,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 59</span>
+                  }}>Field Test Version 60</span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),

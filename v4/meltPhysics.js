@@ -62,7 +62,7 @@ let _naLiberateFrac  = 0.5   // liberation fraction for Na2O atoms
 let _naBreakStrain   = 0.02  // break strain for Na-O bonds (independent of Si-O _breakStrain)
 let _breakStrainSpread = 0.15 // per-bond random ± factor drawn at buildRigidBondMap; 0 = uniform
 let _useEmaStrain     = false // true = EMA-smoothed strain for break check; false = instantaneous
-let _sevTriggerDist   = 13   // px — freed modifier ion must be within this distance of a Si or O to sever the Si-O bond
+let _sevTriggerDist   = 14   // px (was 13 — nudged so mix-composition sand grains break up a little easier) — freed modifier ion must be within this distance of a Si or O to sever the Si-O bond
 // Feedback loop calibration: GAIN interpolated on sio2Pct between soda (70%) and silica (100%)
 const FEEDBACK_GAIN_SODA   = 0.437  // 70% SiO2 / 30% Na2O: f=0 at 500°C, f=1 at 1322°C
 // Si-O XPBD projection holds grains rigid up to this temperature. Pure sand (100% SiO₂) is set
