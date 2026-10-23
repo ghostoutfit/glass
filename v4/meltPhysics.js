@@ -69,6 +69,10 @@ let _templK           = 0.05   // pull strength toward the assigned lattice site
 let _templHi          = 1200   // °C: template starts ramping in (slow cool only)
 let _templLo          = 700    // °C: full strength
 let _templReint       = 300    // °C: slow+template — re-integration (bond locking) waits until atoms have reached their sites
+// Cooling bond lock: at _bondLockTemp during a fast/slow cool every bond present is locked in as a
+// rigid bond (measured length), melted Na gets 2–3 bonds to nearby O, and nothing breaks/forms
+// after — no flashing bonds or jitter in the cooled solid. Released if T rises 50 °C above it.
+let _bondLockTemp     = 400
 let _grainFeedback    = true // Si-O break feedback per GRAIN (true) vs global (false) — see bond breaking
 let _sevTriggerDist   = 13   // px — freed modifier ion must be within this distance of a Si or O to sever the Si-O bond
 // Feedback loop calibration: GAIN interpolated on sio2Pct between soda (70%) and silica (100%)
@@ -109,6 +113,7 @@ export const setBreakStrainSpread  = v => { _breakStrainSpread = v }
 export const setUseEmaStrain       = v => { _useEmaStrain = v }
 export const setSevTriggerDist     = v => { _sevTriggerDist = v }
 export const setGrainFeedback      = v => { _grainFeedback = !!v }
+export const setBondLockTemp       = v => { _bondLockTemp = v }
 export const setCrystTemplate      = v => { _crystTemplate = !!v }
 export const setTemplK             = v => { _templK = v }
 export const setTemplHi            = v => { _templHi = v }
@@ -786,6 +791,76 @@ function assignTemplate(phys) {
   }
 }
 
+// Build the cooled-solid bond lock (see _bondLockTemp). Called once, when a cool crosses the lock
+// temperature. Locked set = every intact rigid bond + every currently-drawn dynamic bond, except
+// melted Na's: each melted Na instead bonds to its 2–3 nearest O within 17 px, preferring
+// non-bridging O (one Si) — where Na sits in a silicate — with each O taking at most 2 Na. New
+// bonds become rigid at their MEASURED length (no snap). Every atom re-joins the lattice anchored
+// where it is (or at its crystal-template site), so the cold-motion render ramp calms it too.
+function lockCooledBonds(phys, coolingMode) {
+  const P = phys.particles, n = P.length, ef = phys.everFreed ?? new Uint8Array(n)
+  const key = (a, b) => Math.min(a, b) * n + Math.max(a, b)
+  const meltedNa = i => P[i].typeId === 2 && ef[i]
+  const locked = new Map()   // key → {i, j}
+  for (const b of phys.bonds ?? []) {
+    if (b.broken) continue
+    if (meltedNa(b.i) || meltedNa(b.j)) continue
+    locked.set(key(b.i, b.j), { i: Math.min(b.i, b.j), j: Math.max(b.i, b.j) })
+  }
+  // Na → 2–3 O
+  const siOf = new Int32Array(n), naOf = new Int32Array(n)
+  for (const { i, j } of locked.values()) if (P[i].typeId + P[j].typeId === 1) { siOf[i]++; siOf[j]++ }
+  // Pass 1: up to 3 O within 17 px (each O ≤ 2 Na). Pass 2, for Na still under 2 bonds: reach
+  // 24 px, O ≤ 3 Na, and those bonds lock slightly SHORT (≤14 px) so the lonely Na eases in.
+  const shortR0 = new Map()
+  const naBonds = new Int32Array(n)
+  const pick = (a, R, oCap, want, shortCap) => {
+    const c = []
+    for (let o = 0; o < n; o++) {
+      if (P[o].typeId !== 1 || naOf[o] >= oCap || locked.has(key(a, o))) continue
+      const dx = miDx(P[o].x - P[a].x); if (dx > R || dx < -R) continue
+      const d = Math.hypot(dx, miDy(P[o].y - P[a].y)); if (d > R) continue
+      c.push([d + (siOf[o] >= 2 ? 3 : 0), o, d])
+    }
+    c.sort((p, q) => p[0] - q[0])
+    for (let k = 0; k < c.length && naBonds[a] < want; k++) {
+      const o = c[k][1]; naOf[o]++; naBonds[a]++
+      locked.set(key(a, o), { i: Math.min(a, o), j: Math.max(a, o) })
+      if (shortCap && c[k][2] > shortCap) shortR0.set(key(a, o), shortCap)
+    }
+  }
+  for (let a = 0; a < n; a++) if (meltedNa(a)) pick(a, 17, 2, 3, 0)
+  for (let a = 0; a < n; a++) if (meltedNa(a) && naBonds[a] < 2) pick(a, 24, 3, 2, 14)
+  // Rigid-bond list: keep existing rigid bonds that are in the locked set (intact); everything
+  // else rigid is broken and blocked. Add rigid bonds for new locked pairs at measured length.
+  const have = new Set()
+  for (const rb of phys.rigidBonds) {
+    const k = key(rb.i, rb.j)
+    if (locked.has(k)) { rb.broken = false; have.add(k) }
+    else { rb.broken = true }
+    rb.lockOut = !locked.has(k)
+  }
+  for (const [k, { i, j }] of locked) {
+    if (have.has(k)) continue
+    const spec = PAIR_TABLE[P[i].typeId][P[j].typeId]
+    if (!spec || spec.repOnly) { locked.delete(k); continue }
+    const d = shortR0.get(k) ?? Math.hypot(miDx(P[j].x - P[i].x), miDy(P[j].y - P[i].y))
+    phys.rigidBonds.push({ i, j, r0: d, broken: false, breakable: true, isSiO: spec === PAIR_TABLE[0][1],
+      specMult: spec.mult, bondDepth: 0, breakStrain: 1, projectionCutoff: 9999, avgStrain: 0, promoted: true, lockIn: true })
+  }
+  phys.rigidKeys = new Set(phys.rigidBonds.map(rb => key(rb.i, rb.j)))
+  phys.lockedBonds = [...locked.values()]
+  // Everyone re-joins the lattice, anchored in place (or at its template site).
+  const T = _templCache, tg = (coolingMode === 'slow' && _crystTemplate) ? phys._templTgt : null
+  for (let i = 0; i < n; i++) {
+    const p = P[i]
+    p.x0 = p.x; p.y0 = p.y
+    if (tg && T && tg[i] >= 0) { const t = p.typeId, s = t === 0 ? T.si[tg[i]] : t === 1 ? T.oSite[tg[i]] : t === 2 ? T.ctr[tg[i]] : null; if (s && Math.hypot(miDx(s[0] - p.x), miDy(s[1] - p.y)) < 3) { p.x0 = p.x + miDx(s[0] - p.x); p.y0 = p.y + miDy(s[1] - p.y) } }   // nearest periodic image — the anchor spring isn't wrap-aware
+    phys.latticeFreed[i] = 0
+  }
+  phys.bondLock = true
+}
+
 export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 0, coolingMode = null, speedMult = 1, attractFalloff = 1) {
   const { particles, n, fx, fy } = phys
 
@@ -842,7 +917,16 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
   // grains apart on cooling (180–375 bonds broken).
   const everFreed = phys.everFreed ??= new Uint8Array(n)
   for (let i = 0; i < n; i++) if (latticeFreed[i]) everFreed[i] = 1
-  const coolScaleOf = rb => (!(_crystTemplate && coolingMode === 'slow') && (rb.promoted || everFreed[rb.i] || everFreed[rb.j])) ? _coolBondScale : 1
+  // Cooling bond lock: engage once when a cool crosses _bondLockTemp; release on reheating.
+  if (phys.bondLock && totalEnergy > _bondLockTemp + 50) {
+    phys.bondLock = false; phys.lockedBonds = null
+    for (const rb of phys.rigidBonds ?? []) rb.lockOut = false
+  }
+  if (!phys.bondLock && (coolingMode === 'fast' || coolingMode === 'slow') && totalEnergy <= _bondLockTemp && phys.rigidBonds && phys.bonds) {
+    lockCooledBonds(phys, coolingMode)
+  }
+  const bondLock = !!phys.bondLock
+  const coolScaleOf = rb => (!rb.lockIn && !(_crystTemplate && coolingMode === 'slow') && (rb.promoted || everFreed[rb.i] || everFreed[rb.j])) ? _coolBondScale : 1
   if (phys.rigidBonds) {
     for (const rb of phys.rigidBonds) {
       if (!rb.broken && !rb.breakable) { crystAnchor[rb.i] = 1; crystAnchor[rb.j] = 1 }
@@ -902,7 +986,7 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
   const isCooling = coolingMode === 'fast' || coolingMode === 'slow'
   // Slow-cool crystal template (see buildCrystTemplate). While active it supersedes the motif
   // bias (which only re-angles bonds and can't fix ring topology) and the longer-cooled-bonds.
-  const templActive = _crystTemplate && coolingMode === 'slow' && totalEnergy < _templHi
+  const templActive = _crystTemplate && coolingMode === 'slow' && totalEnergy < _templHi && !phys.bondLock
   const templKEff   = templActive ? _templK * Math.max(0, Math.min(1, (_templHi - totalEnergy) / Math.max(1, _templHi - _templLo))) : 0
   if (templActive) {
     phys._templStep = (phys._templStep ?? 0) + 1
@@ -1292,8 +1376,8 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
       for (let i = 0; i < n; i++) {
         if (crystAnchor[i] || naAnchor[i]) continue
         const p = particles[i]
-        fx[i] -= anchorStr * (p.x - p.x0)
-        fy[i] -= anchorStr * (p.y - p.y0)
+        fx[i] -= anchorStr * miDx(p.x - p.x0)   // wrap-aware: an atom that crosses the box edge
+        fy[i] -= anchorStr * miDy(p.y - p.y0)   // must not be yanked back across the whole box
       }
     }
 
@@ -1306,8 +1390,8 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
     // Freed atoms (latticeFreed=1) are excluded so they can drift once all bonds break.
     for (let i = 0; i < n; i++) {
       if (!crystAnchor[i] || latticeFreed[i]) continue
-      fx[i] -= _crystAnchorK * (particles[i].x - particles[i].x0)
-      fy[i] -= _crystAnchorK * (particles[i].y - particles[i].y0)
+      fx[i] -= _crystAnchorK * miDx(particles[i].x - particles[i].x0)
+      fy[i] -= _crystAnchorK * miDy(particles[i].y - particles[i].y0)
     }
 
     // Na2O anchor: fades from full at 650°C to zero at 1150°C so structure dissolves
@@ -1316,8 +1400,8 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
       const naK = _naAnchorK * naAnchorFrac
       for (let i = 0; i < n; i++) {
         if (!naAnchor[i] || latticeFreed[i]) continue
-        fx[i] -= naK * (particles[i].x - particles[i].x0)
-        fy[i] -= naK * (particles[i].y - particles[i].y0)
+        fx[i] -= naK * miDx(particles[i].x - particles[i].x0)
+        fy[i] -= naK * miDy(particles[i].y - particles[i].y0)
       }
     }
 
@@ -1491,11 +1575,11 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
       }
       const wasBroken = rb.broken
       if (!rb.broken) {
-        if (!bondsFrozen && rb.avgStrain > effThreshold) rb.broken = true
+        if (!bondsFrozen && !bondLock && rb.avgStrain > effThreshold) rb.broken = true
       } else {
         // No net bond formation above the crystallisation lock temperature during cooling —
         // keeps the melt mobile until it is cool enough to crystallise (see CRYST_LOCK).
-        const allowReform = coolingMode === null || totalEnergy < CRYST_LOCK
+        const allowReform = (coolingMode === null || totalEnergy < CRYST_LOCK) && !bondLock && !rb.lockOut
         if (allowReform && strain <= _reformStrain && !(rb.severFrames > 0) && !rb.templConflict) rb.broken = false
       }
       if (rb.broken !== wasBroken) {
@@ -1540,7 +1624,7 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
   // (because the substep loop reads latticeFreed from last step), causing a visible snap.
   // Gate on rigidBonds existing: before buildRigidBondMap all intactCounts are 0 and
   // every atom would be freed spuriously, permanently disabling the crystal anchor spring.
-  if (phys.latticeFreed && phys.rigidBonds) {
+  if (phys.latticeFreed && phys.rigidBonds && !bondLock) {
     const origCount = phys.originalBondCount
     for (let i = 0; i < n; i++) {
       if (phys.latticeFreed[i]) continue
@@ -1567,7 +1651,7 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
   // scrambled melt layout at high T (the bug that made slow look like fast).
   const reintGate = coolingMode === 'slow' && _crystTemplate ? Math.min(CRYST_LOCK, _templReint)
                   : coolingMode !== null ? CRYST_LOCK : sioProjCutoff(phys.sio2Pct ?? 70)
-  const reintActive = totalEnergy < reintGate
+  const reintActive = totalEnergy < reintGate && !bondLock
   if (phys.latticeFreed && phys.rigidBonds && phys.stableBondFrames && reintActive) {
     const sbf = phys.stableBondFrames
     const rrf = phys.reintRampFrames
@@ -1594,7 +1678,7 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
           const tk = (coolingMode === 'slow' && _crystTemplate && phys._templTgt) ? phys._templTgt[i] : -1
           if (tk >= 0 && _templCache) {
             const tid = p.typeId, site = tid === 0 ? _templCache.si[tk] : tid === 1 ? _templCache.oSite[tk] : tid === 2 ? _templCache.ctr[tk] : null
-            if (site) { p.x0 = site[0]; p.y0 = site[1] }
+            if (site) { p.x0 = p.x + miDx(site[0] - p.x); p.y0 = p.y + miDy(site[1] - p.y) }   // nearest periodic image (anchor spring isn't wrap-aware)
           }
           promoteBonds(phys, i)
         }
@@ -1629,7 +1713,7 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
     const isFreedNa2O = naAnchor[i] && intactCount[i] === 0
     const isFreedSiO2 = crystAnchor[i] && latticeFreed[i] &&
       Math.hypot(miDx(pi.x - pi.x0), miDy(pi.y - pi.y0)) > FREED_DRIFT_MIN
-    if (!isFreedNa2O && !isFreedSiO2) continue
+    if (bondLock || (!isFreedNa2O && !isFreedSiO2)) continue
     // Measure liberator's distance to its nearest own-bond partner (for Na2O: its O bond).
     let dLiberatorBond = -1
     if (isFreedNa2O && phys.rigidBonds) {
@@ -1682,7 +1766,7 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
   // ── Si-O bond severance by modifier ion contact ──────────────────────────
   // A freed Na⁺ or Ca²⁺ within _sevTriggerDist px of either endpoint of an intact Si-O bond severs it.
   let sevFiresThisStep = 0
-  if (phys.rigidBonds) {
+  if (phys.rigidBonds && !bondLock) {
     for (const rb of phys.rigidBonds) {
       if (!rb.isSiO || rb.broken) continue
       const pi = particles[rb.i], pj = particles[rb.j]
@@ -1752,6 +1836,14 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
   }
 
   // ── Bond detection for rendering ─────────────────────────────────────────
+  // Bond lock: draw exactly the locked set — no per-frame detection, so nothing flashes.
+  if (bondLock && phys.lockedBonds) {
+    phys.bonds = phys.lockedBonds.map(({ i, j }) => {
+      const d = Math.hypot(miDx(particles[j].x - particles[i].x), miDy(particles[j].y - particles[i].y))
+      const spec = PAIR_TABLE[particles[i].typeId][particles[j].typeId]
+      return { i, j, strain: spec ? (d - spec.r0) / spec.r0 : 0, currentBreakStrain: 0.25, broken: false }
+    })
+  } else {
   // All rigid bonds render until atoms separate past the alpha-fade range (40 px).
   // Broken bonds stay in the list so atoms visibly stretch pink then fade — not snap off.
   // All rigid pairs are excluded from the dynamic scan to prevent double-counting.
@@ -1804,6 +1896,7 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
     bonds.push(b)
   }
   phys.bonds = bonds
+  }
 
   // ── Debug snapshot (read via window.meltDebug()) ──────────────────────────
   if (!phys.dbg) phys.dbg = {}

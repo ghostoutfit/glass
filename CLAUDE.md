@@ -859,6 +859,23 @@ panel → "Tune these"):
   Headless 1440-step slow cool: 93 % of assigned Si on-site, 50 % in 6-rings, ~50/80 Na in ring
   centres. Headless harness + PNG renders were throwaway scratchpad scripts.
 
+### v4: cooling bond lock (fast + slow)
+
+At `_bondLockTemp` (400 °C; dev panel "Tune these") a fast or slow cool runs `lockCooledBonds`
+once: the locked set = every intact rigid bond + every drawn dynamic bond, except melted Na, which
+instead bonds to its 2–3 nearest O within 17 px (non-bridging O preferred, ≤2 Na per O; a second
+pass reaches 24 px with bonds locked ≤14 px so a lonely Na eases in). New pairs become rigid bonds
+at MEASURED length (`lockIn`, never ×1.1-scaled); other rigid bonds are broken + `lockOut`. All
+atoms re-join the lattice anchored in place (or at their template site). While `phys.bondLock`:
+no strain breaks, no reform, no auto-free, no contact liberation, no severance, no re-integration,
+template off, and `phys.bonds` IS the locked list (no per-frame detection). Released at +50 °C.
+Real app: 0 bond changes over 60 frames after cooling (was 6–77 flips/step through 700→400);
+~74/80 Na hold 2–3 bonds.
+
+Also made wrap-aware here (they weren't, and anchoring after the lock exposed it): the three anchor
+springs (`miDx(p.x − p.x0)`) and the renderer's `visOffset` / bond midpoints / `r0s`. An atom that
+crossed the box edge was yanked ~100 px back across it and drawn as a streak.
+
 ### Other cooling behaviour
 
 - The freed-atom kick multiplier fades from `_freedSpeedMult` to `_latticeSpeedMult` as the

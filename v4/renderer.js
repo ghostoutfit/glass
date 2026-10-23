@@ -61,7 +61,7 @@ export const setMotionFullT = v => { _motionFullT = v }
 // 5px drew 16px away and its bonds to freed neighbours looked ~3× too long.
 const JIGGLE_PX = 1.5
 function visOffset(p, scale) {
-  const dx = p.x - p.x0, dy = p.y - p.y0
+  const dx = riDx(p.x - p.x0), dy = riDy(p.y - p.y0)   // wrap-aware (atom may have crossed the box edge)
   const d  = Math.hypot(dx, dy)
   if (d < 1e-9) return [0, 0]
   const k = (d + (scale - 1) * Math.min(d, JIGGLE_PX)) / d
@@ -386,10 +386,10 @@ export function drawScene(canvas, phys, {
       if (da <= 0) continue
       fctx.globalAlpha = da
       const iFreed = latticeFreed?.[bond.i], jFreed = latticeFreed?.[bond.j]
-      const pix = iFreed ? pi.x : (pi.x + pi.x0) * 0.5
-      const piy = iFreed ? pi.y : (pi.y + pi.y0) * 0.5
-      const pjx_raw = jFreed ? pj.x : (pj.x + pj.x0) * 0.5
-      const pjy_raw = jFreed ? pj.y : (pj.y + pj.y0) * 0.5
+      const pix = iFreed ? pi.x : pi.x0 + riDx(pi.x - pi.x0) * 0.5   // wrap-aware midpoints
+      const piy = iFreed ? pi.y : pi.y0 + riDy(pi.y - pi.y0) * 0.5
+      const pjx_raw = jFreed ? pj.x : pj.x0 + riDx(pj.x - pj.x0) * 0.5
+      const pjy_raw = jFreed ? pj.y : pj.y0 + riDy(pj.y - pj.y0) * 0.5
       const sdx = riDx(pjx_raw - pix), sdy = riDy(pjy_raw - piy)
       // r0s path: midpoint-averaged distance vs. original lattice separation.
       // Correct for lattice-lattice pairs and mixed (one freed) rigid bonds — r0s ≈ spec.r0
@@ -399,7 +399,7 @@ export function drawScene(canvas, phys, {
       // Guard: only bypass r0s when BOTH atoms are freed (the only case where r0s is meaningless).
       const smoothStrain = (iFreed && jFreed)
         ? (bond.strain ?? 0)
-        : (() => { const r0s = Math.hypot(pj.x0 - pi.x0, pj.y0 - pi.y0); return r0s > 0.5 ? (Math.hypot(sdx, sdy) - r0s) / r0s : (bond.strain ?? 0) })()
+        : (() => { const r0s = Math.hypot(riDx(pj.x0 - pi.x0), riDy(pj.y0 - pi.y0)); return r0s > 0.5 ? (Math.hypot(sdx, sdy) - r0s) / r0s : (bond.strain ?? 0) })()
       // Thermal fade: the pink shows bond energy, which falls with temperature. Fade to grey
       // across 750→500°C (gray below 500), independent of strain, so a cooled solid is grey.
       // Bonds fade from pink (energetic) to grey across 650→500°C — the window where the
