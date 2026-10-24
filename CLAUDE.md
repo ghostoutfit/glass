@@ -1179,13 +1179,16 @@ Reads `countBonds(phys)`, throttled to a 300 ms minimum interval.
 `rb.isSiO` first, then Na (typeId 2), then Ca (typeId 3). It does **not** count dynamic melt
 bonds, and it does not read `phys.bonds`.
 
+Same two rows for heating and cooling (no row appears/disappears when a run starts):
+
 | Row | Meaning |
 |---|---|
-| Before | `initialBondCounts`, captured on the first callback after physics settles |
-| Now | current live count |
-| Broken | `max(0, before − now)` |
-| Total | this type's share of all broken bonds |
-| Run Δ | signed delta from `modeBondCounts` (captured at cooling/heating mode entry); green = forming, red = breaking; only shown while a mode is active |
+| Bonds | live intact count (big), and below it that as a % of `initialBondCounts` — the ORIGINAL solid (first callback after physics settles). Fixed denominator for the whole trip, so heat and cool runs compare directly. Can pass 100 % after cooling: the cooled glass bonds across what were separate sand grains (mix fast cool measured Si-O 102 %, Na-O 80 %) |
+| Change | signed `now − bondRef.counts` (green = forming, red = breaking), with "from N%" (the reference as % of original). Label says "since heat" / "since cool" |
+
+`bondRef` = {phase, counts}, set by `markBondRun(phase)` on the FIRST Heat / Go-to of a trip
+('heat') and the first Cool ('cool'); stop/restart within a run keeps it. Reset / composition clears
+it ("no run yet", dashes).
 
 Na-O and Ca-O columns only appear when `initial.nao.total > 0` / `initial.cao.total > 0`.
 

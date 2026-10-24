@@ -833,11 +833,13 @@ export default function GlassViewer() {
   const [showMiniView, setShowMiniView] = useState(false)
   const [bondCounts,        setBondCounts]        = useState(null)
   const [initialBondCounts, setInitialBondCounts] = useState(null)
-  const [modeBondCounts,    setModeBondCounts]    = useState(null)
+  // Bond-count reference for the "Change" row: counts at the moment the current run began, and which
+  // run ('heat' | 'cool'). Set once per run (stop/restart keeps it); cleared by Reset / composition.
+  const [bondRef,           setBondRef]           = useState(null)
+  const bondPhaseRef           = useRef(null)
   const strainUpdateTimeRef    = useRef(0)
   const initialBondCapturedRef = useRef(false)
   const bondCountsRef          = useRef(null)
-  const prevCoolingModeRef     = useRef(null)
   const [replayFrameCount, setReplayFrameCount] = useState(0)
   const [replayFrame, setReplayFrame]     = useState(null)
   const [replayPlaying, setReplayPlaying] = useState(false)   // false | 'slow' (turtle) | 'fast' (rabbit)
@@ -1181,15 +1183,23 @@ export default function GlassViewer() {
     setReplayPlaying(speed)
   }, [replayPlaying, replayFrame, replayFrameCount])
   const handleTempUpdate   = useCallback(v => { setMeltLocalTemp(v); meltTempRef.current.temp = v }, [])
+  // New run (first Heat / Go-to of a trip, or the first Cool) → the bond counts right now become the
+  // reference the "Change" row measures from.
+  const markBondRun = useCallback(phase => {
+    if (bondPhaseRef.current === phase || !bondCountsRef.current) return
+    bondPhaseRef.current = phase
+    setBondRef({ phase, counts: bondCountsRef.current })
+  }, [])
   const onGoTemp = useCallback(() => {
     const v = Math.max(0, Math.min(1800, Math.round(+gotoTemp)))
     if (!Number.isFinite(v)) return
     if (coolLockedRef.current) return   // a committed cool run owns the temperature until reset
+    markBondRun('heat')
     setMeltHeatMode(null); setCoolingMode(null)
     // Ramp to the target via the heat-capacity integrator (same rate as Fast Heat / cool).
     gotoTargetRef.current = v; setGotoTargetTemp(v)
     meltSimRef.current.energyInput = v > meltTempRef.current.temp ? 100 : v < meltTempRef.current.temp ? -100 : 0
-  }, [gotoTemp])
+  }, [gotoTemp, markBondRun])
   const handleEnergyUpdate = useCallback((_ke, _pe, t, e, fb, mas, sfr, met, mxs) => {
     setDerivedTemp(t)
     if (e   !== undefined) setTargetE(e)
@@ -1228,6 +1238,7 @@ export default function GlassViewer() {
 
   const startCooling = useCallback(mode => {
     if (coolLockedRef.current && coolLockedRef.current !== mode) return   // no switching speed mid-run
+    markBondRun('cool')
     coolLockedRef.current = mode; setCoolLocked(mode)
     heatLockedRef.current = true; setHeatLocked(true)   // cooling is one-way: heat stays off until reset
     setReplayFrame(null); setReplayPlaying(false)   // back to LIVE (history keeps recording)
@@ -1239,10 +1250,11 @@ export default function GlassViewer() {
       meltSimRef.current.energyInput = 0
       return next
     })
-  }, [])
+  }, [markBondRun])
 
   const toggleMeltHeat = useCallback(mode => {
     if (heatLockedRef.current) return
+    markBondRun('heat')
     setCoolingMode(prev => { if (prev) meltSimRef.current.energyInput = 0; return null })
     setMeltHeatMode(prev => {
       const next = prev === mode ? null : mode
@@ -1250,7 +1262,7 @@ export default function GlassViewer() {
       meltSimRef.current.energyInput = next === 'fast' ? 100 : next === 'slow' ? 50 : 0
       return next
     })
-  }, [])
+  }, [markBondRun])
 
   const handleBondCounts = useCallback(counts => {
     setBondCounts(counts)
@@ -1261,15 +1273,6 @@ export default function GlassViewer() {
     }
   }, [])
 
-  // Capture mode baseline when entering a heating/cooling run; clear on null mode
-  useEffect(() => {
-    if (coolingMode !== null && coolingMode !== prevCoolingModeRef.current) {
-      setModeBondCounts(bondCountsRef.current)
-    } else if (coolingMode === null) {
-      setModeBondCounts(null)
-    }
-    prevCoolingModeRef.current = coolingMode
-  }, [coolingMode])
 
   // ── Glass / box canvas loop — canvas always mounted so RAF never drops ────
   useEffect(() => {
@@ -2402,7 +2405,7 @@ export default function GlassViewer() {
     meltCumulativeEnergyRef.current = 0
     setMeltLocalTemp(MELT_START_TEMP); setDerivedTemp(MELT_START_TEMP)
     // particle counts / bonds
-    setBondCounts(null); setInitialBondCounts(null); setModeBondCounts(null)
+    setBondCounts(null); setInitialBondCounts(null); setBondRef(null); bondPhaseRef.current = null
     initialBondCapturedRef.current = false
     bondCountsRef.current = null
     // box particle arrangement → rebuild; rotation → home
@@ -2502,7 +2505,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 93
+                  }}>Field Test Version 94
                     {/* Quality: set by the startup speed test (bonds' benchmark), auto-adjusted at
                         runtime; a manual pick becomes the ceiling. */}
                     <select value={quality} onChange={e => pickQuality(e.target.value)}
@@ -2758,7 +2761,6 @@ export default function GlassViewer() {
             {/* Bond count table — mirrors concrete v4 layout (Particles tab only) */}
             {tab === 'melt' && showCount && bondCounts && (() => {
               const initial = initialBondCounts ?? bondCounts
-              const tested  = initialBondCounts !== null
               const cols = [
                 { key: 'sio', label: 'Si-O', color: '#d4a020', typeA: 'Si', rA: 5,   typeB: 'O', rB: 3.5 },
                 initial.nao.total > 0
@@ -2769,16 +2771,30 @@ export default function GlassViewer() {
                   : null,
               ].filter(Boolean)
 
-              const colData = cols.map(({ key, label, color, typeA, rA, typeB, rB }) => ({
-                key, label, color, typeA, rA, typeB, rB,
-                before:    initial[key].intact,
-                now:       bondCounts[key].intact,
-                broken:    Math.max(0, initial[key].intact - bondCounts[key].intact),
-                modeDelta: modeBondCounts ? bondCounts[key].intact - modeBondCounts[key].intact : null,
-              }))
-              const totalBroken = colData.reduce((s, d) => s + d.broken, 0)
-              const gridCols = `42px ${cols.map(() => '0.9fr').join(' ')}`
-              const rowLabelStyle = { fontSize: 13, letterSpacing: '0.07em', color: darkMode ? '#888' : '#666', fontFamily: 'system-ui, sans-serif' }
+              // Same two rows on heating and cooling:
+              //  · Bonds  — intact bonds now, and that as a % of the ORIGINAL solid's bonds (fixed
+              //             denominator for the whole trip, so heat and cool runs are comparable)
+              //  · Change — signed change since the current run began ("since heat" / "since cool"),
+              //             with the % it started from. Cooling resets the reference, no new row.
+              const run = bondRef?.phase ?? null
+              const refCounts = bondRef?.counts ?? null
+              const colData = cols.map(({ key, label, color, typeA, rA, typeB, rB }) => {
+                const orig = initial[key].intact, now = bondCounts[key].intact
+                const from = refCounts ? refCounts[key].intact : null
+                return {
+                  key, label, color, typeA, rA, typeB, rB, now,
+                  pct:    orig > 0 ? now / orig * 100 : null,
+                  delta:  from != null ? now - from : null,
+                  fromPct: from != null && orig > 0 ? from / orig * 100 : null,
+                }
+              })
+              const gridCols = `52px ${cols.map(() => '0.9fr').join(' ')}`
+              const rowLabelStyle = { fontSize: 13, letterSpacing: '0.07em', color: darkMode ? '#888' : '#666', fontFamily: 'system-ui, sans-serif', lineHeight: 1.1 }
+              const runColor = run === 'heat' ? (darkMode ? '#e8a060' : '#b8662a') : run === 'cool' ? (darkMode ? '#70b0e8' : '#2a6ea8') : (darkMode ? '#666' : '#999')
+              const numStyle = (color, bold) => ({ fontSize: 22, fontVariantNumeric: 'tabular-nums', color, fontWeight: bold ? 700 : 500, lineHeight: 1.1, fontFamily: 'system-ui, sans-serif', whiteSpace: 'nowrap' })
+              const subStyle = color => ({ fontSize: 15, color, opacity: 0.75, fontVariantNumeric: 'tabular-nums', lineHeight: 1.1, fontFamily: 'system-ui, sans-serif', whiteSpace: 'nowrap' })
+              const dash = <span style={{ fontSize: 21, color: darkMode ? '#333' : '#bbb', fontFamily: 'system-ui, sans-serif' }}>—</span>
+              const signColor = v => v > 0 ? '#50c878' : v < 0 ? '#e06060' : '#888'
 
               return (
                 <div style={{ padding: '2px 6px', display: 'flex', flexDirection: 'column', gap: 0 }}>
@@ -2797,42 +2813,27 @@ export default function GlassViewer() {
                     ))}
                   </div>
                   {/* Value rows */}
-                  {[
-                    { key: 'before', label: 'Before', getCell: d => ({ val: d.before }) },
-                    { key: 'now',    label: 'Now',    getCell: d => ({ val: tested ? d.now : null }) },
-                    { key: 'broken', label: 'Broken', getCell: d => ({
-                      val: tested ? d.broken : null,
-                      pct: tested && d.before > 0 ? d.broken / d.before * 100 : null,
-                      bold: true,
-                    }) },
-                    { key: 'total', label: 'Total', getCell: d => ({
-                      pct: tested && totalBroken > 0 ? d.broken / totalBroken * 100 : null,
-                    }) },
-                    modeBondCounts ? { key: 'modeDelta', label: 'Run Δ', getCell: d => ({
-                      val: d.modeDelta,
-                      signed: true,
-                    }) } : null,
-                  ].filter(Boolean).map(({ key, label, getCell }) => (
-                    <div key={key} style={{ display: 'grid', gridTemplateColumns: gridCols, gap: 0, alignItems: 'baseline', marginBottom: 3 }}>
-                      <span style={rowLabelStyle}>{label}</span>
-                      {colData.map(d => {
-                        const { val, pct, bold, signed } = getCell(d)
-                        const signedColor = signed && val != null
-                          ? val > 0 ? '#50c878' : val < 0 ? '#e06060' : (darkMode ? '#888' : '#888')
-                          : d.color
-                        const signedLabel = signed && val != null
-                          ? (val > 0 ? '+' : '') + val
-                          : val
-                        return (
-                          <div key={d.key} style={{ textAlign: 'center' }}>
-                            {val != null && <div style={{ fontSize: 22, fontVariantNumeric: 'tabular-nums', color: signed ? signedColor : d.color, fontWeight: bold ? 700 : 500, lineHeight: 1.1, fontFamily: 'system-ui, sans-serif' }}>{signedLabel}</div>}
-                            {pct != null && <div style={{ fontSize: 17, color: d.color, opacity: 0.75, fontVariantNumeric: 'tabular-nums', lineHeight: 1.1, fontFamily: 'system-ui, sans-serif' }}>{Math.round(pct)}%</div>}
-                            {val == null && pct == null && <span style={{ fontSize: 21, color: darkMode ? '#333' : '#bbb', fontFamily: 'system-ui, sans-serif' }}>—</span>}
-                          </div>
-                        )
-                      })}
-                    </div>
-                  ))}
+                  <div style={{ display: 'grid', gridTemplateColumns: gridCols, gap: 0, alignItems: 'baseline', marginBottom: 5 }}>
+                    <span style={rowLabelStyle}>Bonds</span>
+                    {colData.map(d => (
+                      <div key={d.key} style={{ textAlign: 'center' }}>
+                        <div style={numStyle(d.color, true)}>{d.now}</div>
+                        {d.pct != null && <div style={subStyle(d.color)}>{Math.round(d.pct)}%</div>}
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: gridCols, gap: 0, alignItems: 'baseline', marginBottom: 3 }}>
+                    <span style={rowLabelStyle}>Change<br /><span style={{ fontSize: 10, letterSpacing: '0.06em', color: runColor, whiteSpace: 'nowrap' }}>{run ? `since ${run}` : 'no run yet'}</span></span>
+                    {colData.map(d => (
+                      <div key={d.key} style={{ textAlign: 'center' }}>
+                        {d.delta == null ? dash : <>
+                          <div style={numStyle(signColor(d.delta), false)}>{(d.delta > 0 ? '+' : d.delta < 0 ? '−' : '') + Math.abs(d.delta)}</div>
+                          {d.fromPct != null && <div style={subStyle(darkMode ? '#999' : '#777')}>from {Math.round(d.fromPct)}%</div>}
+                        </>}
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ fontSize: 10, color: darkMode ? '#666' : '#999', letterSpacing: '0.04em', fontFamily: 'system-ui, sans-serif', marginTop: 1 }}>% = share of the original solid's bonds</div>
                 </div>
               )
             })()}
