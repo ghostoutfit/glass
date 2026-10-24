@@ -944,13 +944,18 @@ export default function GlassViewer() {
   useEffect(() => { boxSimRef.current.sandDevMode = sandDevMode }, [sandDevMode])
   useEffect(() => { boxSimRef.current.showMiniView = showMiniView }, [showMiniView])
   useEffect(() => { tabRef.current = tab }, [tab])
-  // Quality tier → renderer DPR cap, and rebuild the box sim because its grain count
-  // is fixed at init. The melt tab needs no rebuild: nothing tier-dependent is baked in.
+  // Quality tier → renderer DPR cap. Switching tiers must NOT rebuild the Bulk sim: everything
+  // tier-dependent (glow blurs, physics time budget, DPR) is read live each frame, so the current
+  // melt state carries straight over. The one thing baked in at init is the grain count
+  // (sandGrainScale, 1 on every tier today) — rebuild only if that actually changes.
+  const appliedGrainScaleRef = useRef(caps.sandGrainScale ?? 1)
   useEffect(() => {
     capsRef.current = caps
     setMaxDpr(caps.maxDpr)
     const phys = physRef.current
-    if (phys) {
+    const gs = caps.sandGrainScale ?? 1
+    if (phys && gs !== appliedGrainScaleRef.current) {
+      appliedGrainScaleRef.current = gs
       phys.sandParticles = null
       phys.particles     = null
       phys.springs       = null
@@ -2496,7 +2501,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 91
+                  }}>Field Test Version 92
                     {/* Quality: set by the startup speed test (bonds' benchmark), auto-adjusted at
                         runtime; a manual pick becomes the ceiling. */}
                     <select value={quality} onChange={e => pickQuality(e.target.value)}
@@ -2505,7 +2510,7 @@ export default function GlassViewer() {
                         textTransform:'uppercase', fontFamily:'inherit', cursor:'pointer', padding:'1px 2px', borderRadius:3,
                         background:'rgba(255,255,255,0.18)', color: detectPerformanceTier().low && quality === 'simple' ? 'rgba(170,40,30,0.9)' : 'rgba(70,70,70,0.9)',
                         border: detectPerformanceTier().low && quality === 'simple' ? '1px solid rgba(190,60,50,0.55)' : '1px solid rgba(90,90,90,0.35)' }}>
-                      <option value="hires">Hi-res</option>
+                      {detectPerformanceTier().tier !== 'simple' && <option value="hires">Hi-res</option>}
                       <option value="detailed">Detailed</option>
                       <option value="simple">Simple</option>
                     </select>
@@ -2948,7 +2953,7 @@ export default function GlassViewer() {
                 <span style={{color:'#666'}}> (speed test {detectPerformanceTier().tier ?? 'n/a'}, trail {detectPerformanceTier().trail?.toFixed(1)} ms; ceiling {adaptRef.current.ceiling})</span>
               </div>
               <div style={{display:'flex', gap:3}}>
-                {['hires','detailed','simple'].map(q => (
+                {(detectPerformanceTier().tier === 'simple' ? ['detailed','simple'] : ['hires','detailed','simple']).map(q => (
                   <button key={q} onClick={() => pickQuality(q)}
                     style={{fontSize:10, padding:'2px 7px', cursor:'pointer', userSelect:'none',
                       background: quality===q ? '#6050a0' : '#2a2a3a',
