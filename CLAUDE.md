@@ -1001,8 +1001,14 @@ selection/hover rings → charge halos → bond-count labels → live-stats HUD.
   (`r0s = hypot(pj.x0 − pi.x0, …)`), which suppresses thermal jitter. The both-freed guard
   matters: melt-formed pairs were never neighbours, so `r0s` can be 50–500 px and would render
   deeply negative strain (solid pink).
-- **Thermal fade.** `thermPink = clamp((targetTempC − 500) / 250)` multiplies strain before
-  colouring, so a cooled solid goes grey across 750 → 500 °C regardless of strain.
+- **Thermal fade.** Heating: `thermPink = clamp((targetTempC − 500) / 150)` multiplies strain
+  before colouring (pink appears 500 → 650 °C). Cooling (`drawScene({ cooling })` — live:
+  `coolRunRef`, replay: frame flag `c`): each bond gets a fixed random slot (`bondSlot(i, j)`, hash
+  of the atom pair) and its own smoothstep fade of width `_pinkFadeW` (150 °C) placed uniformly
+  inside [`_pinkFadeLo` 450, `_pinkFadeHi` 950] — dev sliders. The finished strain colour is
+  BLENDED toward the zero-strain grey (scaling strain instead is invisible on saturated bonds, which
+  made the fade happen all at once at the end). Measured fast cool: strong-pink pixel count starts
+  falling at ~950 °C and is gone by ~500, vs a ~150 °C cliff before.
 - **Broken bonds are not drawn as bonds** — they'd read as long pink streaks. The
   `showBrokenBonds` dev overlay draws them as dashed blue lines instead.
 - `bondCurDistAlpha` fades a bond lens out between 14 px and 25 px of current separation.

@@ -1095,7 +1095,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
           // must never be touched), frozen so the renderer doesn't re-judge it.
           const disp = { ...phys, particles: dps, bonds, latticeFreed: allFreedRef.current,
                          chunkDissolved: fr.dissolved ? fr.dissolved.slice() : undefined, dissolveFrozen: true }
-          drawScene(canvasRef.current, disp, { ts, bondNums: bondNumsRef.current, darkMode: darkModeRef.current, showCharge: showChargeRef.current, chargeLite: chargeLiteRef.current, showField: showFieldRef.current, fieldBlur: fieldBlurRef.current, atomColorMode: atomColorModeRef.current, showBrokenBonds: false, showLiveStats: showLiveStatsRef.current, targetTempC: fr.t, hoverIdx: null, selectedIdx: -1 })
+          drawScene(canvasRef.current, disp, { ts, bondNums: bondNumsRef.current, darkMode: darkModeRef.current, showCharge: showChargeRef.current, chargeLite: chargeLiteRef.current, showField: showFieldRef.current, fieldBlur: fieldBlurRef.current, atomColorMode: atomColorModeRef.current, showBrokenBonds: false, showLiveStats: showLiveStatsRef.current, targetTempC: fr.t, cooling: !!fr.c, hoverIdx: null, selectedIdx: -1 })
           rafRef.current = requestAnimationFrame(frame)
           return
         }
@@ -1115,7 +1115,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
         // Hi-Res interpolation: draw freed atoms `frameAccRef` of the way into the next step
         // (the unconsumed time fraction), so motion is smooth between physics steps. 1 = off.
         const interpAlpha = interpolateRef.current ? Math.min(1, frameAccRef.current) : 1
-        drawScene(canvasRef.current, phys, { ts, bondNums: bondNumsRef.current, darkMode: darkModeRef.current, showCharge: showChargeRef.current, chargeLite: chargeLiteRef.current, showField: showFieldRef.current, fieldBlur: fieldBlurRef.current, interp: interpAlpha, atomColorMode: atomColorModeRef.current, showBrokenBonds: showBrokenBondsRef.current, showLiveStats: showLiveStatsRef.current, targetTempC: Math.round(ePerParticle / ENERGY_UNIT - 273), hoverIdx: hoverIdxRef.current, selectedIdx: selectedIdxRef.current })
+        drawScene(canvasRef.current, phys, { ts, bondNums: bondNumsRef.current, darkMode: darkModeRef.current, showCharge: showChargeRef.current, chargeLite: chargeLiteRef.current, showField: showFieldRef.current, fieldBlur: fieldBlurRef.current, interp: interpAlpha, atomColorMode: atomColorModeRef.current, showBrokenBonds: showBrokenBondsRef.current, showLiveStats: showLiveStatsRef.current, targetTempC: Math.round(ePerParticle / ENERGY_UNIT - 273), cooling: !!coolRunRef.current, hoverIdx: hoverIdxRef.current, selectedIdx: selectedIdxRef.current })
 
         // ── KE / PE diagnostics + graph history ──────────────────────
         const ke = computeKE(phys)
@@ -1167,7 +1167,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
             // grains only ever go intact → dissolved, so a 20-byte copy per frame lets playback pop
             // each outline back in exactly up to the frame it dissolved on
             const dissolved = phys.chunkDissolved ? phys.chunkDissolved.slice() : null
-            R.frames.push({ pos, bonds, strain, t, e, dissolved })
+            R.frames.push({ pos, bonds, strain, t, e, dissolved, c: !!coolRunRef.current })
             if (R.frames.length > REPLAY_MAX) { R.frames = R.frames.filter((_, k) => k % 2 === 0); R.every *= 2 }
             if (replayInfoRefRef.current) replayInfoRefRef.current.current = R.frames
             if (nowMs - R.lastNotify > 400) { R.lastNotify = nowMs; onReplayReadyRef.current?.(R.frames.length) }

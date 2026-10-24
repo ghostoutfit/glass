@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useRef } from 'react'
 import CompositionView from './CompositionView'
 import { initParticles, stepPhysics, stepFloorPhysics, PARTICLE_R, FIXED_DT, T_RIGID, freezeParticles, syncParticlesToRigidBody, stepRigidBody } from './glassPhysics.js'
 import { setSioHotMult, setFreeAttractSiOMult, setSioExclMult, setCrystJiggleMult, setBreakStrain, setReformStrain, setCrystAnchorK, setLiberateFrac, setSioK, setNaOK, setNaAnchorK, setNaLiberateFrac, setNaBreakStrain, setLatticeSpeedMult, setFreedSpeedMult, setReintBondN, setReintFrameM, setBreakStrainSpread, setSevTriggerDist, setGrainFeedback, setBondLockTemp, setBondHyst, setCrystTemplate, setTemplK, setTemplHi, setTemplReint, setFeedbackGainMult, setSiSiRepR0, setMotifStrength, setMotifAlign, setBondStiffMult, setFreedTau, setNaNaRepR0, setSevCooldown, setSevPullK } from './meltPhysics.js'
-import { setVisualScale, setMaxDpr, effectiveDpr, setMotionCold, setMotionFullT, QTY_COLORS, ENERGY_KJ_MULT } from './renderer.js'
+import { setVisualScale, setMaxDpr, effectiveDpr, setMotionCold, setMotionFullT, setPinkFade, QTY_COLORS, ENERGY_KJ_MULT } from './renderer.js'
 import { initSandParticles, stepSandPhysics, mergeSodaGrains, mergeSilicateGrains, convertLargeNaGrains, stepNaBlobSprings, checkNaBlobMerges, absorbNearbyGrains, snapshotSand, restoreSand, GRAIN_R as SAND_GRAIN_R, NA_BLOB_R_CTR, setNaHardenTemp, setNaRigidTemp, setGlassWallPad } from './sandPhysics.js'
 import { T as GT } from './glassTemps.js'
 import { BULK_CANDIDATES } from './candidates.generated.js'   // precomputed melt snapshots (dev-regenerated, bundled)
@@ -766,6 +766,7 @@ export default function GlassViewer() {
   const [grainFeedback,  setGrainFeedbackState] = useState(true)   // per-grain Si-O break feedback
   const [motionCold,     setMotionColdState]  = useState(0.1)   // lattice jiggle at 0 °C (× full), render only
   const [motionFullT,    setMotionFullTState] = useState(500)   // °C where jiggle reaches full
+  const [pinkFade,       setPinkFadeState]    = useState({ hi: 950, lo: 450, w: 150 })   // cooling: per-bond pink → grey fade band
   const [heatLeadSteps,  setHeatLeadSteps] = useState(30)
   const [glassLook,      setGlassLookState]     = useState({ rim: 2.0, dark: 0.10, gain: 9, lightDeg: 180 })
   const [naHardenT,      setNaHardenTState]     = useState(900)   // Bulk glass starts hardening
@@ -2505,7 +2506,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 94
+                  }}>Field Test Version 95
                     {/* Quality: set by the startup speed test (bonds' benchmark), auto-adjusted at
                         runtime; a manual pick becomes the ceiling. */}
                     <select value={quality} onChange={e => pickQuality(e.target.value)}
@@ -2854,6 +2855,19 @@ export default function GlassViewer() {
                   easy to find. Move a control down into its normal section once its value is settled. */}
               <div style={{border:'1px solid #6a5a9a', borderRadius:4, padding:'6px 8px 8px', marginBottom:10, background:'rgba(106,90,154,0.12)'}}>
                 <div style={{fontSize:11, color:'#c8b8ff', marginBottom:6, letterSpacing:'0.06em'}}>── Tune these ──</div>
+                {[['hi', 'Cooling: bonds start losing pink at', 500, 1400, 25, ' °C'],
+                  ['lo', 'Cooling: all bonds grey by', 100, 900, 25, ' °C'],
+                  ['w',  'Cooling: each bond fades over', 10, 400, 10, ' °C']].map(([k, label, mn, mx, st, unit]) => (
+                  <div key={k}>
+                    <div style={{fontSize:11, color:'#888', marginBottom:2}}>{label}: <span style={{color:'#a090d0'}}>{pinkFade[k]}{unit}</span></div>
+                    <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                      min={mn} max={mx} step={st} value={pinkFade[k]}
+                      onChange={e => { const next = { ...pinkFade, [k]: +e.target.value }
+                        if (next.lo > next.hi - 25) { if (k === 'lo') next.lo = next.hi - 25; else next.hi = next.lo + 25 }
+                        setPinkFadeState(next); setPinkFade(next) }} />
+                  </div>
+                ))}
+                <div style={{fontSize:10, color:'#777', marginBottom:8}}>Particles, cooling only: each bond has its own random fade temperature inside this band and fades smoothly over the width, so the network goes pink → grey gradually instead of all at once. Heating unchanged.</div>
                 <div style={{fontSize:11, color:'#888', marginBottom:2}}>Hardening glass wall gap: <span style={{color:'#a090d0'}}>{glassWallPad} × orb r</span></div>
                 <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
                   min={0} max={8} step={0.5} value={glassWallPad} onChange={e => { const v = +e.target.value; setGlassWallPadState(v); setGlassWallPad(v) }} />
