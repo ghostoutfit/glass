@@ -39,7 +39,7 @@ function allocGrid(HS) {
 }
 
 // Packed per-grain arrays for the PBD solve (see stepSandPhysics step 3); grown on demand.
-let _sX = null, _sY = null, _sR = null, _sCT = null, _sRB = null
+let _sX = null, _sY = null, _sR = null, _sCT = null, _sRB = null, _sWR = null
 const _FWD_DX = [0, 1, -1, 0, 1], _FWD_DY = [0, 0, 1, 1, 1]   // own, E, SW, S, SE
 let _cellX = null, _cellY = null   // each grain's cell AT grid-build time (forward stencil needs it)
 function rebuildGridXY(X, Y, n, HS) {
@@ -329,13 +329,14 @@ export function stepSandPhysics(grains, dt, HS, boxAngle, naBlobs = null) {
   if (!_sX || _sX.length < n) {
     const m = Math.max(n, N_GRAINS)
     _sX = new Float64Array(m); _sY = new Float64Array(m); _sR = new Float64Array(m)
-    _sCT = new Uint8Array(m); _sRB = new Int32Array(m)
+    _sCT = new Uint8Array(m); _sRB = new Int32Array(m); _sWR = new Float64Array(m)
   }
-  const X = _sX, Y = _sY, R = _sR, CT = _sCT, RB = _sRB
+  const X = _sX, Y = _sY, R = _sR, CT = _sCT, RB = _sRB, WR = _sWR
   let rMax = 0, large = null
   for (let i = 0; i < n; i++) {
     const g = grains[i]
     X[i] = g.x; Y[i] = g.y; R[i] = g.r
+    WR[i] = g.r + wallPad(g)   // wall-contact radius (see _glassWallPad)
     CT[i] = g.type === 'na-ctr' ? 1 : 0
     RB[i] = g._rigid ? g.blobId : -1
     if (g.r > rMax) rMax = g.r
@@ -404,7 +405,7 @@ export function stepSandPhysics(grains, dt, HS, boxAngle, naBlobs = null) {
     }
 
     for (let i = 0; i < n; i++) {
-      const hi = HS - R[i]
+      const hi = HS - WR[i]
       if (X[i] < -hi) X[i] = -hi
       if (X[i] >  hi) X[i] =  hi
       if (Y[i] < -hi) Y[i] = -hi
@@ -430,7 +431,7 @@ export function stepSandPhysics(grains, dt, HS, boxAngle, naBlobs = null) {
     g.vx = (g.x - g._px) / dt
     g.vy = (g.y - g._py) / dt
     // Wall restitution on grains that came to rest at a wall
-    const hi = HS - g.r
+    const hi = HS - WR[i]
     if (g.x <= -hi + 0.05 && g.vx < 0) g.vx *= -WALL_RESTITUTION
     if (g.x >=  hi - 0.05 && g.vx > 0) g.vx *= -WALL_RESTITUTION
     if (g.y <= -hi + 0.05 && g.vy < 0) g.vy *= -WALL_RESTITUTION
@@ -565,6 +566,61 @@ let _naRigidTemp  = NA_RIGID_TEMP
 let _naHardenTemp = 900
 export const setNaRigidTemp  = v => { _naRigidTemp = v }
 export const setNaHardenTemp = v => { _naHardenTemp = v }
+// The drawn blob outline (thresholded metaball halo: an r×8 sprite per orb, alpha > 64) sits
+// 12–22 px OUTSIDE the outermost orb edges (measured; absorbed grains become orbs with r up to 4, and
+// their halos reach further). The walls used to stop orb edges, so a solid blob's visible edge ran
+// up to ~20 px past the box wall and was clipped flat there — read as the glass squashing into it.
+//  · rigid (≤ rigid temp): wall contact uses the blob's ACTUAL drawn outline — its convex hull,
+//    computed once at freeze from the same halo field the renderer thresholds (visualHull) — with
+//    torque, so the visible edge is exactly what lands on the wall and tips the body.
+//  · hardening: each orb stops _glassWallPadK × r short of the walls, ramped in with hardness (0
+//    above the hardening onset), so hot liquid — and grain absorption at the walls — is unchanged.
+// Dev panel.
+let _glassWallPadK = 7   // the halo reaches 8r from an orb centre = 7r past its edge
+export const setGlassWallPad = v => { _glassWallPadK = v }
+const wallPad = g => g._hard && !g._rigid ? _glassWallPadK * g.r * g._hard : 0
+const HALO_K = 8, HALO_THRESH = 64 / 255   // must match the renderer's halo sprite size + alpha threshold
+const haloAlpha = t => t < 0.3 ? 1 - 0.35 * t / 0.3 : 0.65 * (1 - (t - 0.3) / 0.7)   // sprite's gradient stops
+// Convex hull (body frame, about the CM) of the thresholded halo field of the orbs — what the Bulk
+// renderer draws as the blob's outline. 1 px field; per row, the outermost on-pixels feed a
+// monotone-chain hull.
+function visualHull(orbs, cx, cy) {
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity
+  for (const p of orbs) {
+    const R = p.r * HALO_K
+    x0 = Math.min(x0, p.x - R); x1 = Math.max(x1, p.x + R); y0 = Math.min(y0, p.y - R); y1 = Math.max(y1, p.y + R)
+  }
+  x0 = Math.floor(x0); y0 = Math.floor(y0)
+  const W = Math.ceil(x1) - x0 + 1, H = Math.ceil(y1) - y0 + 1
+  const F = new Float32Array(W * H)
+  for (const p of orbs) {
+    const R = p.r * HALO_K, px = p.x - x0, py = p.y - y0
+    const ia = Math.max(0, Math.floor(px - R)), ib = Math.min(W - 1, Math.ceil(px + R))
+    const ja = Math.max(0, Math.floor(py - R)), jb = Math.min(H - 1, Math.ceil(py + R))
+    for (let j = ja; j <= jb; j++) {
+      const dy = j + 0.5 - py
+      for (let i = ia; i <= ib; i++) {
+        const dx = i + 0.5 - px, t = Math.sqrt(dx * dx + dy * dy) / R
+        if (t < 1) F[j * W + i] += haloAlpha(t)
+      }
+    }
+  }
+  const pts = []
+  for (let j = 0; j < H; j++) {
+    let a = -1, b = -1
+    for (let i = 0; i < W; i++) if (F[j * W + i] > HALO_THRESH) { if (a < 0) a = i; b = i }
+    if (a < 0) continue
+    const y = y0 + j - cy
+    pts.push([x0 + a - cx, y], [x0 + b + 1 - cx, y], [x0 + a - cx, y + 1], [x0 + b + 1 - cx, y + 1])
+  }
+  pts.sort((p, q) => p[0] - q[0] || p[1] - q[1])
+  const cr = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+  const lo = [], hi = []
+  for (const q of pts) { while (lo.length > 1 && cr(lo[lo.length - 2], lo[lo.length - 1], q) <= 0) lo.pop(); lo.push(q) }
+  for (let k = pts.length - 1; k >= 0; k--) { const q = pts[k]; while (hi.length > 1 && cr(hi[hi.length - 2], hi[hi.length - 1], q) <= 0) hi.pop(); hi.push(q) }
+  const hull = lo.slice(0, -1).concat(hi.slice(0, -1))
+  return { hx: Float32Array.from(hull, q => q[0]), hy: Float32Array.from(hull, q => q[1]) }
+}
 const SEMI_CREEP_MAX = 0.08   // per step: how fast the remembered shape follows the current one at the soft end
 const naHardness = temp => {  // 0 at/above _naHardenTemp → 1 at _naRigidTemp (smoothstep)
   const u = Math.max(0, Math.min(1, (_naHardenTemp - temp) / Math.max(1, _naHardenTemp - _naRigidTemp)))
@@ -635,7 +691,8 @@ function freezeNaBlob(blob) {
     L += refX[i] * (p.vy - vy) - refY[i] * (p.vx - vx)
     p._rigid = true
   }
-  blob.rb = { n, refX, refY, cx, cy, theta: 0, vx, vy, omega: I > 0 ? L / I : 0, pcx: cx, pcy: cy, ptheta: 0 }
+  const { hx, hy } = visualHull(orbs, cx, cy)
+  blob.rb = { n, refX, refY, cx, cy, theta: 0, vx, vy, omega: I > 0 ? L / I : 0, pcx: cx, pcy: cy, ptheta: 0, I, hx, hy }
   // Re-rest the springs at the frozen shape so a later reheat starts soft from THIS shape
   // instead of snapping back toward the hex pack the blob was created with.
   for (const s of blob.springs) s.rest = Math.hypot(s.b.x - s.a.x, s.b.y - s.a.y) || 0.001
@@ -667,19 +724,46 @@ function fitRigidNaBlob(blob, HS) {
     sc += rb.refX[i] * qx + rb.refY[i] * qy
     ss += rb.refX[i] * qy - rb.refY[i] * qx
   }
-  const th = (sc === 0 && ss === 0) ? rb.theta : Math.atan2(ss, sc)
+  let th = (sc === 0 && ss === 0) ? rb.theta : Math.atan2(ss, sc)
+  // Wall contact on the DRAWN outline (rb.hx/hy, see visualHull): a few Gauss–Seidel sweeps of
+  // rigid-body position corrections — each penetrating hull vertex pushes the CM and turns the body
+  // by its lever arm (unit-mass orbs, I = Σ|ref|²), so a body landing on a corner tips over. The
+  // pose change becomes the body's velocity (stepSandPhysics §4).
+  const hx = rb.hx, hy = rb.hy, m = hx.length, I = rb.I || 1
+  for (let it = 0; it < 4; it++) {
+    let any = false
+    for (let k = 0; k < m; k++) {
+      const c = Math.cos(th), s = Math.sin(th)
+      const rx = hx[k] * c - hy[k] * s, ry = hx[k] * s + hy[k] * c
+      const wx = cx + rx, wy = cy + ry
+      let nx = 0, ny = 0, pen = 0
+      if (wx < -HS)      { nx =  1; pen = -HS - wx }
+      else if (wx >  HS) { nx = -1; pen =  wx - HS }
+      if (pen > 0) {
+        const rxn = rx * ny - ry * nx, lam = pen / (1 / n + rxn * rxn / I)
+        cx += nx * lam / n; cy += ny * lam / n; th += rxn * lam / I; any = true
+      }
+      const wy2 = cy + hx[k] * Math.sin(th) + hy[k] * Math.cos(th), ry2 = wy2 - cy
+      const rx2 = hx[k] * Math.cos(th) - hy[k] * Math.sin(th)
+      nx = 0; ny = 0; pen = 0
+      if (wy2 < -HS)      { ny =  1; pen = -HS - wy2 }
+      else if (wy2 >  HS) { ny = -1; pen =  wy2 - HS }
+      if (pen > 0) {
+        const rxn = rx2 * ny - ry2 * nx, lam = pen / (1 / n + rxn * rxn / I)
+        cx += nx * lam / n; cy += ny * lam / n; th += rxn * lam / I; any = true
+      }
+    }
+    if (!any) break
+  }
   const c = Math.cos(th), s = Math.sin(th)
-  // Keep the whole solid inside the box: translate the CM (v2's position correction) so no
-  // orb is past a wall. Rotation from wall contact comes from the per-orb clamp + this fit.
+  // Guarantee: whatever the sweeps left over, translate the CM so no hull vertex is past a wall.
   let pushL = 0, pushR = 0, pushT = 0, pushB = 0
-  for (let i = 0; i < n; i++) {
-    const hi = HS - orbs[i].r
-    const wx = cx + rb.refX[i] * c - rb.refY[i] * s
-    const wy = cy + rb.refX[i] * s + rb.refY[i] * c
-    if (wx < -hi) pushL = Math.max(pushL, -hi - wx)
-    if (wx >  hi) pushR = Math.max(pushR,  wx - hi)
-    if (wy < -hi) pushT = Math.max(pushT, -hi - wy)
-    if (wy >  hi) pushB = Math.max(pushB,  wy - hi)
+  for (let k = 0; k < m; k++) {
+    const wx = cx + hx[k] * c - hy[k] * s, wy = cy + hx[k] * s + hy[k] * c
+    if (wx < -HS) pushL = Math.max(pushL, -HS - wx)
+    if (wx >  HS) pushR = Math.max(pushR,  wx - HS)
+    if (wy < -HS) pushT = Math.max(pushT, -HS - wy)
+    if (wy >  HS) pushB = Math.max(pushB,  wy - HS)
   }
   cx += pushL - pushR; cy += pushT - pushB
   for (let i = 0; i < n; i++) {

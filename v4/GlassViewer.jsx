@@ -3,7 +3,7 @@ import CompositionView from './CompositionView'
 import { initParticles, stepPhysics, stepFloorPhysics, PARTICLE_R, FIXED_DT, T_RIGID, freezeParticles, syncParticlesToRigidBody, stepRigidBody } from './glassPhysics.js'
 import { setSioHotMult, setFreeAttractSiOMult, setSioExclMult, setCrystJiggleMult, setBreakStrain, setReformStrain, setCrystAnchorK, setLiberateFrac, setSioK, setNaOK, setNaAnchorK, setNaLiberateFrac, setNaBreakStrain, setLatticeSpeedMult, setFreedSpeedMult, setReintBondN, setReintFrameM, setBreakStrainSpread, setSevTriggerDist, setGrainFeedback, setBondLockTemp, setBondHyst, setCrystTemplate, setTemplK, setTemplHi, setTemplReint, setFeedbackGainMult, setSiSiRepR0, setMotifStrength, setMotifAlign, setBondStiffMult, setFreedTau, setNaNaRepR0, setSevCooldown, setSevPullK } from './meltPhysics.js'
 import { setVisualScale, setMaxDpr, effectiveDpr, setMotionCold, setMotionFullT, QTY_COLORS, ENERGY_KJ_MULT } from './renderer.js'
-import { initSandParticles, stepSandPhysics, mergeSodaGrains, mergeSilicateGrains, convertLargeNaGrains, stepNaBlobSprings, checkNaBlobMerges, absorbNearbyGrains, snapshotSand, restoreSand, GRAIN_R as SAND_GRAIN_R, NA_BLOB_R_CTR, setNaHardenTemp, setNaRigidTemp } from './sandPhysics.js'
+import { initSandParticles, stepSandPhysics, mergeSodaGrains, mergeSilicateGrains, convertLargeNaGrains, stepNaBlobSprings, checkNaBlobMerges, absorbNearbyGrains, snapshotSand, restoreSand, GRAIN_R as SAND_GRAIN_R, NA_BLOB_R_CTR, setNaHardenTemp, setNaRigidTemp, setGlassWallPad } from './sandPhysics.js'
 import { T as GT } from './glassTemps.js'
 import { BULK_CANDIDATES } from './candidates.generated.js'   // precomputed melt snapshots (dev-regenerated, bundled)
 import './GlassViewer.css'
@@ -770,6 +770,7 @@ export default function GlassViewer() {
   const [glassLook,      setGlassLookState]     = useState({ rim: 2.0, dark: 0.10, gain: 9, lightDeg: 180 })
   const [naHardenT,      setNaHardenTState]     = useState(900)   // Bulk glass starts hardening
   const [naRigidT,       setNaRigidTState]      = useState(500)   // Bulk glass fully rigid
+  const [glassWallPad,   setGlassWallPadState]  = useState(7)     // Bulk: hardening glass stops this × orb r off the walls (drawn edge overhang)
   const [bondLockTemp,   setBondLockTempState]  = useState(400)   // cooling: bonds lock in here (fast + slow)
   const [crystTemplate,  setCrystTemplateState] = useState(true)   // slow cool re-grows the sand honeycomb
   const [templK,         setTemplKState]        = useState(0.05)
@@ -2501,7 +2502,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 92
+                  }}>Field Test Version 93
                     {/* Quality: set by the startup speed test (bonds' benchmark), auto-adjusted at
                         runtime; a manual pick becomes the ceiling. */}
                     <select value={quality} onChange={e => pickQuality(e.target.value)}
@@ -2852,6 +2853,10 @@ export default function GlassViewer() {
                   easy to find. Move a control down into its normal section once its value is settled. */}
               <div style={{border:'1px solid #6a5a9a', borderRadius:4, padding:'6px 8px 8px', marginBottom:10, background:'rgba(106,90,154,0.12)'}}>
                 <div style={{fontSize:11, color:'#c8b8ff', marginBottom:6, letterSpacing:'0.06em'}}>── Tune these ──</div>
+                <div style={{fontSize:11, color:'#888', marginBottom:2}}>Hardening glass wall gap: <span style={{color:'#a090d0'}}>{glassWallPad} × orb r</span></div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={0} max={8} step={0.5} value={glassWallPad} onChange={e => { const v = +e.target.value; setGlassWallPadState(v); setGlassWallPad(v) }} />
+                <div style={{fontSize:10, color:'#777', marginBottom:8}}>The blob's drawn outline sits 12–22 px outside its physics circles. Rigid glass (below the rigid temp) hits the walls with its exact drawn outline. While hardening, each orb stops this many radii short of the walls, ramped in with hardness, so the visible edge meets the wall instead of being clipped flat. Hot liquid is unaffected; 0 = no gap while hardening.</div>
                 <div style={{fontSize:11, color:'#888', marginBottom:2}}>Heat lead (Particles): <span style={{color:'#a090d0'}}>{heatLeadSteps === 0 ? 'off' : `${heatLeadSteps} steps`}</span></div>
                 <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
                   min={0} max={80} step={5} value={heatLeadSteps} onChange={e => setHeatLeadSteps(+e.target.value)} />

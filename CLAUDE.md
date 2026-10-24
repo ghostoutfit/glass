@@ -1266,6 +1266,17 @@ of `na-sub` circles. `na` grains also merge directly into each other.
   Velocity comes from the body's pose change, not the slow-grain damping, so it free-falls, tumbles
   and lands with zero deformation (headless: 0.000 px). Because the body is ~1.6× denser per area
   than the frictionless PBD sand, it sinks through loose sand to the floor rather than resting on top.
+- **Wall contact on the DRAWN outline (v4)**: the Bulk blob outline (thresholded halo, `r×8` sprite,
+  alpha > 64) sits 12–22 px outside the outermost orb edges (absorbed grains become orbs with r up to
+  4). Walls used to stop orb edges, so solid glass's visible edge ran ~20 px past the wall and was
+  clipped flat — read as the solid squashing ("spring-like compression"). Now: `freezeNaBlob`
+  computes `visualHull` (convex hull of the same halo field, body frame; `HALO_K`/`HALO_THRESH` must
+  match the renderer) and `fitRigidNaBlob` resolves wall contact on those hull vertices with
+  rigid-body position corrections (CM + torque, 4 Gauss–Seidel sweeps, then a pure-translation
+  guarantee). Hardening orbs stop `_glassWallPadK`·r·hardness short of the walls (dev slider
+  "Hardening glass wall gap", default 7 = halo reach 8r − r). Measured: drawn edge overshoot ~20 px
+  hot (unchanged) → 0 by ~575 °C → exact contact (0 px) when rigid; no hop at the freeze; stray
+  regression unchanged.
 - **Merge dwell time**: `checkNaBlobMerges` needs `max(5, round(20/tempFactor))` consecutive
   contact frames — 20 frames at 1200 °C, 400 at 700 °C. Stops hot collisions from merging.
 - **Absorption** (`absorbNearbyGrains`): checks proximity to sub-circles, not the centre.
