@@ -210,7 +210,17 @@ How it works now:
   every reader now builds the template on demand (`crystTemplate()`; deterministic, cached). Any new
   module-level cache that run state points into needs the same treatment.
 - **History gap**: a stale return sets `historyGap` → turtle, rabbit, scrubber and Pause are
-  disabled (the run's history skips the Bulk time) until the next run starts (`markBondRun`) or Reset.
+  disabled (the run's history skips the Bulk time) until the next run starts (`markBondRun`) or a
+  reset. Only inside a run (`historyRun > 0`) — a catch-up with no run in progress leaves no gap.
+- **Reset Cold / Reset Hot** (`switchPreset(id, startTemp)`, the same hard reset as a composition
+  button): Cold starts at 0 °C (= page load); Hot at 1800 °C, fully melted, no run in progress. A
+  CompositionView rebuild is always the cold solid: it reports the solid's bond counts first (the
+  "% of original" baseline), sets `lastActiveRef` to {heat, 0 °C} and `wasActiveRef` false, so the
+  RAF's stale check asks the worker for the 1800 °C state before the first draw — the TOP of the Fast
+  Heat track, i.e. exactly the state the standard cools start from (right after page load it waits
+  for the heat track, ~1.5 s behind the overlay; later ~0.1 s). On the Bulk tab the check fires when
+  Particles is next shown. Bulk restores the bundled 1800 °C candidate (`BULK_BENCH_TEMPS` ends at
+  1800 → 100 % melted) via `restoreTemp`, set in `switchPreset`.
 
 ⚠️ **Why the melt tab's energy ramp still runs while frozen.** `startCooling` sets
 `energyInput = 0` and leaves *CompositionView's* energy-content ramp as "the sole temperature
@@ -560,14 +570,14 @@ Nothing here is checked in — these were throwaway scripts in the scratchpad. T
 | `SLOW_COOL_FRAMES` | 1440 (~24 s) | `CompositionView.jsx` |
 | `COOL_MIN_TEMP` | 1500 °C | cooling gate, `GlassViewer.jsx` |
 | Temperature cap | 1800 °C | `GlassViewer.jsx` |
-| Start temperature | 100 °C | `meltLocalTemp` / `derivedTemp` / `targetE` initial state, `GlassViewer.jsx` |
+| Start temperature | 0 °C (Reset Hot: 1800 °C) | `MELT_START_TEMP` / `MELT_HOT_TEMP`, `meltLocalTemp` / `derivedTemp` / `targetE` / `meltTempRef` initial state, `GlassViewer.jsx`; `T_START`, `meltTrack.js` |
 
 ⚠️ **The inline comment on `ENERGY_UNIT` says `1.125e-6`. It is wrong** —
 `0.0018² / 2 = 1.62e-6`. The stale number is left over from `THERMAL_SPEED = 0.0015`.
 `GlassViewer.jsx`'s `targetE` initial state hardcodes the correct `1.62e-6`. Fix the comment;
 don't trust it.
 
-`PHYSICS_START_TEMP = 0` is exported but unused — the UI starts at 100 °C.
+`PHYSICS_START_TEMP = 0` is exported but unused — the UI's start temp is `MELT_START_TEMP` (also 0 °C).
 
 ## Atom species
 
@@ -1130,6 +1140,10 @@ Rules this layout depends on:
   Go-to of a trip, then the first Cool. Each bump clears the frames, so the turtle/rabbit replay and
   the scrub bar start at that button press (stop/restart within a run keeps the history). Before any
   run (page load / Reset → `historyRun` 0) nothing is recorded and the replay controls are disabled.
+- **History ends at the destination**: once the ramp temperature sits at 1800 °C or 0 °C, recording
+  continues for `END_HOLD_S` (3 s of running time — paused time doesn't count), then stops, so a page
+  left open doesn't fill the history with one unchanging state (and decimate the run itself away).
+  `window.replayLength()` returns the recorded frame count.
 - **Replay draw is non-destructive**: a display copy of `phys` (frame positions, frame bonds, all
   atoms drawn at true position, frame temperature for thermal colouring). The old replay wrote the
   frame INTO the live particles, so returning to live resumed from the wrong positions.

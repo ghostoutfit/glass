@@ -17,6 +17,7 @@ import { snapshotFull, restoreFull } from './meltTrack.js'   // Particles catch-
 // frame rate — the slow-vs-fast-cool structure difference no longer depends on the hardware.
 // At BASE_STEPS_PER_SEC these equal the historical ~4.5 s / ~24 s wall-clock at simSpeed 1.
 const REPLAY_MAX = 900          // history frames kept (decimated beyond this)
+const END_HOLD_S = 3            // history keeps recording this long (s of running time) after reaching 0 / 1800 °C
 
 // Wall-clock pacing: the sim advances by elapsed real time, not per rendered frame, so faster
 // hardware just draws more (smoother) frames of the SAME sim rate instead of running faster.
@@ -366,6 +367,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
   // decimation (drop every other frame, double the interval) so memory stays bounded (~10 MB).
   const replayRef           = useRef({ frames: [], every: 2, acc: 0, lastNotify: 0 })
   const historyArmedRef     = useRef(false)   // record history only inside a run (from its Heat / Cool press)
+  const endHoldRef          = useRef(0)       // seconds of running time spent at 0 °C / 1800 °C (see END_HOLD_S)
   const timePausedRef       = useRef(timePaused)
   const onFrameCostRef      = useRef(onFrameCost)
   onFrameCostRef.current    = onFrameCost
@@ -404,6 +406,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
   // historyRun 0 (page load / Reset) = no run yet → nothing recorded.
   useEffect(() => {
     historyArmedRef.current = historyRun > 0
+    endHoldRef.current = 0
     replayRef.current = { frames: [], every: 2, acc: 0, lastNotify: 0 }
     if (replayInfoRefRef.current) replayInfoRefRef.current.current = replayRef.current.frames
     onReplayReadyRef.current?.(0)
@@ -550,6 +553,9 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
       }
     }
     physRef.current.unitBonds = _unitBonds
+    // The fresh solid's bond counts are the "% of the original solid" baseline — report them now,
+    // before anything can break (Reset Hot replaces this state with a melt before the first draw).
+    onBondCountsRef.current?.(countBonds(physRef.current))
     // Warm particles to the current target so the visual doesn't start cold
     const eWarm = (energyValRef.current + 273) * ENERGY_UNIT
     for (let s = 0; s < 20; s++) stepPhysics(physRef.current, eWarm)
@@ -557,7 +563,11 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
     frameAccRef.current = 0
     lastTsRef.current = 0   // restart elapsed-time pacing cleanly after a rebuild
     setCoolBondScale(1)     // reset "longer cooled bonds" on a fresh build
-    lastActiveRef.current = { kind: 'heat', T: energyValRef.current }   // fresh build = current state
+    // A fresh build is the cold (0 °C) solid. Anywhere hotter (Reset Hot) the worker supplies the
+    // state: marking this tab as just-activated makes the RAF's stale check request it before the
+    // first draw (or, if the Bulk tab is showing, when Particles is next shown).
+    lastActiveRef.current = { kind: 'heat', T: 0 }
+    wasActiveRef.current = false
     catchingUpRef.current = false; catchReqRef.current++   // drop any in-flight catch-up (its reply is ignored)
     histRef.current = []
     if (graphUiRefRef.current?.current) graphUiRefRef.current.current.markers.length = 0   // markers belong to this graph
@@ -590,6 +600,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
       console.log('renderedStrain = bondStrain for all rows (both-freed guard active in renderer)')
     }
     window.setMeltTemp    = (tempC) => { energyValRef.current = tempC }
+    window.replayLength   = () => replayRef.current.frames.length   // history frames recorded this run
     window.setSioExclMult = (v)    => setSioExclMult(v)
     window.setBreakStrain  = (v)   => setBreakStrain(v)
     window.setReformStrain = (v)   => setReformStrain(v)
@@ -867,6 +878,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
         phys.lifetimeTotal  = new Float64Array(nb)
         phys.lifetimeBreaks = new Int32Array(nb)
         window._lastCatchup = { from: m.result.from, steps: m.result.steps }
+        onBondCountsRef.current?.(countBonds(phys))   // bond table shows the new state with it, not ≤300 ms later
       }
       catchingUpRef.current = false
       onCatchupRef.current?.(false)
@@ -1063,6 +1075,14 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
         }
       }
 
+      // History end: once the ramp sits at a limit (1800 °C after heating, 0 °C after cooling), keep
+      // recording END_HOLD_S of running time, then stop — no long tail of an unchanging state.
+      {
+        const Tr = ePerParticle / ENERGY_UNIT - 273
+        if (Tr <= 0.5 || Tr >= 1799.5) endHoldRef.current += elapsed
+        else endHoldRef.current = 0
+      }
+
       const phys = physRef.current
       // activeRef gate: everything above this point is cheap bookkeeping that must
       // keep running while the other tab is showing — the energy-content ramp above
@@ -1145,7 +1165,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
         }
 
         // ── Record history frame (DVR) ────────────────────────────────
-        if (stepsThisFrame > 0 && historyArmedRef.current) {
+        if (stepsThisFrame > 0 && historyArmedRef.current && endHoldRef.current <= END_HOLD_S) {
           const R = replayRef.current
           R.acc += stepsThisFrame
           if (R.acc >= R.every) {
@@ -1167,8 +1187,11 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
             R.frames.push({ pos, bonds, strain, t, e, dissolved, c: !!coolRunRef.current })
             if (R.frames.length > REPLAY_MAX) { R.frames = R.frames.filter((_, k) => k % 2 === 0); R.every *= 2 }
             if (replayInfoRefRef.current) replayInfoRefRef.current.current = R.frames
-            if (nowMs - R.lastNotify > 400) { R.lastNotify = nowMs; onReplayReadyRef.current?.(R.frames.length) }
+            if (nowMs - R.lastNotify > 400) { R.lastNotify = nowMs; R.notified = R.frames.length; onReplayReadyRef.current?.(R.frames.length) }
           }
+        } else if (endHoldRef.current > END_HOLD_S && replayRef.current.notified !== replayRef.current.frames.length) {
+          const R = replayRef.current   // recording just ended: report the final length (the throttle may have skipped it)
+          R.notified = R.frames.length; onReplayReadyRef.current?.(R.frames.length)
         }
 
         // Bond counts (throttled to ~3×/s)

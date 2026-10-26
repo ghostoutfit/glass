@@ -80,7 +80,7 @@ export function meldSandFrame(phys, temp, isSoda, probMult = 1, realTemp = temp)
 // Benchmark temperatures with a precomputed melted state (bundled in candidates.generated.js).
 // Macro melt is irreversible, so these are a HEATING track, each melted to macroMeltTarget(T).
 // Cooling reuses the peak-temperature snapshot (only rigidity / look change on cooling).
-export const BULK_BENCH_TEMPS = [25, 700, 850, 1000, 1150, 1300, 1450, 1600]
+export const BULK_BENCH_TEMPS = [25, 700, 850, 1000, 1150, 1300, 1450, 1600, 1800]   // 1800 = Reset Hot
 export const GEN_MELD_K = 20   // coarse meld during generation
 // Resumable generator so the in-app version can be time-boxed across frames.
 export function makeBulkGenState(HS, na2o, nGrains, multiRadius = true) {

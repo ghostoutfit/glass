@@ -14,7 +14,7 @@ import { heatCap, energyContent, coolEnergyContent, coolTempForContent, FAST_COO
 
 export const TRACK_EVERY = 40   // steps between stored states → a catch-up runs at most this many
 const HEAT_POWER  = 200          // °C·heat-capacity per wall-second at Fast Heat (GlassViewer baseRate × input 100%)
-const T_START     = 100          // page-load / Reset temperature
+const T_START     = 0            // page-load / Reset Cold temperature
 const T_TOP       = 1800         // heating ceiling = where the standard cool runs start
 
 // ── Full state snapshot ───────────────────────────────────────────────────────────────────────

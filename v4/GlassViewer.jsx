@@ -654,10 +654,10 @@ export default function GlassViewer() {
   const frozenCondRef = useRef({ melt: null, glass: null })
   const [presetId, setPresetId]   = useState('soda')
   const [meltEnergyIn,   setMeltEnergyIn]   = useState(0)    // -100..100, snaps to 0
-  const [meltLocalTemp,  setMeltLocalTemp]  = useState(100)  // melt tab's own temperature
+  const [meltLocalTemp,  setMeltLocalTemp]  = useState(0)    // melt tab's own temperature
   const [gotoTemp,       setGotoTemp]       = useState('')   // typed target temperature for GO
-  const [derivedTemp,    setDerivedTemp]    = useState(100)  // KE-measured temperature
-  const [targetE,        setTargetE]        = useState((100 + 273) * 1.62e-6)
+  const [derivedTemp,    setDerivedTemp]    = useState(0)    // KE-measured temperature
+  const [targetE,        setTargetE]        = useState((0 + 273) * 1.62e-6)
   const [fBroken,        setFBroken]        = useState(0)
   const [maxAvgStrain,   setMaxAvgStrain]   = useState(0)
   const [meanAvgStrain,  setMeanAvgStrain]  = useState(0)
@@ -774,7 +774,11 @@ export default function GlassViewer() {
   // The run's replay history has a hole (time passed on the Bulk tab) → replay controls disabled
   // until the next run starts a fresh history.
   const [historyGap,      setHistoryGap]      = useState(false)
-  const onParticlesCatchup = useCallback(v => { setParticlesLoading(v); if (v) setHistoryGap(true) }, [])
+  // A catch-up inside a run means part of that run happened unseen → no replay for it. With no run
+  // in progress (Reset Hot, then Particles) there's no history to be missing.
+  const historyRunRef = useRef(0)
+  historyRunRef.current = historyRun
+  const onParticlesCatchup = useCallback(v => { setParticlesLoading(v); if (v && historyRunRef.current > 0) setHistoryGap(true) }, [])
   const boxLoadingRef     = useRef(false)
   const [boxMeltFrac,     setBoxMeltFrac]     = useState(0)       // macro melt fraction (dev stat)
   const lastMeltStatRef   = useRef(0)
@@ -841,7 +845,7 @@ export default function GlassViewer() {
   const sharedTempRef = useRef({ temp: 25, lastTs: 0, cumulativeEnergy: 0 })
 
   // Melt tab has its own independent temperature driven by its own energy input
-  const meltTempRef             = useRef({ temp: 100, lastTs: 0, cumulativeEnergy: 0 })  // page-load start temp; matches meltLocalTemp so heating doesn't snap the graph down
+  const meltTempRef             = useRef({ temp: 0, lastTs: 0, cumulativeEnergy: 0 })  // page-load start temp; matches meltLocalTemp so heating doesn't snap the graph down
   const gotoTargetRef           = useRef(null)   // GO target temp; integrator ramps to it then stops
   const [gotoTargetTemp, setGotoTargetTemp] = useState(null)   // shown as a dotted line on the graph
   const meltCumulativeEnergyRef = useRef(0)  // raw energy accumulated (x-axis for T-E graph)
@@ -2293,8 +2297,12 @@ export default function GlassViewer() {
   // Composition buttons are a HARD RESET: temperature, particle arrangement, rotation, the graph,
   // particle/bond counts, replay, overlays and the background all return to the page-load state.
   // Always bumps meltResetToken so even re-clicking the current preset fully rebuilds.
-  const MELT_START_TEMP = 100   // page-load start temp — same for every preset (incl. Pure SiO₂)
-  const switchPreset = id => {
+  // Reset Hot is the same reset but starting at 1800 °C, fully melted: Particles takes the worker's
+  // stored state at the top of the Fast Heat track (the state the standard cools start from), Bulk the
+  // bundled 1800 °C snapshot. No run is in progress after either reset.
+  const MELT_START_TEMP = 0      // page-load / Reset Cold start temp — same for every preset (incl. Pure SiO₂)
+  const MELT_HOT_TEMP   = 1800   // Reset Hot start temp (the heating ceiling)
+  const switchPreset = (id, startTemp = MELT_START_TEMP) => {
     setPresetId(id); presetIdRef.current = id
     // modes / energy flow off
     setCoolingMode(null); setMeltHeatMode(null)
@@ -2304,11 +2312,11 @@ export default function GlassViewer() {
     setMeltEnergyIn(0); setGlassEnergyIn(0)
     gotoTargetRef.current = null; setGotoTargetTemp(null)
     // temperature → start temp (every ref the heat integrator / box / graph read from)
-    meltTempRef.current.temp = MELT_START_TEMP
-    sharedTempRef.current.temp = MELT_START_TEMP
-    boxSimRef.current.temp = MELT_START_TEMP
+    meltTempRef.current.temp = startTemp
+    sharedTempRef.current.temp = startTemp
+    boxSimRef.current.temp = startTemp
     meltCumulativeEnergyRef.current = 0
-    setMeltLocalTemp(MELT_START_TEMP); setDerivedTemp(MELT_START_TEMP)
+    setMeltLocalTemp(startTemp); setDerivedTemp(startTemp)
     // particle counts / bonds
     setBondCounts(null); setInitialBondCounts(null); setBondRef(null); bondPhaseRef.current = null; setHistoryRun(0); setHistoryGap(false)
     initialBondCapturedRef.current = false
@@ -2323,6 +2331,12 @@ export default function GlassViewer() {
     // replay scrubber / overlays / macro-melt stat / candidate restore
     setReplayFrame(null); setReplayFrameCount(0); setReplayPlaying(false)
     setBoxLoading(false); setBoxMeltFrac(0); setParticlesLoading(false)
+    // Bulk start state: fresh cold sand, or (Reset Hot) the nearest bundled melt snapshot — frame()
+    // restores it the next time the Bulk tab draws
+    const bs = boxSimRef.current
+    bs.heatReplay = null
+    bs.restoreTemp = startTemp > 30 && (BULK_CANDIDATES[id] ?? []).length ? startTemp : null
+    bs.heatReplayPending = startTemp > 30 && !bs.restoreTemp
     // background back to black (gray fade latch)
     bgGrayRef.current = 0; bgHeatTintRef.current = 0; bgCoolTintRef.current = 0; glassGateRef.current = 0
     // rebuild the melt-tab particle arrangement + clear the graph history (even on same preset)
@@ -2411,7 +2425,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 98
+                  }}>Field Test Version 99
                     {/* Quality: set by the startup speed test (bonds' benchmark), auto-adjusted at
                         runtime; a manual pick becomes the ceiling. */}
                     <select value={quality} onChange={e => pickQuality(e.target.value)}
@@ -2441,26 +2455,31 @@ export default function GlassViewer() {
                     {/* Reset — the same hard reset as picking a composition, for the current one.
                         Absolutely positioned (like the version tag) so adding it doesn't change the
                         preset group's width and nudge the centered tab buttons. */}
-                    <button className="preset-btn"
-                      style={{ position:'absolute', left:'100%', marginLeft:8, whiteSpace:'nowrap' }}
-                      title="Reset temperature, particles, rotation and graph"
-                      onClick={() => switchPreset(presetIdRef.current)}
-                    >Reset</button>
+                    <div style={{ position:'absolute', left:'100%', marginLeft:8, display:'flex', gap:3 }}>
+                      <button className="preset-btn" style={{ whiteSpace:'nowrap' }}
+                        title="Reset to 0 °C: cold solid; particles, rotation and graph start over"
+                        onClick={() => switchPreset(presetIdRef.current, MELT_START_TEMP)}
+                      >Reset Cold</button>
+                      <button className="preset-btn" style={{ whiteSpace:'nowrap' }}
+                        title="Reset to 1800 °C: fully melted, ready to cool; rotation and graph start over"
+                        onClick={() => switchPreset(presetIdRef.current, MELT_HOT_TEMP)}
+                      >Reset Hot</button>
+                    </div>
                   </div>
                   {/* Second line: heat/cool buttons + readouts (flexBasis 100% forces a wrap) */}
                   <div style={{ flexBasis:'100%', height:10 }} />
                   {/* Heat/cool buttons, then the readouts right next to them */}
                   <button className={`action-btn test-btn${meltHeatMode==='slow'?' active':''}`}
-                    disabled={heatLocked} title={heatLocked ? 'Cooling is one-way — press Reset to heat again' : undefined}
+                    disabled={heatLocked} title={heatLocked ? 'Cooling is one-way — press Reset Cold to heat again' : undefined}
                     style={{padding:'3px 9px', fontSize:11}} onClick={() => toggleMeltHeat('slow')}>Slow Heat</button>
                   <button className={`action-btn test-btn${meltHeatMode==='fast'?' active':''}`}
-                    disabled={heatLocked} title={heatLocked ? 'Cooling is one-way — press Reset to heat again' : undefined}
+                    disabled={heatLocked} title={heatLocked ? 'Cooling is one-way — press Reset Cold to heat again' : undefined}
                     style={{padding:'3px 9px', fontSize:11}} onClick={() => toggleMeltHeat('fast')}>Fast Heat</button>
                   {/* Cool: the first speed pressed is the committed run — it stays clickable to
                       stop/resume (even below the start gate once paused), the other is locked. */}
                   {['slow', 'fast'].map(m => {
                     const off = coolLocked ? coolLocked !== m : meltLocalTemp < COOL_MIN_TEMP
-                    const why = coolLocked ? 'One cooling run at a time — press Reset to change speed'
+                    const why = coolLocked ? 'One cooling run at a time — press Reset Hot to change speed'
                                            : `Heat to ${COOL_MIN_TEMP}°C first`
                     return (
                       <button key={m} className={`action-btn reset-btn${coolingMode===m?' active':''}`}
@@ -2477,7 +2496,7 @@ export default function GlassViewer() {
                       placeholder="°C"
                       style={{ width:68, padding:'3px 5px', fontSize:12, textAlign:'right', border:'1px solid rgba(100,90,70,0.5)', borderRadius:3, background:'#e8e3da', color:'#2a2620' }} />
                     <button className="action-btn test-btn" style={{padding:'3px 10px', fontSize:11}} onClick={onGoTemp}
-                      disabled={!!coolLocked} title={coolLocked ? 'Cooling run in progress — press Reset' : undefined}>GO</button>
+                      disabled={!!coolLocked} title={coolLocked ? 'Cooling run in progress — press Reset Cold or Reset Hot' : undefined}>GO</button>
                   </>}
                   <div className="toolbar-divider" />
                   {/* Readout labels sit ABOVE the LCDs (absolute — the toolbar height doesn't change) */}
