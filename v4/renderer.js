@@ -18,6 +18,7 @@
 //   options — { ts, visualScale, bondRound, showField, bondNums }
 
 import { COORD_TARGET, ENERGY_UNIT } from './meltPhysics.js'
+import { coolBondPink } from './glassTemps.js'
 
 export const VW = 600
 export const VH = 350
@@ -57,12 +58,9 @@ let _motionFullT = 500
 export const setMotionCold  = v => { _motionCold = v }
 export const setMotionFullT = v => { _motionFullT = v }
 // Cooling: the pink → grey fade is spread across the bonds instead of all at once. Each bond gets
-// its own fixed random slot (hash of its atom pair — stable frame to frame and in replay) and fades
-// smoothly over _pinkFadeW °C centred on a temperature drawn uniformly from inside [lo, hi]; the
-// population's pink fraction therefore falls gradually across the whole band. Heating keeps the
-// single global ramp (pink appears ~500 → 650 °C). Dev panel → "Tune these".
-let _pinkFadeHi = 950, _pinkFadeLo = 450, _pinkFadeW = 150
-export const setPinkFade = ({ hi = _pinkFadeHi, lo = _pinkFadeLo, w = _pinkFadeW }) => { _pinkFadeHi = hi; _pinkFadeLo = lo; _pinkFadeW = w }
+// its own fixed random slot (hash of its atom pair — stable frame to frame and in replay); its fade
+// comes from the shared cooling band (glassTemps COOL_BAND / coolBondPink), which the Bulk glass
+// crossfade also follows. Heating keeps the single global ramp (pink appears ~500 → 650 °C).
 const bondSlot = (i, j) => {   // deterministic [0,1) per unordered atom pair
   let h = (Math.min(i, j) * 73856093) ^ (Math.max(i, j) * 19349663)
   h = Math.imul(h ^ (h >>> 16), 0x45d9f3b); h = Math.imul(h ^ (h >>> 16), 0x45d9f3b); h ^= h >>> 16
@@ -267,7 +265,7 @@ export function drawScene(canvas, phys, {
   showBrokenBonds = false,
   showLiveStats   = false,
   targetTempC     = null,
-  cooling         = false,   // in a cool run → per-bond spread pink fade (see _pinkFadeHi)
+  cooling         = false,   // in a cool run → per-bond spread pink fade (glassTemps COOL_BAND)
   hoverIdx        = null,
   selectedIdx     = -1,
 } = {}) {
@@ -433,10 +431,7 @@ export function drawScene(canvas, phys, {
       // slow-cool structure is already built and just settles into the cold solid.
       let thermPink
       if (cooling && targetTempC != null) {
-        const w = Math.max(1, _pinkFadeW), span = Math.max(0, _pinkFadeHi - _pinkFadeLo - w)
-        const t0 = _pinkFadeLo + bondSlot(bond.i, bond.j) * span   // this bond's fade: t0 → t0 + w
-        const u = Math.max(0, Math.min(1, (targetTempC - t0) / w))
-        thermPink = u * u * (3 - 2 * u)
+        thermPink = coolBondPink(targetTempC, bondSlot(bond.i, bond.j))
       } else thermPink = Math.max(0, Math.min(1, ((targetTempC ?? 999) - 500) / 150))
       let cr, cg, cb
       if (cooling) {

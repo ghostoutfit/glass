@@ -2,9 +2,10 @@ import { useState, useCallback, useEffect, useRef } from 'react'
 import CompositionView from './CompositionView'
 import { initParticles, stepPhysics, stepFloorPhysics, PARTICLE_R, FIXED_DT, T_RIGID, freezeParticles, syncParticlesToRigidBody, stepRigidBody } from './glassPhysics.js'
 import { setSioHotMult, setFreeAttractSiOMult, setSioExclMult, setCrystJiggleMult, setBreakStrain, setReformStrain, setCrystAnchorK, setLiberateFrac, setSioK, setNaOK, setNaAnchorK, setNaLiberateFrac, setNaBreakStrain, setLatticeSpeedMult, setFreedSpeedMult, setReintBondN, setReintFrameM, setBreakStrainSpread, setSevTriggerDist, setGrainFeedback, setBondLockTemp, setBondHyst, setCrystTemplate, setTemplK, setTemplHi, setTemplReint, setFeedbackGainMult, setSiSiRepR0, setMotifStrength, setMotifAlign, setBondStiffMult, setFreedTau, setNaNaRepR0, setSevCooldown, setSevPullK } from './meltPhysics.js'
-import { setVisualScale, setMaxDpr, effectiveDpr, setMotionCold, setMotionFullT, setPinkFade, QTY_COLORS, ENERGY_KJ_MULT } from './renderer.js'
+import { setVisualScale, setMaxDpr, effectiveDpr, setMotionCold, setMotionFullT, QTY_COLORS, ENERGY_KJ_MULT } from './renderer.js'
 import { initSandParticles, stepSandPhysics, mergeSodaGrains, mergeSilicateGrains, convertLargeNaGrains, stepNaBlobSprings, checkNaBlobMerges, absorbNearbyGrains, snapshotSand, restoreSand, GRAIN_R as SAND_GRAIN_R, NA_BLOB_R_CTR, setNaHardenTemp, setNaRigidTemp, setGlassWallPad } from './sandPhysics.js'
-import { T as GT } from './glassTemps.js'
+import { T as GT, setCoolBand, coolGreyFrac } from './glassTemps.js'
+import { macroMeltFrac, macroMeltTarget, meldSandFrame, MELT_DRIVE_TEMP, makeBulkGenState, stepBulkGen, pickBulkCandidate, PARTICLE_FB_END, setBulkMeltLead } from './bulkMelt.js'
 import { BULK_CANDIDATES } from './candidates.generated.js'   // precomputed melt snapshots (dev-regenerated, bundled)
 import './GlassViewer.css'
 
@@ -331,58 +332,8 @@ function energyContentKJ(T, na2oPct, plateau) {
   return c
 }
 
-// One visual frame of the bulk sand sim's irreversible Na₂O melting (grain merging).
-// Shared by the live box loop and the secret heat-up replay so both accumulate identical
-// melting. `temp` is explicit (the replay ramps it); `isSoda` gates the whole block.
-// `probMult` scales the per-pass merge probabilities so the heat-up replay can take coarse
-// temperature steps (one pass standing in for `probMult` live frames) and still reach the same
-// melt degree ~10× faster — the O(n²) merge pass is the bottleneck. Live callers omit it (=1),
-// so live behaviour is unchanged.
-// Macro melt fraction (0–1): share of the original grains now molten (absorbed into blobs).
-// This is the Bulk-tab counterpart to the particle tab's broken-bond fraction (fBroken).
-function macroMeltFrac(phys) {
-  if (!phys?.sandParticles || !phys.nGrainOriginal) return 0
-  let sub = 0
-  for (const g of phys.sandParticles) if (g.type === 'na-sub') sub++
-  return sub / phys.nGrainOriginal
-}
-// Target macro melt fraction at temperature T — a tunable curve meant to OVERLAY the particle
-// tab's fBroken(T) so the two tabs agree. Macro melt is driven TOWARD this and then stops (it
-// doesn't creep), so a paused temperature holds a fixed, matched melt degree. Live-tunable via
-// window._macroMeltOnset / _macroMeltFull.
-function macroMeltTarget(T) {
-  // Bulk melt trickles in from MELT_ONSET (700) — a few particles — and ramps gradually to full
-  // at 1500. Only the FULL point is pushed out (wider range = gentler ramp, no sudden onset jump).
-  // Tunable: window._macroMeltOnset / _macroMeltFull.
-  const onset = window._macroMeltOnset ?? GT.MELT_ONSET            // 700: first few particles
-  const full  = window._macroMeltFull  ?? (GT.MELT_FULL + 200)     // 1500: full melt
-  const u = Math.max(0, Math.min(1, (T - onset) / Math.max(1, full - onset)))
-  return u * u * (3 - 2 * u)   // smoothstep
-}
-
-function meldSandFrame(phys, temp, isSoda, probMult = 1, realTemp = temp) {
-  if (!(isSoda && phys.sandParticles && phys.nNaOriginal > 0)) return
-  // White Na₂O grain merging follows the REAL temperature over the macro-melt span (700→1500),
-  // not the 1500 drive temp. At the drive temp meldProb was 1 → every touching Na pair merged
-  // instantly the moment melting began (r≈6 by 750 °C, r≈12 by 800 °C), and since Na+Na merges
-  // don't count toward macroMeltFrac the target gate never held them back.
-  // Live-tunable: window._naMeldMult (×, default 1).
-  const naOnset    = window._macroMeltOnset ?? GT.MELT_ONSET
-  const naFull     = window._macroMeltFull  ?? (GT.MELT_FULL + 200)
-  const tempFactor = Math.max(0, Math.min(1, (realTemp - naOnset) / Math.max(1, naFull - naOnset)))
-  const meldFrac   = Math.min(1, phys.meldCount / phys.nNaOriginal)
-  const meldProb   = Math.min(1, tempFactor * 0.015 * (1 + meldFrac * 5) * (window._naMeldMult ?? 1) * probMult)
-  // Scale the per-call ABSOLUTE caps by probMult so one coarse replay pass does the work of
-  // ~probMult live frames — without this the 1-per-frame/3-per-frame caps throttle the replay
-  // and mixed melting never catches up (live-callers pass probMult=1, so caps stay 1/3/1).
-  const cap = Math.max(1, Math.round(probMult))
-  if (meldProb > 0) phys.meldCount += mergeSodaGrains(phys.sandParticles, meldProb)
-  convertLargeNaGrains(phys.sandParticles, phys.naBlobs, cap)
-  absorbNearbyGrains(phys.sandParticles, phys.naBlobs, temp, cap)
-  const siFactor  = Math.max(0, Math.min(1, (temp - 1000) / 200))
-  const silFactor = Math.max(0, Math.min(1, (temp - 1200) / 200))
-  mergeSilicateGrains(phys.sandParticles, Math.min(1, siFactor * 0.004 * probMult), Math.min(1, silFactor * 0.004 * probMult), Math.max(3, Math.round(3 * probMult)))
-}
+// Bulk melt progression (macroMeltFrac / macroMeltTarget / meldSandFrame, candidate generator) lives
+// in bulkMelt.js — shared with scripts/gen-candidates.mjs so the bundled snapshots can't drift.
 
 // Heat-up catch-up: when the Bulk tab becomes visible after the temperature changed on the
 // (frozen) Particles tab, fast-forward the melt to the degree it WOULD have reached — melting
@@ -391,7 +342,6 @@ function meldSandFrame(phys, temp, isSoda, probMult = 1, realTemp = temp) {
 // from the actual temperature (the chain's own 700/1000/1200 °C gates would otherwise stall it
 // at moderate temps); macroMeltTarget(T) alone decides HOW MUCH melts, so the catch-up reaches
 // exactly the same melt degree the live loop targets at that temperature.
-const MELT_DRIVE_TEMP = 1500
 function runHeatReplayChunk(phys, s, HS, box, isSoda, fast = false) {
   const R = s.heatReplay
   const settleEvery = window._replaySettleEvery ?? 4
@@ -417,56 +367,6 @@ function runHeatReplayChunk(phys, s, HS, box, isSoda, fast = false) {
     s.temp = R.target
     s.heatReplay = null
   }  // else: still melting — stays hidden behind the loading overlay until it reaches the goal
-}
-
-// ── Candidate states (Bulk tab) ───────────────────────────────────────────────
-// Benchmark temperatures at which we store a precomputed melted sand state. Dense through the
-// melt band (700–1600), sparse at the cold end. Because macro melt is irreversible, these are
-// a HEATING track: each is melted to macroMeltTarget(T). Cooling reuses the peak-temperature
-// snapshot (melt doesn't reverse; only the blob rigidity changes, and that's applied live).
-const BULK_BENCH_TEMPS = [25, 700, 850, 1000, 1150, 1300, 1450, 1600]
-const GEN_MELD_K = 20   // coarse meld during generation (the grid grows to fit, so this is safe)
-// Resumable generator state so the work can be time-boxed across frames with a progress bar.
-function makeBulkGenState(HS, na2o, nGrains, multiRadius) {
-  const phys = { sandParticles: initSandParticles(HS, multiRadius, na2o, nGrains), naBlobs: [], blobMct: {}, meldCount: 0 }
-  phys.nNaOriginal    = phys.sandParticles.filter(g => g.type === 'na').length
-  phys.nGrainOriginal = phys.sandParticles.length
-  for (let i = 0; i < 20; i++) stepSandPhysics(phys.sandParticles, FIXED_DT, HS, 0)
-  return { phys, HS, na2o, benchIdx: 0, frame: 0, out: [], done: false }
-}
-// Advance generation for up to budgetMs; snapshots each benchmark once its melt goal is reached
-// OR the melt saturates (a benchmark's goal can exceed the physical ceiling, e.g. 100% target
-// vs ~90% achievable — stall detection snapshots the saturated state and moves on so it can't hang).
-function stepBulkGen(G, budgetMs = 60) {
-  const deadline = performance.now() + budgetMs
-  while (!G.done && performance.now() < deadline) {
-    const T = BULK_BENCH_TEMPS[G.benchIdx]
-    const goal = G.na2o > 0 ? macroMeltTarget(T) : 0
-    const frac = macroMeltFrac(G.phys)
-    if (frac > (G.benchBest ?? -1) + 0.002) { G.benchBest = frac; G.benchStall = 0 }
-    else G.benchStall = (G.benchStall ?? 0) + 1
-    if (frac >= goal || G.benchStall > 150) {       // reached target, or saturated
-      for (let i = 0; i < 12; i++) stepSandPhysics(G.phys.sandParticles, FIXED_DT, G.HS, 0)
-      G.out.push({ temp: T, snap: snapshotSand(G.phys) })
-      G.benchBest = -1; G.benchStall = 0
-      if (++G.benchIdx >= BULK_BENCH_TEMPS.length) G.done = true
-      continue
-    }
-    meldSandFrame(G.phys, MELT_DRIVE_TEMP, G.na2o > 0, GEN_MELD_K, T)
-    if (G.frame % 6 === 0) {
-      stepNaBlobSprings(G.phys.naBlobs, FIXED_DT, 0, T)
-      stepSandPhysics(G.phys.sandParticles, FIXED_DT, G.HS, 0, G.phys.naBlobs)
-      checkNaBlobMerges(G.phys.naBlobs, G.phys.blobMct, G.phys.sandParticles, T)
-    }
-    G.frame++
-  }
-  return G.benchIdx / BULK_BENCH_TEMPS.length   // progress 0..1
-}
-// Nearest candidate at or below `temp` (melt is irreversible, so never pick a hotter one).
-function pickBulkCandidate(cands, temp) {
-  let best = cands[0]
-  for (const c of cands) if (c.temp <= temp && c.temp >= best.temp) best = c
-  return best
 }
 
 const COOL_MIN_TEMP = 1500   // Slow/Fast Cool only engage from a full melt
@@ -766,7 +666,8 @@ export default function GlassViewer() {
   const [grainFeedback,  setGrainFeedbackState] = useState(true)   // per-grain Si-O break feedback
   const [motionCold,     setMotionColdState]  = useState(0.1)   // lattice jiggle at 0 °C (× full), render only
   const [motionFullT,    setMotionFullTState] = useState(500)   // °C where jiggle reaches full
-  const [pinkFade,       setPinkFadeState]    = useState({ hi: 950, lo: 450, w: 150 })   // cooling: per-bond pink → grey fade band
+  const [coolBand,       setCoolBandState]    = useState({ hi: 1000, lo: 500, w: 150 })   // cooling band (glassTemps COOL_BAND): particle pink fade + Bulk glass crossfade
+  const [bulkLead,       setBulkLeadState]    = useState(0)     // Bulk melt lead (+) / lag (−) vs the particle curve, °C
   const [heatLeadSteps,  setHeatLeadSteps] = useState(30)
   const [glassLook,      setGlassLookState]     = useState({ rim: 2.0, dark: 0.10, gain: 9, lightDeg: 180 })
   const [naHardenT,      setNaHardenTState]     = useState(900)   // Bulk glass starts hardening
@@ -873,15 +774,13 @@ export default function GlassViewer() {
   const bulkCandidatesRef = useRef(BULK_CANDIDATES[presetId] ?? [])   // bundled Bulk melt snapshots for the preset
   const [genProgress,     setGenProgress]     = useState(null)    // candidate generation 0..1 (null = idle)
   const [meltRestore,     setMeltRestore]     = useState(null)    // {token,track,temp} → Particles-tab candidate restore
-  const [macroMeltOnset,  setMacroMeltOnset]  = useState(700)     // macro melt target curve: onset °C
-  const [macroMeltFull,   setMacroMeltFull]   = useState(1300)    // macro melt target curve: full-melt °C
 
   const boxCanvasRef  = useRef(null)
   const miniCanvasRef = useRef(null)
   // Cooled-glass look (Bulk). Read by the box RAF loop; set by dev sliders ("Tune these").
-  //   onT/fullT: crossfade old fill → glass; rim: rim brightness; dark: interior opacity (near-black);
+  //   (crossfade old fill → glass follows the shared COOL_BAND); rim: rim brightness; dark: interior opacity (near-black);
   //   gain: edge curvature = blur radius of the height field (rim width, px); lightDeg: world light direction (for specular).
-  const glassLookRef  = useRef({ onT: 1000, fullT: 500, rim: 2.0, dark: 0.10, gain: 9, lightDeg: 180 })
+  const glassLookRef  = useRef({ rim: 2.0, dark: 0.10, gain: 9, lightDeg: 180 })
   // Glass look only applies to glass that has been melted and is COOLING: eases to 1 once a cool
   // run starts, back to 0 if heating resumes; reset with the composition. Never during heating.
   const glassGateRef  = useRef(0)
@@ -1775,7 +1674,7 @@ export default function GlassViewer() {
 
             bpMark('blob 1B mask')
             // ── Cooled glass (steps 1–3 of the glass look) ─────────────────────────────
-            // glassAmt crossfades the old self-lit fill → glass as the melt cools 1000 → 500 °C.
+            // glassAmt crossfades the old self-lit fill → glass across the shared cooling band (1000 → 500 °C).
             // The crisp blob mask, BLURRED by GL.gain px, is treated as the blob's HEIGHT (a pillow:
             // 0.5 at the outline rising smoothly to 1 inside over the blur radius):
             //  1. normal = from the height gradient (smooth + curved, works for merged/concave
@@ -1786,8 +1685,7 @@ export default function GlassViewer() {
             //     refracted edge on the shadow side, a faint exit glow opposite the light.
             //     Edge alpha comes from the soft height too → anti-aliased curved outline.
             const GL = glassLookRef.current
-            const gu = Math.max(0, Math.min(1, (GL.onT - s.temp) / Math.max(1, GL.onT - GL.fullT)))
-            const glassAmt = gu * gu * (3 - 2 * gu) * glassGateRef.current   // cooling only
+            const glassAmt = coolGreyFrac(s.temp) * glassGateRef.current   // cooling only; = share of particle bonds gone grey (shared COOL_BAND)
             if (glassAmt > 0) {
               gfctx.clearRect(0, 0, BOX_SIZE, BOX_SIZE)
               gfctx.filter = `blur(${GL.gain}px)`
@@ -2511,7 +2409,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 96
+                  }}>Field Test Version 97
                     {/* Quality: set by the startup speed test (bonds' benchmark), auto-adjusted at
                         runtime; a manual pick becomes the ceiling. */}
                     <select value={quality} onChange={e => pickQuality(e.target.value)}
@@ -2862,19 +2760,23 @@ export default function GlassViewer() {
                   easy to find. Move a control down into its normal section once its value is settled. */}
               <div style={{border:'1px solid #6a5a9a', borderRadius:4, padding:'6px 8px 8px', marginBottom:10, background:'rgba(106,90,154,0.12)'}}>
                 <div style={{fontSize:11, color:'#c8b8ff', marginBottom:6, letterSpacing:'0.06em'}}>── Tune these ──</div>
-                {[['hi', 'Cooling: bonds start losing pink at', 500, 1400, 25, ' °C'],
-                  ['lo', 'Cooling: all bonds grey by', 100, 900, 25, ' °C'],
-                  ['w',  'Cooling: each bond fades over', 10, 400, 10, ' °C']].map(([k, label, mn, mx, st, unit]) => (
+                <div style={{fontSize:11, color:'#888', marginBottom:2}}>Bulk melt lead / lag vs particles: <span style={{color:'#a090d0'}}>{bulkLead === 0 ? 'matched' : bulkLead > 0 ? `${bulkLead} °C ahead` : `${-bulkLead} °C behind`}</span></div>
+                <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
+                  min={-200} max={200} step={10} value={bulkLead} onChange={e => { const v = +e.target.value; setBulkLeadState(v); setBulkMeltLead(v) }} />
+                <div style={{fontSize:10, color:'#777', marginBottom:8}}>Heating: Bulk melts to the Particles tab's measured bond-breaking curve (bulkMelt.js). Shift it earlier (+) or later (−). Applies live; the bundled snapshots are melted at 0.</div>
+                {[['hi', 'Cooling band: starts at', 500, 1400, 25, ' °C'],
+                  ['lo', 'Cooling band: complete by', 100, 900, 25, ' °C'],
+                  ['w',  'Cooling band: each bond fades over', 10, 400, 10, ' °C']].map(([k, label, mn, mx, st, unit]) => (
                   <div key={k}>
-                    <div style={{fontSize:11, color:'#888', marginBottom:2}}>{label}: <span style={{color:'#a090d0'}}>{pinkFade[k]}{unit}</span></div>
+                    <div style={{fontSize:11, color:'#888', marginBottom:2}}>{label}: <span style={{color:'#a090d0'}}>{coolBand[k]}{unit}</span></div>
                     <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
-                      min={mn} max={mx} step={st} value={pinkFade[k]}
-                      onChange={e => { const next = { ...pinkFade, [k]: +e.target.value }
+                      min={mn} max={mx} step={st} value={coolBand[k]}
+                      onChange={e => { const next = { ...coolBand, [k]: +e.target.value }
                         if (next.lo > next.hi - 25) { if (k === 'lo') next.lo = next.hi - 25; else next.hi = next.lo + 25 }
-                        setPinkFadeState(next); setPinkFade(next) }} />
+                        setCoolBandState(next); setCoolBand(next) }} />
                   </div>
                 ))}
-                <div style={{fontSize:10, color:'#777', marginBottom:8}}>Particles, cooling only: each bond has its own random fade temperature inside this band and fades smoothly over the width, so the network goes pink → grey gradually instead of all at once. Heating unchanged.</div>
+                <div style={{fontSize:10, color:'#777', marginBottom:8}}>Cooling, both tabs: Particles bonds each fade pink → grey at their own random temperature in this band; the Bulk blob turns to clear glass in step with the share of bonds gone grey. (Bulk rigidity has its own sliders below.)</div>
                 <div style={{fontSize:11, color:'#888', marginBottom:2}}>Hardening glass wall gap: <span style={{color:'#a090d0'}}>{glassWallPad} × orb r</span></div>
                 <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
                   min={0} max={8} step={0.5} value={glassWallPad} onChange={e => { const v = +e.target.value; setGlassWallPadState(v); setGlassWallPad(v) }} />
@@ -2954,18 +2856,11 @@ export default function GlassViewer() {
               {/* ── Macro-vs-particle melt match ── tune onset/full so Macro tracks Particle. */}
               <div style={{fontSize:11, color:'#aaa', marginBottom:4, letterSpacing:'0.06em'}}>── Melt match ──</div>
               <div style={{fontFamily:'monospace', fontSize:11, background:'rgba(255,220,80,0.06)', border:'1px solid rgba(255,220,80,0.18)', borderRadius:4, padding:'5px 8px', marginBottom:6}}>
-                <div>particle (fBroken): <span style={{color:'#88ddaa'}}>{(fBroken * 100).toFixed(0)}%</span></div>
-                <div>macro (melted):     <span style={{color:'#e0a060'}}>{(boxMeltFrac * 100).toFixed(0)}%</span></div>
-                <div style={{color:'#888'}}>target @ {Math.round(meltLocalTemp)}°C: {(macroMeltTarget(meltLocalTemp) * 100).toFixed(0)}%</div>
+                <div>particles (fBroken ÷ end): <span style={{color:'#88ddaa'}}>{(Math.min(1, fBroken / PARTICLE_FB_END) * 100).toFixed(0)}%</span></div>
+                <div>bulk (grains melted):      <span style={{color:'#e0a060'}}>{(boxMeltFrac * 100).toFixed(0)}%</span></div>
+                <div style={{color:'#888'}}>bulk target @ {Math.round(meltLocalTemp)}°C: {(macroMeltTarget(meltLocalTemp) * 100).toFixed(0)}%</div>
               </div>
-              <div style={{fontSize:11, color:'#888', marginBottom:2}}>Macro melt onset °C: <span style={{color:'#a090d0'}}>{macroMeltOnset}</span></div>
-              <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
-                min={400} max={1100} step={10} value={macroMeltOnset}
-                onChange={e => { const v = +e.target.value; setMacroMeltOnset(v); window._macroMeltOnset = v }} />
-              <div style={{fontSize:11, color:'#888', marginTop:6, marginBottom:2}}>Macro melt full °C: <span style={{color:'#a090d0'}}>{macroMeltFull}</span></div>
-              <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
-                min={900} max={1800} step={10} value={macroMeltFull}
-                onChange={e => { const v = +e.target.value; setMacroMeltFull(v); window._macroMeltFull = v }} />
+              <div style={{fontSize:10, color:'#777', marginBottom:8}}>Bulk follows the measured particle curve (bulkMelt.js PARTICLE_MELT_CURVE); shift it with "Bulk melt lead / lag" in Tune these.</div>
 
               <label style={{display:'flex', alignItems:'center', gap:6, fontSize:12, color:'#ccc', marginBottom:8, cursor:'pointer'}}>
                 <input type="checkbox" checked={showMiniView} onChange={e => setShowMiniView(e.target.checked)} style={{accentColor:'#88ddaa'}} />

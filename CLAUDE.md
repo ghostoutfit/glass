@@ -90,10 +90,29 @@ up at < 0.4× (0.15× into hires), 2.5 s cooldown, 12 s anti-flap lock, ceiling 
 user's pick). Dropdown sits after the FIELD TEST VERSION tag. Console: `perfReport()`,
 `setAutoQuality(false)`, `window._perfLog = true` to log tier changes.
 
-⚠️ `candidates.generated.js` (Bulk restore states) is stale — generated before the blob-centre and
-merge fixes (192 separate blobs at 1450 °C vs one live). `scripts/gen-candidates.mjs` duplicates the
-melt formulas and has drifted (old 700→1300 curve, no `naBlobs` to `stepSandPhysics`); update it to
-match `GlassViewer.meldSandFrame`/`macroMeltTarget` before regenerating.
+## Bulk ↔ Particles matching (v4, `bulkMelt.js` + `glassTemps.js` COOL_BAND)
+
+- **Heating — one curve.** `PARTICLE_MELT_CURVE` (bulkMelt.js) is the Particles tab's broken-bond
+  fraction fBroken(T) ÷ its end value (`PARTICLE_FB_END` 0.41), measured in-app (High Na₂O, Fast +
+  Slow Heat × 2 runs, 50 °C bins; Fast and Slow agree to ±0.05). `macroMeltTarget(T)` = that curve
+  (shifted by the dev slider "Bulk melt lead / lag", `setBulkMeltLead`); ≥ 99.5 % → 1 so the end of
+  heating is fully melted. **Re-measure after retuning particle melt physics** (scratchpad
+  `fbcurve.mjs`: samples fBroken from the dev "Melt match" readout during a heat), then regenerate.
+- **Bulk melt metric** `macroMeltFrac` = share of original grains no longer free (merged or
+  absorbed); reaches exactly 1. (The old orbs ÷ grains metric topped out at ~0.74, so its 100 %
+  target was unreachable.) Na-merge rate also follows the curve (`tempFactor = 1.5 × progress`).
+- **Measured**: live Bulk tracks the target within ±1 point from 600 → 1700 °C on Fast Heat, 99 % at
+  1800 after 2 s, 100 % by 10 s; switching tabs mid-heat restores 32 % vs 34 % target (1054 °C),
+  78 % vs 78 % (1354 °C).
+- **One implementation**: `meldSandFrame`, `macroMeltFrac/Target`, the candidate generator
+  (`makeBulkGenState` / `stepBulkGen`), `pickBulkCandidate` all live in `bulkMelt.js`; GlassViewer and
+  `scripts/gen-candidates.mjs` both import it (the script used to carry a drifted copy). Regenerate
+  `candidates.generated.js` with `node scripts/gen-candidates.mjs` (~0.3 s) whenever the curve or
+  the sand melt physics changes.
+- **Cooling — one band.** `COOL_BAND` {hi 1000, lo 500, w 150} in glassTemps.js. Particles: each
+  bond's pink → grey fade (`coolBondPink(T, slot)`). Bulk: the hot fill → clear-glass crossfade
+  `glassAmt = coolGreyFrac(T)` = share of particle bonds gone grey. Dev sliders "Cooling band: …"
+  move both tabs together. Bulk rigidity (900 → 500) keeps its own sliders.
 
 # ⚡ Performance — read this before touching the hot paths
 
@@ -1004,8 +1023,9 @@ selection/hover rings → charge halos → bond-count labels → live-stats HUD.
 - **Thermal fade.** Heating: `thermPink = clamp((targetTempC − 500) / 150)` multiplies strain
   before colouring (pink appears 500 → 650 °C). Cooling (`drawScene({ cooling })` — live:
   `coolRunRef`, replay: frame flag `c`): each bond gets a fixed random slot (`bondSlot(i, j)`, hash
-  of the atom pair) and its own smoothstep fade of width `_pinkFadeW` (150 °C) placed uniformly
-  inside [`_pinkFadeLo` 450, `_pinkFadeHi` 950] — dev sliders. The finished strain colour is
+  of the atom pair) and its own smoothstep fade of width `COOL_BAND.w` (150 °C) placed uniformly
+  inside [`COOL_BAND.lo` 500, `COOL_BAND.hi` 1000] (glassTemps.js `coolBondPink`, shared with the
+  Bulk glass crossfade) — dev sliders. The finished strain colour is
   BLENDED toward the zero-strain grey (scaling strain instead is invisible on saturated bonds, which
   made the fade happen all at once at the end). Measured fast cool: strong-pink pixel count starts
   falling at ~950 °C and is gone by ~500, vs a ~150 °C cliff before.
