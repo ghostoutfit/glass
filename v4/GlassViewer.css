@@ -481,6 +481,7 @@ body[data-theme='light'] .particle-area     { background: #ede8df; }
   transition: background 0.15s, box-shadow 0.15s;
 }
 .time-btn:active { transform: translateY(1px); }
+.time-btn:disabled { opacity: 0.30; cursor: default; transform: none; }
 .time-btn.running {   /* no red — same dark-blue steel as the turtle / rabbit beside it */
   background: linear-gradient(165deg, #1e2a40 0%, #141e30 50%, #0e1624 100%);
   border: 1px solid #2e4060;

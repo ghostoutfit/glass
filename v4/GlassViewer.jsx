@@ -768,12 +768,18 @@ export default function GlassViewer() {
   const [sandPaused,      setSandPaused]      = useState(false)
   const [sandDevMode,     setSandDevMode]     = useState(false)
   const [boxLoading,      setBoxLoading]      = useState(false)   // loading overlay during heat-up replay
+  // Particles catch-up on return from Bulk (meltTrack worker): time stands still behind a loading
+  // overlay until the computed state for the current temperature is in place.
+  const [particlesLoading, setParticlesLoading] = useState(false)
+  // The run's replay history has a hole (time passed on the Bulk tab) → replay controls disabled
+  // until the next run starts a fresh history.
+  const [historyGap,      setHistoryGap]      = useState(false)
+  const onParticlesCatchup = useCallback(v => { setParticlesLoading(v); if (v) setHistoryGap(true) }, [])
   const boxLoadingRef     = useRef(false)
   const [boxMeltFrac,     setBoxMeltFrac]     = useState(0)       // macro melt fraction (dev stat)
   const lastMeltStatRef   = useRef(0)
   const bulkCandidatesRef = useRef(BULK_CANDIDATES[presetId] ?? [])   // bundled Bulk melt snapshots for the preset
   const [genProgress,     setGenProgress]     = useState(null)    // candidate generation 0..1 (null = idle)
-  const [meltRestore,     setMeltRestore]     = useState(null)    // {token,track,temp} → Particles-tab candidate restore
 
   const boxCanvasRef  = useRef(null)
   const miniCanvasRef = useRef(null)
@@ -962,13 +968,8 @@ export default function GlassViewer() {
       }
     }
 
-    // Particles tab: on a stale re-entry (energy/track changed while hidden), restore the
-    // nearest melt candidate for the current track; unchanged → resume the exact frozen state.
-    if (tab === 'melt' && stale && now.temp > 30) {
-      const cm = coolingModeRef.current
-      const track = cm === 'slow' ? 'slow' : cm === 'fast' ? 'fast' : 'heating'
-      setMeltRestore({ token: Date.now(), track, temp: now.temp })
-    }
+    // Particles tab: CompositionView detects a stale re-entry itself (first visible frame) and
+    // catches up via its worker — see onCatchup below.
   }, [tab, currentCond])
 
   useEffect(() => {
@@ -1067,7 +1068,7 @@ export default function GlassViewer() {
   }, [])
 
   // ── Replay / time ─────────────────────────────────────────────────────────
-  const timeStopped = timePaused || replayFrame !== null
+  const timeStopped = timePaused || replayFrame !== null || particlesLoading
   const replayFrameInfo = replayFrame !== null ? replayInfoRef.current[replayFrame] : null
   const shownTemp = replayFrameInfo ? replayFrameInfo.t : meltLocalTemp   // LCDs follow the scrubbed moment
   timeStoppedRef.current = timeStopped
@@ -1093,7 +1094,7 @@ export default function GlassViewer() {
     bondPhaseRef.current = phase
     if (bondCountsRef.current) setBondRef({ phase, counts: bondCountsRef.current })
     setReplayFrame(null); setReplayPlaying(false)   // back to LIVE before the history is replaced
-    setHistoryRun(n => n + 1)
+    setHistoryRun(n => n + 1); setHistoryGap(false)
   }, [])
   const onGoTemp = useCallback(() => {
     const v = Math.max(0, Math.min(1800, Math.round(+gotoTemp)))
@@ -2309,7 +2310,7 @@ export default function GlassViewer() {
     meltCumulativeEnergyRef.current = 0
     setMeltLocalTemp(MELT_START_TEMP); setDerivedTemp(MELT_START_TEMP)
     // particle counts / bonds
-    setBondCounts(null); setInitialBondCounts(null); setBondRef(null); bondPhaseRef.current = null; setHistoryRun(0)
+    setBondCounts(null); setInitialBondCounts(null); setBondRef(null); bondPhaseRef.current = null; setHistoryRun(0); setHistoryGap(false)
     initialBondCapturedRef.current = false
     bondCountsRef.current = null
     // box particle arrangement → rebuild; rotation → home
@@ -2321,7 +2322,7 @@ export default function GlassViewer() {
     if (box) { box.boxAngle = 0; box.boxAngularVel = 0 }
     // replay scrubber / overlays / macro-melt stat / candidate restore
     setReplayFrame(null); setReplayFrameCount(0); setReplayPlaying(false)
-    setBoxLoading(false); setBoxMeltFrac(0); setMeltRestore(null)
+    setBoxLoading(false); setBoxMeltFrac(0); setParticlesLoading(false)
     // background back to black (gray fade latch)
     bgGrayRef.current = 0; bgHeatTintRef.current = 0; bgCoolTintRef.current = 0; glassGateRef.current = 0
     // rebuild the melt-tab particle arrangement + clear the graph history (even on same preset)
@@ -2359,11 +2360,11 @@ export default function GlassViewer() {
                 <ScrubSlider
                   value={replayFrameCount > 1 && replayFrame != null ? replayFrame / (replayFrameCount - 1) : 1}
                   onChange={v => {
-                    if (replayFrameCount < 2) return
+                    if (replayFrameCount < 2 || historyGap) return
                     setReplayPlaying(false)
                     setReplayFrame(v >= 0.995 ? null : Math.round(v * (replayFrameCount - 1)))
                   }}
-                  disabled={replayFrameCount < 2}
+                  disabled={replayFrameCount < 2 || historyGap}
                 />
               </div>
             </div>
@@ -2388,14 +2389,15 @@ export default function GlassViewer() {
                       split). Shown on BOTH tabs: it stops time everywhere. */}
                   <button className={`time-btn ${timePaused ? 'paused' : 'running'}`}
                     style={{position:'absolute', right:'100%', marginRight:6, top:0, bottom:0, width:58, padding:0, fontSize:13}}
+                    disabled={historyGap && !timePaused && tab === 'melt'}
                     title={timePaused ? 'GO — resume time' : 'Pause — stop time'}
                     onClick={() => setTimePaused(p => !p)}>{timePaused ? '▶ GO' : '❙ ❙'}</button>
                   <button className={`action-btn replay-btn${replayPlaying === 'slow' ? ' active' : ''}`} style={{padding:'2px 9px', fontSize:11, flexShrink:0, display:'flex', alignItems:'center', justifyContent:'center', visibility: tab === 'melt' ? 'visible' : 'hidden'}}
-                    disabled={replayFrameCount < 2} title="Replay history slowly"
+                    disabled={replayFrameCount < 2 || historyGap} title={historyGap ? 'No replay for this run — part of it happened on the Bulk tab' : 'Replay history slowly'}
                     onClick={() => playReplay('slow')}
                   ><img src="/glass/Turtle.png" draggable={false} style={{ height: '1.5em', filter: 'brightness(0) invert(1) brightness(0.7) sepia(1) hue-rotate(166deg) brightness(0.95)', marginRight: 3 }} /><span style={{ fontSize: '1.4em', color: '#90c8f0', lineHeight: 1 }}>↺</span></button>
                   <button className={`action-btn replay-btn${replayPlaying === 'fast' ? ' active' : ''}`} style={{padding:'2px 9px', fontSize:11, flexShrink:0, display:'flex', alignItems:'center', justifyContent:'center', visibility: tab === 'melt' ? 'visible' : 'hidden'}}
-                    disabled={replayFrameCount < 2} title="Replay history fast"
+                    disabled={replayFrameCount < 2 || historyGap} title={historyGap ? 'No replay for this run — part of it happened on the Bulk tab' : 'Replay history fast'}
                     onClick={() => playReplay('fast')}
                   ><img src="/glass/Rabbit.png" draggable={false} style={{ height: '1.5em', filter: 'brightness(0) invert(1) brightness(0.7) sepia(1) hue-rotate(166deg) brightness(0.95)', marginRight: 3 }} /><span style={{ fontSize: '1.4em', color: '#90c8f0', lineHeight: 1 }}>↺</span></button>
                     </div>
@@ -2409,7 +2411,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 97
+                  }}>Field Test Version 98
                     {/* Quality: set by the startup speed test (bonds' benchmark), auto-adjusted at
                         runtime; a manual pick becomes the ceiling. */}
                     <select value={quality} onChange={e => pickQuality(e.target.value)}
@@ -3095,7 +3097,7 @@ export default function GlassViewer() {
           {/* Melt canvas — always mounted so its physics state survives a tab switch
               and the two tabs can be A/B'd instantly. `active` freezes its stepping
               and drawing while the Bulk Material tab is showing. */}
-          <div style={{ display: tab==='melt' ? 'flex' : 'none', flexDirection:'column', width:'100%', height:'100%' }}>
+          <div style={{ display: tab==='melt' ? 'flex' : 'none', flexDirection:'column', width:'100%', height:'100%', position:'relative' }}>
             <CompositionView key="melt"
               active={tab === 'melt'} resetToken={meltResetToken} coolCommitted={coolLocked}
               sio2Pct={p.sio2} na2oPct={p.na2o} caoPct={p.cao}
@@ -3110,8 +3112,24 @@ export default function GlassViewer() {
               replayFrame={replayFrame} onReplayReady={handleReplayReady}
               darkMode={darkMode} showCharge={showCharge} chargeLite={chargeLite} showField={effectiveShowField} fieldBlur={fieldBlur} interpolate={interpolate} longerCooledBonds={longerCooledBonds}
               atomColorMode={atomColorMode} showBrokenBonds={showBrokenBonds} showLiveStats={showLiveStats}
-              useEmaStrain={useEmaStrain} hcPlateau={hcPlateau} targetTempLine={gotoTargetTemp} meltRestore={meltRestore}
+              useEmaStrain={useEmaStrain} hcPlateau={hcPlateau} targetTempLine={gotoTargetTemp}
+              onCatchup={onParticlesCatchup}
             />
+            {particlesLoading && (
+              <div style={{
+                position:'absolute', inset:0, display:'flex', flexDirection:'column',
+                alignItems:'center', justifyContent:'center', gap:14,
+                background: darkMode ? '#0a0806' : '#e8e3da', zIndex:5,
+              }}>
+                <div style={{
+                  width:34, height:34, borderRadius:'50%',
+                  border:'3px solid rgba(200,140,60,0.25)', borderTopColor:'#e08030',
+                  animation:'glassspin 0.8s linear infinite',
+                }} />
+                <div style={{ fontSize:13, letterSpacing:'0.08em', textTransform:'uppercase', color:'#c8945a' }}>Loading…</div>
+                <style>{`@keyframes glassspin { to { transform: rotate(360deg) } }`}</style>
+              </div>
+            )}
           </div>
 
           {/* Glass canvas — always mounted so RAF never restarts */}

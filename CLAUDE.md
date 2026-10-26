@@ -186,6 +186,31 @@ How it works now:
   `phys.particles` lets the box sim's existing lazy-init path rebuild. Verified: heating from
   50 → 798 °C on the Bulk Material tab and returning gives a fresh 782-bond array with
   `promoted: 0`; a round trip with nothing changed resumes the same arrays.
+- **Returning to Particles after time passed on Bulk = worker catch-up (v4).** (Supersedes the
+  "rebuilt from a fresh start" above for the melt tab, and the old bundled `candidates.melt.generated.js`
+  — stale since Oct 6, missing most of the physics state, 9 MB in the main bundle; deleted.)
+  `meltTrackWorker.js` (module Worker, created by CompositionView) runs the SAME physics
+  (`meltTrack.js` + `meltRamp.js`, both node/worker-safe) along the standard runs at page load /
+  composition change — Fast Heat 100 → 1800, then Fast Cool and Slow Cool from 1800 — keeping a full
+  state (`snapshotFull`: every evolving phys field, generic) every `TRACK_EVERY` = 40 steps (~58
+  states; ~12 s of worker CPU on an M-series Mac, heat track ready after ~2.5 s). On the FIRST
+  visible frame after Bulk, if the run or temperature moved (`beginCatchupIfStale`, called inside the
+  RAF before anything steps or draws — doing it from a parent effect let a few frames step the stale
+  state at the new temperature and mislabel it), CompositionView asks for the state at the CURRENT
+  temperature on the current run (`coolRunRef` → 'fast'/'slow', else 'heat'); the worker restores the closest state at/behind it
+  — a stored one or the frozen state we left, whichever is nearer — and runs the ≤ 40 remaining
+  steps with the live ramps' drivers (heat: Fast-Heat integrator + heat lead; cool: the latent-heat
+  cooling curve + longer-bonds latch; cool runs matched by temperature on the from-1800 run).
+  Meanwhile GlassViewer's `particlesLoading` stops time (part of `timeStopped`) and shows a Loading
+  overlay. Measured: 1254 °C heat return → 137 ms, 33 steps from the stored track; slow-cool 800 °C
+  → 162 ms, 22 steps; slow-cool 390 °C → 82 ms, 12 steps; fast-cool 985 °C → 5 steps. Nothing to
+  regenerate when the physics changes — the worker recomputes per page load.
+- **Module caches vs restored state**: a restored slow-cool state carries `_templTgt` indices into the
+  crystal template even if THIS thread never ran `assignTemplate` (the cool started while hidden), so
+  every reader now builds the template on demand (`crystTemplate()`; deterministic, cached). Any new
+  module-level cache that run state points into needs the same treatment.
+- **History gap**: a stale return sets `historyGap` → turtle, rabbit, scrubber and Pause are
+  disabled (the run's history skips the Bulk time) until the next run starts (`markBondRun`) or Reset.
 
 ⚠️ **Why the melt tab's energy ramp still runs while frozen.** `startCooling` sets
 `energyInput = 0` and leaves *CompositionView's* energy-content ramp as "the sole temperature

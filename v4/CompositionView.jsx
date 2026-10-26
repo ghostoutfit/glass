@@ -4,24 +4,22 @@ import { initPhysics, stepPhysics, setSiOr0,
          buildRigidBondMap, setSioExclMult, setBreakStrain, setReformStrain, setCrystAnchorK, setLiberateFrac, setSioK, setNaOK,
          setNaAnchorK, setNaLiberateFrac, setNaBreakStrain, setLatticeSpeedMult, setFreedSpeedMult,
          resetLibStats, getLibStats, measureStrain95, meltStructure, setUseEmaStrain,
-         verifyHashPairs, setMeltHash, setCoolBondScale, restoreMelt } from './meltPhysics.js'
+         verifyHashPairs, setMeltHash, setCoolBondScale } from './meltPhysics.js'
 import { drawScene, QTY_COLORS, ENERGY_KJ_MULT, setVisualScale, findAtomNear, getVisualScale, getLastHudLines, effectiveDpr } from './renderer.js'
 import { buildGrid, buildAllAtoms } from './meltGrid.js'
 import { T as GT } from './glassTemps.js'
-import { MELT_CANDIDATES } from './candidates.melt.generated.js'   // precomputed catch-up states (bundled)
+import { heatCap, energyContent, coolEnergyContent, coolTempForContent, rampEnergyLinearInContent, FAST_COOL_FRAMES, SLOW_COOL_FRAMES, BASE_STEPS_PER_SEC } from './meltRamp.js'
+import { snapshotFull, restoreFull } from './meltTrack.js'   // Particles catch-up (states computed by meltTrackWorker)
 
 
 // Cooling durations in SIM STEPS (not frames). With wall-clock pacing the ramp advances by
 // the number of steps taken, so a cool always runs this many relaxation steps regardless of
 // frame rate — the slow-vs-fast-cool structure difference no longer depends on the hardware.
 // At BASE_STEPS_PER_SEC these equal the historical ~4.5 s / ~24 s wall-clock at simSpeed 1.
-const FAST_COOL_FRAMES = 270   // ~4.5 s at simSpeed 1
-const SLOW_COOL_FRAMES = 1440  // ~24 s at simSpeed 1
 const REPLAY_MAX = 900          // history frames kept (decimated beyond this)
 
 // Wall-clock pacing: the sim advances by elapsed real time, not per rendered frame, so faster
 // hardware just draws more (smoother) frames of the SAME sim rate instead of running faster.
-const BASE_STEPS_PER_SEC = 60   // sim steps per second at simSpeed 1 (simSpeed scales this)
 const MAX_FRAME_DT       = 0.1  // clamp elapsed (s): a struggling machine lags, never spirals
 const MAX_STEPS_PER_FRAME = 8   // safety cap on catch-up work in any single frame
 
@@ -52,66 +50,6 @@ function fmtE(v) {
 
 // x-axis = thermal energy CONTENT at temperature T: ∫₀ᵀ hc(T)·dT, in per-particle units.
 // Mirrors meltHeatCapacity in GlassViewer (ramp 500→750 to a Na₂O-scaled plateau).
-const HC_LO = 500, HC_HI = 750
-function heatCap(T, na2oPct, plateau) {
-  const amp = (plateau - 1) * Math.min(1, na2oPct / 30)
-  if (amp <= 0 || T <= HC_LO) return 1
-  const t = Math.min(1, (T - HC_LO) / (HC_HI - HC_LO))
-  return 1 + amp * t * t * (3 - 2 * t)
-}
-function energyContent(T, na2oPct, plateau) {   // per-particle units
-  let c = 0
-  for (let x = 5; x <= T; x += 5) c += heatCap(x, na2oPct, plateau) * 5
-  return c * ENERGY_UNIT
-}
-// Inverse: temperature whose content equals `target`. Lets ramps interpolate linearly in
-// ENERGY (content) instead of temperature, so the kJ readout changes at a constant rate
-// through the latent-heat plateau — independent of temperature or bonds breaking.
-function tempForContent(target, na2oPct, plateau) {
-  if (target <= 0) return 0
-  let c = 0
-  for (let x = 5; x <= 2000; x += 5) { c += heatCap(x, na2oPct, plateau) * 5 * ENERGY_UNIT; if (c >= target) return x }
-  return 2000
-}
-
-// ── Cooling heat capacity (distinct from heating — different physics) ──────────
-// On cooling the substance RELEASES latent heat where bonds form, which on the T-vs-energy
-// graph is a shallower slope (less temperature drop per unit energy removed). Shape, matching
-// what's on screen:
-//   • T > 1100: no bonds forming yet → low heat capacity → STEEP (fast temp drop per energy)
-//   • 500–1100: bonds forming, lenses fading pink→white → high heat capacity → SHALLOW shelf
-//   • T < 500:  solid, energy just leaves the kinetic bucket → low heat capacity → STEEP again
-// Slow cool finds more/better bonds, so it releases MORE latent heat → an even taller hump
-// (even shallower shelf) than fast. Live-tunable via window._coolLatentSlow / _coolLatentFast.
-const COOL_BAND_LO = GT.LATENT_LO, COOL_BAND_HI = GT.CRYST_LOCK, COOL_BAND_W = 60
-// The latent-heat shelf scales with Na₂O exactly like heating's heatCap (× min(1, na2o/30)), so
-// pure SiO₂ — no bonds break or form — has a flat curve and cools straight back down the heating line.
-function coolHeatCap(T, slow, na2oPct = 30) {
-  const amp = 1 + ((slow ? (window._coolLatentSlow ?? 7) : (window._coolLatentFast ?? 3)) - 1) * Math.min(1, na2oPct / 30)
-  const ss = (a, b, x) => { const u = Math.max(0, Math.min(1, (x - a) / (b - a))); return u * u * (3 - 2 * u) }
-  const band = ss(COOL_BAND_LO - COOL_BAND_W, COOL_BAND_LO + COOL_BAND_W, T) *
-               (1 - ss(COOL_BAND_HI - COOL_BAND_W, COOL_BAND_HI + COOL_BAND_W, T))
-  return 1 + (amp - 1) * band
-}
-function coolEnergyContent(T, slow, na2oPct) {
-  let c = 0
-  for (let x = 5; x <= T; x += 5) c += coolHeatCap(x, slow, na2oPct) * 5
-  return c * ENERGY_UNIT
-}
-function coolTempForContent(target, slow, na2oPct) {
-  if (target <= 0) return 0
-  let c = 0
-  for (let x = 5; x <= 2000; x += 5) { c += coolHeatCap(x, slow, na2oPct) * 5 * ENERGY_UNIT; if (c >= target) return x }
-  return 2000
-}
-// Ramp ePerParticle so that energy CONTENT moves linearly from the start temp to endTemp.
-function rampEnergyLinearInContent(startE, endTemp, t, na2oPct, plateau) {
-  const Tstart = startE / ENERGY_UNIT - 273
-  const cStart = energyContent(Math.max(0, Tstart), na2oPct, plateau)
-  const cEnd   = energyContent(endTemp, na2oPct, plateau)
-  const T = tempForContent(cStart * (1 - t) + cEnd * t, na2oPct, plateau)
-  return (T + 273) * ENERGY_UNIT
-}
 const GRAPH_E_MIN = 0
 // Graph geometry (CSS px) — shared by drawing and by pointer hit-testing.
 const GRAPH_PAD = { L: 46, R: 10, T: 10, B: 30 }
@@ -340,7 +278,7 @@ function countBonds(phys) {
   return counts
 }
 
-export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, attractK = 0, attractFalloff = 1, debug = false, bondNums = false, meltTemp = 50, simSpeed = 1, speedMult = 1, coolingMode = null, onTempUpdate = null, onEnergyUpdate = null, onBondCounts = null, replayFrame = null, onReplayReady = null, graphCanvasRef = null, graphUiRef = null, cumulativeEnergyRef = null, graphXMaxRef = null, darkMode = true, showCharge = false, chargeLite = false, showField = true, fieldBlur = true, interpolate = false, longerCooledBonds = true, atomColorMode = 'normal', showBrokenBonds = false, showLiveStats = false, useEmaStrain = true, hcPlateau = 4, active = true, resetToken = 0, targetTempLine = null, meltRestore = null, coolCommitted = null, heatRateRef = null, heatLeadSteps = 30, timePaused = false, replayInfoRef = null, historyRun = 0, onFrameCost = null }) {
+export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, attractK = 0, attractFalloff = 1, debug = false, bondNums = false, meltTemp = 50, simSpeed = 1, speedMult = 1, coolingMode = null, onTempUpdate = null, onEnergyUpdate = null, onBondCounts = null, replayFrame = null, onReplayReady = null, graphCanvasRef = null, graphUiRef = null, cumulativeEnergyRef = null, graphXMaxRef = null, darkMode = true, showCharge = false, chargeLite = false, showField = true, fieldBlur = true, interpolate = false, longerCooledBonds = true, atomColorMode = 'normal', showBrokenBonds = false, showLiveStats = false, useEmaStrain = true, hcPlateau = 4, active = true, resetToken = 0, targetTempLine = null, coolCommitted = null, heatRateRef = null, heatLeadSteps = 30, timePaused = false, replayInfoRef = null, historyRun = 0, onFrameCost = null, onCatchup = null }) {
   const types = useMemo(
     () => buildGrid(sio2Pct, na2oPct, caoPct),
     [sio2Pct, na2oPct, caoPct]
@@ -619,6 +557,8 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
     frameAccRef.current = 0
     lastTsRef.current = 0   // restart elapsed-time pacing cleanly after a rebuild
     setCoolBondScale(1)     // reset "longer cooled bonds" on a fresh build
+    lastActiveRef.current = { kind: 'heat', T: energyValRef.current }   // fresh build = current state
+    catchingUpRef.current = false; catchReqRef.current++   // drop any in-flight catch-up (its reply is ignored)
     histRef.current = []
     if (graphUiRefRef.current?.current) graphUiRefRef.current.current.markers.length = 0   // markers belong to this graph
     replayRef.current = { frames: [], every: 2, acc: 0, lastNotify: 0 }   // history belongs to this run
@@ -895,31 +835,75 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
     // buildRigidBondMap → 20 warm-up steps at the current target temperature.
   }, [cellData, resetToken])  // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Candidate-state catch-up: when GlassViewer signals a stale melt-tab re-entry (energy or
-  // cooling track changed while we were hidden), restore the nearest precomputed snapshot for
-  // the current track + temperature instead of resuming the now-wrong frozen state. Soda-only
-  // (pure never melts); falls through to the resumed state if no matching candidate or the atom
-  // count doesn't match. This coexists with the normal frozen-resume (no energy change → no token).
-  const lastRestoreTokenRef = useRef(0)
+  // ── Catch-up on return from the Bulk tab ─────────────────────────────────────────────────
+  // While Bulk shows, this tab's physics is frozen but its temperature ramp keeps running. A
+  // background worker (meltTrackWorker.js) walks the physics along the standard runs (Fast Heat to
+  // 1800, then Fast / Slow Cool) at page load and keeps a full state every 40 steps. On a stale
+  // re-entry we ask it for the state at the CURRENT temperature on the current run: it restores the
+  // closest state at/behind it (stored, or the one we froze at if that's nearer) and runs the few
+  // remaining steps. Time stands still behind a loading overlay (onCatchup → GlassViewer) until the
+  // state is in place, so the view never shows the old state drifting to the new one.
+  const workerRef      = useRef(null)
+  const workerGenRef   = useRef(0)
+  const catchReqRef    = useRef(0)
+  const lastActiveRef  = useRef({ kind: 'heat', T: meltTemp })   // where the visible sim last was
+  const onCatchupRef   = useRef(onCatchup)
+  useEffect(() => { onCatchupRef.current = onCatchup }, [onCatchup])
   useEffect(() => {
-    const r = meltRestore
-    if (!r || !r.token || r.token === lastRestoreTokenRef.current) return
-    lastRestoreTokenRef.current = r.token
-    const phys = physRef.current
-    if (!phys || na2oPct <= 0) return
-    const set = MELT_CANDIDATES.soda?.[r.track]
-    if (!set || !set.length) return
-    let best = set[0]
-    for (const c of set) if (Math.abs(c.temp - r.temp) < Math.abs(best.temp - r.temp)) best = c
-    if ((best.snap?.n ?? -1) !== phys.n) return        // composition mismatch guard
-    restoreMelt(phys, best.snap)
-    const nb = phys.rigidBonds.length                  // resize measurement-only arrays
-    phys.everBroken     = new Uint8Array(nb)
-    phys.wasIntact      = new Uint8Array(nb).fill(1)
-    phys.currentIntact  = new Int32Array(nb)
-    phys.lifetimeTotal  = new Float64Array(nb)
-    phys.lifetimeBreaks = new Int32Array(nb)
-  }, [meltRestore, na2oPct])
+    let w = null
+    try { w = new Worker(new URL('./meltTrackWorker.js', import.meta.url), { type: 'module' }) } catch { return }
+    workerRef.current = w
+    w.onmessage = e => {
+      const m = e.data
+      if (m.type !== 'state' || m.id !== workerGenRef.current || m.reqId !== catchReqRef.current) return
+      const phys = physRef.current
+      if (phys && m.result) {
+        restoreFull(phys, m.result.snap)
+        setCoolBondScale(m.result.snap.coolBondScale ?? 1)
+        const nb = phys.rigidBonds.length                  // resize measurement-only arrays
+        phys.everBroken     = new Uint8Array(nb)
+        phys.wasIntact      = new Uint8Array(nb).fill(1)
+        phys.currentIntact  = new Int32Array(nb)
+        phys.lifetimeTotal  = new Float64Array(nb)
+        phys.lifetimeBreaks = new Int32Array(nb)
+        window._lastCatchup = { from: m.result.from, steps: m.result.steps }
+      }
+      catchingUpRef.current = false
+      onCatchupRef.current?.(false)
+    }
+    return () => { w.terminate(); workerRef.current = null }
+  }, [])
+  // (Re)generate the tracks for this composition.
+  useEffect(() => {
+    const w = workerRef.current
+    if (!w) return
+    workerGenRef.current++
+    w.postMessage({ type: 'init', id: workerGenRef.current,
+      comp: { sio2: sio2Pct, na2o: na2oPct, cao: caoPct, sioR0 },
+      P: { na2o: na2oPct, plateau: hcPlateauRef.current, speed: speedRef.current, heatLeadSteps: heatLeadStepsRef.current,
+           attractK: attractKRef.current, speedMult: speedMultRef.current, attractFalloff: attractFalloffRef.current,
+           longerBonds: longerBondsRef.current } })
+  }, [cellData])  // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Called from the RAF loop on the first frame this tab is visible again — BEFORE anything steps or
+  // draws — so the frozen state can neither be shown nor nudged at the new temperature first.
+  const catchingUpRef = useRef(false)
+  const wasActiveRef  = useRef(active)
+  const beginCatchupIfStale = (phys, ePerParticle) => {
+    const w = workerRef.current
+    const kind = coolRunRef.current ?? 'heat'
+    const T = ePerParticle / ENERGY_UNIT - 273
+    const la = lastActiveRef.current
+    if (!w || (kind === la.kind && Math.abs(T - la.T) < 1)) return   // nothing moved → resume as frozen
+    const startT = coolingStartERef.current / ENERGY_UNIT - 273
+    const frozenScale = la.kind === 'heat' ? 1 : 1 + 0.1 * Math.max(0, Math.min(1, (startT - la.T) / 300))
+    catchingUpRef.current = true
+    catchReqRef.current++
+    onCatchupRef.current?.(true)
+    w.postMessage({ type: 'catchup', id: workerGenRef.current, reqId: catchReqRef.current,
+      req: { kind, T, frozen: { kind: la.kind, T: la.T, snap: snapshotFull(phys, frozenScale) } } })
+  }
+
 
   // RAF loop
   useEffect(() => {
@@ -1085,7 +1069,10 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
       // is the sole temperature driver for Slow/Fast Cool, and the Bulk Material tab
       // reads that temperature. Everything below is the expensive part (stepPhysics,
       // drawScene, replay capture, the graph, bond counts) and is frozen with the tab.
-      if (phys && activeRef.current) {
+      const act = activeRef.current
+      if (act && !wasActiveRef.current && phys) beginCatchupIfStale(phys, ePerParticle)
+      wasActiveRef.current = act
+      if (phys && act && !catchingUpRef.current) {
         const rf = replayFrameRef.current
 
         // ── Replay mode: draw a recorded frame WITHOUT touching the live sim ──
@@ -1109,6 +1096,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
           return
         }
 
+        lastActiveRef.current = { kind: coolRunRef.current ?? 'heat', T: ePerParticle / ENERGY_UNIT - 273 }
         // Run the sim steps scheduled for this frame by the wall-clock pacer above.
         for (let s = 0; s < stepsThisFrame; s++) {
           for (const p of phys.particles) { p.px = p.x; p.py = p.y }

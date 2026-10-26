@@ -690,6 +690,10 @@ export function computePE(phys) {
 // The global honeycomb every SiO₂ grain was cut from (meltGrid.buildHexLayer, a = 2·Si-O r0):
 // Si sites, O sites at nearest-neighbour midpoints, and ring centres (cages, 6 Si at distance a).
 let _templCache = null
+// The template is deterministic (depends only on a), so readers build it on demand: a restored
+// slow-cool state (Particles catch-up after a cool that started while the tab was hidden) carries
+// _templTgt indices without this thread ever having run assignTemplate.
+const crystTemplate = () => buildCrystTemplate(2 * PREFERRED['O-Si'].r0)
 function buildCrystTemplate(a) {
   if (_templCache && _templCache.a === a) return _templCache
   const a1x = a * Math.sqrt(3), a2x = a * Math.sqrt(3) / 2, a2y = a * 1.5
@@ -855,7 +859,7 @@ function lockCooledBonds(phys, coolingMode) {
   phys.rigidKeys = new Set(phys.rigidBonds.map(rb => key(rb.i, rb.j)))
   phys.lockedBonds = [...locked.values()]
   // Everyone re-joins the lattice, anchored in place (or at its template site).
-  const T = _templCache, tg = (coolingMode === 'slow' && _crystTemplate) ? phys._templTgt : null
+  const tg = (coolingMode === 'slow' && _crystTemplate) ? phys._templTgt : null, T = tg ? crystTemplate() : null
   for (let i = 0; i < n; i++) {
     const p = P[i]
     p.x0 = p.x; p.y0 = p.y
@@ -1186,7 +1190,7 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
     fx.fill(0); fy.fill(0)
     if (motif) applyMotifForces(particles, motif, motifK, PREFERRED['O-Si'].r0, fx, fy)
     if (templKEff > 0 && phys._templTgt) {
-      const T = _templCache, tg = phys._templTgt
+      const T = crystTemplate(), tg = phys._templTgt
       for (let i = 0; i < n; i++) {
         const k = tg[i]
         if (k < 0 || !everFreed[i]) continue   // never-melted atoms are already on the lattice (anchored at x0)
@@ -1680,8 +1684,8 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
           // Slow + template: anchor to the assigned lattice site, so the anchor reinforces the
           // crystal instead of freezing wherever the atom happened to be.
           const tk = (coolingMode === 'slow' && _crystTemplate && phys._templTgt) ? phys._templTgt[i] : -1
-          if (tk >= 0 && _templCache) {
-            const tid = p.typeId, site = tid === 0 ? _templCache.si[tk] : tid === 1 ? _templCache.oSite[tk] : tid === 2 ? _templCache.ctr[tk] : null
+          if (tk >= 0) {
+            const TC = crystTemplate(), tid = p.typeId, site = tid === 0 ? TC.si[tk] : tid === 1 ? TC.oSite[tk] : tid === 2 ? TC.ctr[tk] : null
             if (site) { p.x0 = p.x + miDx(site[0] - p.x); p.y0 = p.y + miDy(site[1] - p.y) }   // nearest periodic image (anchor spring isn't wrap-aware)
           }
           promoteBonds(phys, i)
