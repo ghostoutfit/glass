@@ -340,7 +340,7 @@ function countBonds(phys) {
   return counts
 }
 
-export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, attractK = 0, attractFalloff = 1, debug = false, bondNums = false, meltTemp = 50, simSpeed = 1, speedMult = 1, coolingMode = null, onTempUpdate = null, onEnergyUpdate = null, onBondCounts = null, replayFrame = null, onReplayReady = null, graphCanvasRef = null, graphUiRef = null, cumulativeEnergyRef = null, graphXMaxRef = null, darkMode = true, showCharge = false, chargeLite = false, showField = true, fieldBlur = true, interpolate = false, longerCooledBonds = true, atomColorMode = 'normal', showBrokenBonds = false, showLiveStats = false, useEmaStrain = true, hcPlateau = 4, active = true, resetToken = 0, targetTempLine = null, meltRestore = null, coolCommitted = null, heatRateRef = null, heatLeadSteps = 30, timePaused = false, replayInfoRef = null, onFrameCost = null }) {
+export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, attractK = 0, attractFalloff = 1, debug = false, bondNums = false, meltTemp = 50, simSpeed = 1, speedMult = 1, coolingMode = null, onTempUpdate = null, onEnergyUpdate = null, onBondCounts = null, replayFrame = null, onReplayReady = null, graphCanvasRef = null, graphUiRef = null, cumulativeEnergyRef = null, graphXMaxRef = null, darkMode = true, showCharge = false, chargeLite = false, showField = true, fieldBlur = true, interpolate = false, longerCooledBonds = true, atomColorMode = 'normal', showBrokenBonds = false, showLiveStats = false, useEmaStrain = true, hcPlateau = 4, active = true, resetToken = 0, targetTempLine = null, meltRestore = null, coolCommitted = null, heatRateRef = null, heatLeadSteps = 30, timePaused = false, replayInfoRef = null, historyRun = 0, onFrameCost = null }) {
   const types = useMemo(
     () => buildGrid(sio2Pct, na2oPct, caoPct),
     [sio2Pct, na2oPct, caoPct]
@@ -427,6 +427,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
   // the exact drawn bonds (+ strain) + temperature + graph x. Capped at REPLAY_MAX frames by
   // decimation (drop every other frame, double the interval) so memory stays bounded (~10 MB).
   const replayRef           = useRef({ frames: [], every: 2, acc: 0, lastNotify: 0 })
+  const historyArmedRef     = useRef(false)   // record history only inside a run (from its Heat / Cool press)
   const timePausedRef       = useRef(timePaused)
   const onFrameCostRef      = useRef(onFrameCost)
   onFrameCostRef.current    = onFrameCost
@@ -461,6 +462,14 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
   useEffect(() => { replayFrameRef.current = replayFrame }, [replayFrame])
   useEffect(() => { onReplayReadyRef.current = onReplayReady }, [onReplayReady])
   useEffect(() => { onBondCountsRef.current = onBondCounts }, [onBondCounts])
+  // A new run (Heat / Go-to, then Cool) starts a fresh replay history at the button press;
+  // historyRun 0 (page load / Reset) = no run yet → nothing recorded.
+  useEffect(() => {
+    historyArmedRef.current = historyRun > 0
+    replayRef.current = { frames: [], every: 2, acc: 0, lastNotify: 0 }
+    if (replayInfoRefRef.current) replayInfoRefRef.current.current = replayRef.current.frames
+    onReplayReadyRef.current?.(0)
+  }, [historyRun])
   useEffect(() => { graphCanvasRefRef.current = graphCanvasRef }, [graphCanvasRef])
   useEffect(() => { graphUiRefRef.current = graphUiRef }, [graphUiRef])
   // Reset the energy graph when the material (composition) changes — clear the history and
@@ -1148,7 +1157,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
         }
 
         // ── Record history frame (DVR) ────────────────────────────────
-        if (stepsThisFrame > 0) {
+        if (stepsThisFrame > 0 && historyArmedRef.current) {
           const R = replayRef.current
           R.acc += stepsThisFrame
           if (R.acc >= R.every) {

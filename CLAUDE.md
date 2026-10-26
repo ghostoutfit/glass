@@ -1080,6 +1080,11 @@ Rules this layout depends on:
   (Uint16 pairs) + strain (Int8, ×100), temperature, graph x. Capped at `REPLAY_MAX` (900) by
   decimation (drop every other frame, double `every`) → ≲10 MB. Cleared with the graph on rebuild.
   Count reported to GlassViewer throttled (400 ms); frames shared via `replayInfoRef`.
+- **History covers the current run only**: recording is armed by the `historyRun` prop, which
+  GlassViewer bumps in `markBondRun` (same trigger as the bond table's reference) — the first Heat /
+  Go-to of a trip, then the first Cool. Each bump clears the frames, so the turtle/rabbit replay and
+  the scrub bar start at that button press (stop/restart within a run keeps the history). Before any
+  run (page load / Reset → `historyRun` 0) nothing is recorded and the replay controls are disabled.
 - **Replay draw is non-destructive**: a display copy of `phys` (frame positions, frame bonds, all
   atoms drawn at true position, frame temperature for thermal colouring). The old replay wrote the
   frame INTO the live particles, so returning to live resumed from the wrong positions.

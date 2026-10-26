@@ -838,6 +838,7 @@ export default function GlassViewer() {
   // run ('heat' | 'cool'). Set once per run (stop/restart keeps it); cleared by Reset / composition.
   const [bondRef,           setBondRef]           = useState(null)
   const bondPhaseRef           = useRef(null)
+  const [historyRun,        setHistoryRun]        = useState(0)   // bumps at each run start → CompositionView restarts the replay history (0 = no run → not recording)
   const strainUpdateTimeRef    = useRef(0)
   const initialBondCapturedRef = useRef(false)
   const bondCountsRef          = useRef(null)
@@ -1186,10 +1187,14 @@ export default function GlassViewer() {
   const handleTempUpdate   = useCallback(v => { setMeltLocalTemp(v); meltTempRef.current.temp = v }, [])
   // New run (first Heat / Go-to of a trip, or the first Cool) → the bond counts right now become the
   // reference the "Change" row measures from.
+  // Also starts a fresh replay history: the turtle/rabbit replay and the scrub bar cover the current
+  // run from its button press (heat, then cool), not the idle time since page load / Reset.
   const markBondRun = useCallback(phase => {
-    if (bondPhaseRef.current === phase || !bondCountsRef.current) return
+    if (bondPhaseRef.current === phase) return
     bondPhaseRef.current = phase
-    setBondRef({ phase, counts: bondCountsRef.current })
+    if (bondCountsRef.current) setBondRef({ phase, counts: bondCountsRef.current })
+    setReplayFrame(null); setReplayPlaying(false)   // back to LIVE before the history is replaced
+    setHistoryRun(n => n + 1)
   }, [])
   const onGoTemp = useCallback(() => {
     const v = Math.max(0, Math.min(1800, Math.round(+gotoTemp)))
@@ -2406,7 +2411,7 @@ export default function GlassViewer() {
     meltCumulativeEnergyRef.current = 0
     setMeltLocalTemp(MELT_START_TEMP); setDerivedTemp(MELT_START_TEMP)
     // particle counts / bonds
-    setBondCounts(null); setInitialBondCounts(null); setBondRef(null); bondPhaseRef.current = null
+    setBondCounts(null); setInitialBondCounts(null); setBondRef(null); bondPhaseRef.current = null; setHistoryRun(0)
     initialBondCapturedRef.current = false
     bondCountsRef.current = null
     // box particle arrangement → rebuild; rotation → home
@@ -2506,7 +2511,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 95
+                  }}>Field Test Version 96
                     {/* Quality: set by the startup speed test (bonds' benchmark), auto-adjusted at
                         runtime; a manual pick becomes the ceiling. */}
                     <select value={quality} onChange={e => pickQuality(e.target.value)}
@@ -2628,8 +2633,9 @@ export default function GlassViewer() {
               {/* Light toggle sits to the LEFT of the 2×2 grid. The grid ALWAYS renders two rows —
                   on Bulk the empty cells are hidden placeholder buttons — so the header height is
                   identical on both tabs (it no longer grows on Particles). Positions stay stable:
-                     [ Graph ] [ Charge ]          [ Graph ] [ Rotate ]
-                     [ Count ] [ Field  ]   →Bulk  [       ] [        ]  */}
+                     [ Count ] [ Charge ]   →Bulk  [ Graph ] [ Rotate ]   ← one row, centred vertically
+                     [ Graph ] [ Field  ]                                    on the 2-row block (level
+                                                                             with the light toggle)  */}
               <div style={{display:'flex', alignItems:'center', gap:10, transform:'translateX(-50px)'}}>
                 <span style={{fontSize:15, lineHeight:1, userSelect:'none', color:'#ffc020', display:'inline-block', width:18, textAlign:'center'}}>
                   {darkMode ? '☽' : '☀'}
@@ -2650,18 +2656,19 @@ export default function GlassViewer() {
                 </div>
                 <div style={{display:'grid', gridTemplateColumns:'repeat(2, 78px)', gap:3}}>
                   {tab === 'glass' ? (<>
+                    {/* hidden placeholders hold the two-row height; Graph + Rotate span both rows, centred */}
                     <button className="action-btn replay-btn" aria-hidden tabIndex={-1}
-                      style={{padding:'3px 0', width:'100%', visibility:'hidden'}}>Count</button>
+                      style={{padding:'3px 0', width:'100%', visibility:'hidden', gridColumn:1, gridRow:1}}>Count</button>
+                    <button className="action-btn replay-btn" aria-hidden tabIndex={-1}
+                      style={{padding:'3px 0', width:'100%', visibility:'hidden', gridColumn:1, gridRow:2}}>Field</button>
+                    <button className={`action-btn replay-btn${showGraph?' active':''}`}
+                      style={{padding:'3px 0', width:'100%', gridColumn:1, gridRow:'1 / span 2', alignSelf:'center'}} onClick={() => setShowGraph(f => !f)}>Graph</button>
                     <button className={`action-btn replay-btn${autoRotate?' active':''}`}
-                      style={{padding:'3px 0', width:'100%'}}
+                      style={{padding:'3px 0', width:'100%', gridColumn:2, gridRow:'1 / span 2', alignSelf:'center'}}
                       onClick={() => {
                         const v = !autoRotate; setAutoRotate(v); boxSimRef.current.autoRotate = v
                         if (!v && boxSimRef.current.box) boxSimRef.current.box.boxAngularVel = 0
                       }}>Rotate</button>
-                    <button className={`action-btn replay-btn${showGraph?' active':''}`}
-                      style={{padding:'3px 0', width:'100%'}} onClick={() => setShowGraph(f => !f)}>Graph</button>
-                    <button className="action-btn replay-btn" aria-hidden tabIndex={-1}
-                      style={{padding:'3px 0', width:'100%', visibility:'hidden'}}>Field</button>
                   </>) : (<>
                     <button className={`action-btn replay-btn${showCount?' active':''}`}
                       style={{padding:'3px 0', width:'100%'}} onClick={() => setShowCount(f => !f)}>Count</button>
@@ -2820,19 +2827,19 @@ export default function GlassViewer() {
                       <div key={d.key} style={{ textAlign: 'center' }}>
                         <div style={numStyle(d.color, true)}>{d.now}</div>
                         {d.pct != null && <div style={subStyle(d.color)}>{Math.round(d.pct)}%</div>}
+                        <div style={subStyle(darkMode ? '#999' : '#777')}>{d.fromPct != null ? `from ${Math.round(d.fromPct)}%` : '\u00a0'}</div>
                       </div>
                     ))}
                   </div>
                   <div style={{ display: 'grid', gridTemplateColumns: gridCols, gap: 0, alignItems: 'baseline', marginBottom: 3 }}>
-                    <span style={rowLabelStyle}>Change<br /><span style={{ fontSize: 10, letterSpacing: '0.06em', color: runColor, whiteSpace: 'nowrap' }}>{run ? `since ${run}` : 'no run yet'}</span></span>
+                    <span style={rowLabelStyle}>Change</span>
                     {colData.map(d => (
                       <div key={d.key} style={{ textAlign: 'center' }}>
-                        {d.delta == null ? dash : <>
-                          <div style={numStyle(signColor(d.delta), false)}>{(d.delta > 0 ? '+' : d.delta < 0 ? '−' : '') + Math.abs(d.delta)}</div>
-                          {d.fromPct != null && <div style={subStyle(darkMode ? '#999' : '#777')}>from {Math.round(d.fromPct)}%</div>}
-                        </>}
+                        {d.delta == null ? dash
+                          : <div style={numStyle(signColor(d.delta), false)}>{(d.delta > 0 ? '+' : d.delta < 0 ? '−' : '') + Math.abs(d.delta)}</div>}
                       </div>
                     ))}
+                    <span style={{ gridColumn: '1 / -1', fontSize: 11, letterSpacing: '0.06em', color: runColor, fontFamily: 'system-ui, sans-serif', lineHeight: 1.2 }}>{run ? `since ${run} start` : 'no run yet'}</span>
                   </div>
                   <div style={{ fontSize: 10, color: darkMode ? '#666' : '#999', letterSpacing: '0.04em', fontFamily: 'system-ui, sans-serif', marginTop: 1 }}>% = share of the original solid's bonds</div>
                 </div>
@@ -3202,7 +3209,7 @@ export default function GlassViewer() {
               meltTemp={meltLocalTemp} simSpeed={simSpeed} speedMult={speedMult} coolingMode={coolingMode}
               onTempUpdate={handleTempUpdate} onEnergyUpdate={handleEnergyUpdate}
               onBondCounts={handleBondCounts}
-              graphCanvasRef={graphCanvasRef} graphUiRef={graphUiRef} onFrameCost={recordFrameCost} heatRateRef={meltTempRef} timePaused={timeStopped} replayInfoRef={replayInfoRef} heatLeadSteps={heatLeadSteps}
+              graphCanvasRef={graphCanvasRef} graphUiRef={graphUiRef} onFrameCost={recordFrameCost} heatRateRef={meltTempRef} timePaused={timeStopped} replayInfoRef={replayInfoRef} historyRun={historyRun} heatLeadSteps={heatLeadSteps}
               cumulativeEnergyRef={meltCumulativeEnergyRef}
               graphXMaxRef={graphXMaxRef}
               replayFrame={replayFrame} onReplayReady={handleReplayReady}
