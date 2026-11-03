@@ -1,46 +1,65 @@
-# Glass Simulator — v3
+# Glass Simulator — v4 (current)
 
 Physics simulator for glass composition, built for teaching. Si, O, Na, Ca atoms laid out as
 grains in a 5×4 grid; the student heats the grid to a melt and cools it fast (amorphous) or
-slow (crystalline).
+slow (crystalline). v4 adds a second, macro-scale **Bulk Material** tab that is kept in step with
+the particle tab (see "Bulk ↔ Particles matching"), a speed test with quality tiers, and
+history / replay controls.
 
 **This file is the ground truth for agents working here. If you change a constant, a default,
 or a mechanism, update this file in the same commit.** The previous version of this file drifted
 several commits behind the code and sent readers to tuning numbers that no longer existed.
 
-Last verified against the tree at commit `ddcfe89` (2026-10-01), re-verified 2026-10-02.
+**Active version is `v4/`.** Sections below written against v3 (the tuning tables, the perf
+measurements, the "Dead code and traps" list) are still the best description of the shared
+physics, but file names and line numbers are `v3/` ones unless a section says "v4". The code is
+the same lineage — `v4/meltPhysics.js` grew from 1522 to 2113 lines — so check the constant in
+the file before trusting a number here.
+
+Last updated 2026-11-03 against commit `83b5bd7` (v4 head). Sections not marked v4 were last
+verified against v3 at `ddcfe89` (2026-10-01).
 
 ## Project layout
 
 ```
-v3/
-  meltPhysics.js      — all melt-tab physics: forces, thermostat, bonds, breaking, liberation, cooling
-  CompositionView.jsx — grid layout, RAF loop, energy/heat-capacity model, graph, console diagnostics
-  GlassViewer.jsx     — top-level UI: tabs (melt / glass / sand), toolbar, dev panel, box-sim RAF loop
-  renderer.js         — melt-tab canvas drawing: atoms, bond lenses, strain field, grain outlines
-  sandPhysics.js      — sand-tab grain + Na-blob physics (separate system)
-  glassPhysics.js     — glass-tab SPH / rigid-body physics (separate system)
-  MicroPanel.jsx      — DEAD. not imported anywhere in v3.
-  NetworksView.jsx    — DEAD. not imported anywhere in v3.
+v4/
+  GlassViewer.jsx      — top-level UI: tabs (Particles / Bulk Material), toolbar, dev panel, speed
+                         test + quality tiers, Bulk RAF loop, history (DVR) / pause / turtle-rabbit
+  CompositionView.jsx  — Particles tab: grid layout, RAF loop, graph, console diagnostics;
+                         starts the catch-up worker
+  meltPhysics.js       — Particles physics: forces, thermostat, bonds, breaking, liberation, cooling
+  meltGrid.js          — builds the 5×4 grain grid and atoms (split out of CompositionView)
+  meltRamp.js          — heat capacity / energy-content model and heat/cool ramp timing
+  meltTrack.js         — snapshot/restore of full Particles state + catch-up lookup
+  meltTrackWorker.js   — Web Worker: precomputes Particles states along the standard runs
+  renderer.js          — Particles canvas drawing: atoms, bond lenses, strain field, grain outlines
+  glassTemps.js        — shared temperature constants `T`, `COOL_BAND`, `coolGreyFrac`
+  bulkMelt.js          — Bulk melt curve, macro melt metric, candidate generator + picker
+  candidates.generated.js — GENERATED (node scripts/gen-candidates.mjs). Never hand-edit.
+  sandPhysics.js       — Bulk tab: sand grain + Na-blob physics (PBD, packed Float64 arrays)
+  glassPhysics.js      — Bulk tab: cooled-glass SPH / rigid-body physics
+scripts/gen-candidates.mjs — regenerates candidates.generated.js from v4/bulkMelt.js
+v5/BlobTestbed.jsx     — standalone blob/glass-look experiment (own entry, not part of v4)
 ```
 
-`v1/`, `v2/`, `v5/`, `src/` are older snapshots. `src/` is not an entry point; `vite.config.js`
-builds `index.html`, `v3/index.html`, `v5/index.html` only. Don't edit the old copies.
+`v1/`, `v2/`, `v3/`, `src/` are older snapshots — don't edit them. `src/` is not an entry point.
+`vite.config.js` builds four entries: `index.html` (landing page, links only v1/v2 today),
+`v3/index.html`, `v4/index.html`, `v5/index.html`. `v4/` has no dead files (the v3 `MicroPanel.jsx`
+and `NetworksView.jsx` did not carry over).
 
 ## Build and verify
 
 ```
-npm run build     # vite, ~0.9 s, 3 entry points
+npm run build     # vite, ~0.5 s, 4 entry points (chunk-size warning for v4 is expected)
 npm run lint      # oxlint — warnings only today, no errors. Keep it that way.
+node scripts/gen-candidates.mjs   # after changing the particle melt curve or sand melt physics
 ```
 
-`npm run lint` currently emits **82 warnings, 0 errors** — 45 of them in `v3/`, the rest
-unused-vars in the `v1/`, `v2/` and `src/` snapshots. Two of the `v3/` ones are flagged in this
-file as real: the unused `peNow` in `stepPhysics`. (The `no-constant-condition` warning for the
-`if (true)` box-sim gate is gone — that gate is now a real tab check.)
-New warnings in `v3/` are yours.
+`npm run lint` currently emits **130 warnings, 0 errors** — 48 in `v4/` (the live code), 45 in
+`v3/`, the rest in `v1/`, `v2/`, `src/`, `v5/`. The known real one in `v4/` is the unused `peNow`
+in `stepPhysics` (`meltPhysics.js:879`). New warnings in `v4/` are yours.
 
-To look at it running: `npx vite preview` then open `/glass/v3/index.html`.
+To look at it running: `npx vite preview` then open `/glass/v4/index.html` (or `npm run dev`).
 
 ---
 
