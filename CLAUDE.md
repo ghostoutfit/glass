@@ -1024,6 +1024,14 @@ this slightly stabilises those too. Melt-hash cell (20 px) still covers the long
   cleared by re-integration). Applied to every bond, it tore intact pure-SiO₂ grains apart on
   cooling (182 bonds broken fast / 282 slow); gated, pure SiO₂ cools with 0 broken, 0 freed, and
   fast vs slow differ only in speed. The mix is unaffected (1158/1191 bonds still scaled).
+- **Cooling bond count stays flat until bonds form** (two dev toggles in "Tune these", both ON):
+  `_coolStrainScaled` measures break/reform strain against the scaled rest length (`r0 ×
+  coolScaleOf(rb)`) — against plain r0 the +10 % itself read as 10 % strain and snapped bonds;
+  `_coolHoldBonds` blocks strain breaks while cooling above `CRYST_LOCK` (1050 °C) — reform is
+  already off there, so the hot break/reform flicker only drained the count. Before: Si-O fell
+  ~17 % (≈490 → 408) between 1800 and ~1150 °C, then climbed back; after: flat to ~1050 °C, then
+  rises. Slow cool still dips ~20 % at ~1050 °C — the crystal template breaking misplaced bonds
+  (`templConflict`) to rebuild the lattice. The worker's catch-up states run with the defaults.
 
 **Headless results** (soda, 1500 °C melt then cool, `attractK` 0, motif 0.004, single seed):
 fast cool ends at local order 0.55 / ψ6 0.60; slow cool 0.72 / 0.73. O-Si-O angle error goes

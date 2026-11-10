@@ -76,6 +76,10 @@ let _bondLockTemp     = 400
 // Drawn-bond hysteresis: a dynamic bond appears inside the normal capture distance but, once drawn,
 // persists until its atoms are this much further apart — kills on/off flicker at the cutoff.
 let _bondHyst         = 1.10
+// Cooling bond count (from a melt): without these the Si-O count fell ~17% between 1800 and
+// ~1150 °C before bonds started forming, then climbed back.
+let _coolStrainScaled = true   // break/reform strain measured against the "longer cooled bonds" rest length (r0 × scale), not the original r0 — else the +10% rest length itself read as 10% strain and snapped bonds
+let _coolHoldBonds    = true   // cooling above CRYST_LOCK: intact bonds can't strain-break (reform is already off there, so the hot break/reform flicker only drained the count)
 let _grainFeedback    = true // Si-O break feedback per GRAIN (true) vs global (false) — see bond breaking
 let _sevTriggerDist   = 13   // px — freed modifier ion must be within this distance of a Si or O to sever the Si-O bond
 // Feedback loop calibration: GAIN interpolated on sio2Pct between soda (70%) and silica (100%)
@@ -116,6 +120,8 @@ export const setBreakStrainSpread  = v => { _breakStrainSpread = v }
 export const setUseEmaStrain       = v => { _useEmaStrain = v }
 export const setSevTriggerDist     = v => { _sevTriggerDist = v }
 export const setGrainFeedback      = v => { _grainFeedback = !!v }
+export const setCoolStrainScaled   = v => { _coolStrainScaled = !!v }
+export const setCoolHoldBonds      = v => { _coolHoldBonds = !!v }
 export const setBondLockTemp       = v => { _bondLockTemp = v }
 export const setBondHyst          = v => { _bondHyst = v }
 export const setCrystTemplate      = v => { _crystTemplate = !!v }
@@ -1565,13 +1571,15 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
   // runs, so broken bonds can still heal) holds the structure steady. Gated on the target temp
   // (totalEnergy) like every other threshold, so it responds to the slider immediately.
   const bondsFrozen = totalEnergy < (_win._bondFreezeTemp ?? _bondFreezeTemp)
+  const coolHold = _coolHoldBonds && isCooling && totalEnergy >= CRYST_LOCK
   if (phys.rigidBonds) {
     for (const rb of phys.rigidBonds) {
       if (!rb.breakable) continue
       const dx = miDx(particles[rb.j].x - particles[rb.i].x)
       const dy = miDy(particles[rb.j].y - particles[rb.i].y)
       const d  = Math.hypot(dx, dy)
-      const strain = (d - rb.r0) / rb.r0
+      const r0b = rb.r0 * (_coolStrainScaled ? coolScaleOf(rb) : 1)
+      const strain = (d - r0b) / r0b
       rb.avgStrain  = _useEmaStrain ? rb.avgStrain * 0.9 + strain * 0.1 : strain
       let fSelf = rb.isSiO ? fBrokenSiO : fBrokenMod
       if (gBroke && rb.isSiO) { const c = particles[rb.i].chunkIdx ?? 0; fSelf = gTot[c] > 0 ? gBroke[c] / gTot[c] : 0 }
@@ -1583,7 +1591,7 @@ export function stepPhysics(phys, ePerParticle, coolingFactor = 1.0, attractK = 
       }
       const wasBroken = rb.broken
       if (!rb.broken) {
-        if (!bondsFrozen && !bondLock && rb.avgStrain > effThreshold) rb.broken = true
+        if (!bondsFrozen && !bondLock && !coolHold && rb.avgStrain > effThreshold) rb.broken = true
       } else {
         // No net bond formation above the crystallisation lock temperature during cooling —
         // keeps the melt mobile until it is cool enough to crystallise (see CRYST_LOCK).

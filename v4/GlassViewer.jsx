@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import CompositionView from './CompositionView'
 import { initParticles, stepPhysics, stepFloorPhysics, PARTICLE_R, FIXED_DT, T_RIGID, freezeParticles, syncParticlesToRigidBody, stepRigidBody } from './glassPhysics.js'
-import { setSioHotMult, setFreeAttractSiOMult, setSioExclMult, setCrystJiggleMult, setBreakStrain, setReformStrain, setCrystAnchorK, setLiberateFrac, setSioK, setNaOK, setNaAnchorK, setNaLiberateFrac, setNaBreakStrain, setLatticeSpeedMult, setFreedSpeedMult, setReintBondN, setReintFrameM, setBreakStrainSpread, setSevTriggerDist, setGrainFeedback, setBondLockTemp, setBondHyst, setCrystTemplate, setTemplK, setTemplHi, setTemplReint, setFeedbackGainMult, setSiSiRepR0, setMotifStrength, setMotifAlign, setBondStiffMult, setFreedTau, setNaNaRepR0, setSevCooldown, setSevPullK } from './meltPhysics.js'
+import { setSioHotMult, setFreeAttractSiOMult, setSioExclMult, setCrystJiggleMult, setBreakStrain, setReformStrain, setCrystAnchorK, setLiberateFrac, setSioK, setNaOK, setNaAnchorK, setNaLiberateFrac, setNaBreakStrain, setLatticeSpeedMult, setFreedSpeedMult, setReintBondN, setReintFrameM, setBreakStrainSpread, setSevTriggerDist, setGrainFeedback, setCoolStrainScaled, setCoolHoldBonds, setBondLockTemp, setBondHyst, setCrystTemplate, setTemplK, setTemplHi, setTemplReint, setFeedbackGainMult, setSiSiRepR0, setMotifStrength, setMotifAlign, setBondStiffMult, setFreedTau, setNaNaRepR0, setSevCooldown, setSevPullK } from './meltPhysics.js'
 import { setVisualScale, setMaxDpr, effectiveDpr, setMotionCold, setMotionFullT, QTY_COLORS, ENERGY_KJ_MULT } from './renderer.js'
 import { initSandParticles, stepSandPhysics, mergeSodaGrains, mergeSilicateGrains, convertLargeNaGrains, stepNaBlobSprings, checkNaBlobMerges, absorbNearbyGrains, snapshotSand, restoreSand, GRAIN_R as SAND_GRAIN_R, NA_BLOB_R_CTR, setNaHardenTemp, setNaRigidTemp, setGlassWallPad } from './sandPhysics.js'
 import { T as GT, setCoolBand, coolGreyFrac } from './glassTemps.js'
@@ -664,6 +664,8 @@ export default function GlassViewer() {
   const [meanEffThreshold, setMeanEffThreshold] = useState(0)
   const [useEmaStrain,   setUseEmaStrain]   = useState(false)
   const [grainFeedback,  setGrainFeedbackState] = useState(true)   // per-grain Si-O break feedback
+  const [coolStrainScaled, setCoolStrainScaledState] = useState(true)   // cooling: strain vs the longer-bond rest length
+  const [coolHoldBonds,  setCoolHoldBondsState]  = useState(true)   // cooling above the cryst lock: no strain breaks
   const [motionCold,     setMotionColdState]  = useState(0.1)   // lattice jiggle at 0 °C (× full), render only
   const [motionFullT,    setMotionFullTState] = useState(500)   // °C where jiggle reaches full
   const [coolBand,       setCoolBandState]    = useState({ hi: 1000, lo: 500, w: 150 })   // cooling band (glassTemps COOL_BAND): particle pink fade + Bulk glass crossfade
@@ -1756,6 +1758,20 @@ export default function GlassViewer() {
             smctx.fillStyle = blobFillColor(s.temp)
             smctx.fillRect(0, 0, BOX_SIZE, BOX_SIZE)
             smctx.restore()
+            // Opaque mask under the crossfade: two layers at 1−g and g leave g·(1−g) of whatever is
+            // underneath showing (25% at mid-fade, ~750 °C) — unabsorbed grains inside the melt
+            // showed through. Paint the melt's shape in the box background colour at full alpha first,
+            // so what shows through is plain background (same look, no grains).
+            if (glassAmt > 0 && glassAmt < 1) {
+              const [cr, cg, cb] = boxBgTintRGB(22, 18, 16, _heatTint, _coolTint, _bgGray, s.temp)
+              gfctx.clearRect(0, 0, BOX_SIZE, BOX_SIZE)
+              gfctx.drawImage(sandMeltCrisp, 0, 0)
+              gfctx.globalCompositeOperation = 'source-in'
+              gfctx.fillStyle = `rgb(${cr | 0},${cg | 0},${cb | 0})`
+              gfctx.fillRect(0, 0, BOX_SIZE, BOX_SIZE)
+              gfctx.globalCompositeOperation = 'source-over'
+              ctx.drawImage(gfctx.canvas, -HS, -HS, BOX_SIZE, BOX_SIZE)
+            }
             if (glassAmt < 1) {
               ctx.globalAlpha = 1 - glassAmt
               ctx.drawImage(sandMeltOff, -HS, -HS, BOX_SIZE, BOX_SIZE)
@@ -1816,6 +1832,7 @@ export default function GlassViewer() {
 
             bpMark('blob 3 heatglow')
             window._naBlobs = phys.naBlobs
+            window._bulkPhys = phys   // console diagnostics (grain census etc.)
             window._blobMct = phys.blobMct
           }
         } else {
@@ -2368,6 +2385,9 @@ export default function GlassViewer() {
           {/* Scrub slider — pinned at bottom of toolbar, melt tab only */}
           {tab === 'melt' && (
             <div style={{ position:'absolute', bottom:7, left:50, right:50, display:'flex', alignItems:'center', gap:6 }}>
+              {/* Stopwatch: marks the bar as the time scrubber; dims with it when there's no history */}
+              <img src="/glass/Stopwatch.png" draggable={false} alt="" title="Time scrubber — drag through the run's history"
+                style={{ height:30, flexShrink:0, filter:'brightness(0)', opacity: replayFrameCount < 2 || historyGap ? 0.25 : 0.6 }} />
               <div style={{ flex:'0 1 90%', minWidth:0, display:'flex', alignItems:'center' }}>
                 {/* History scrubber (DVR): the whole recorded run; the right end is LIVE. Dragging left
                     shows the past and stops time; dragging back to the end resumes LIVE. */}
@@ -2425,7 +2445,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 99
+                  }}>Field Test Version 101
                     {/* Quality: set by the startup speed test (bonds' benchmark), auto-adjusted at
                         runtime; a manual pick becomes the ceiling. */}
                     <select value={quality} onChange={e => pickQuality(e.target.value)}
@@ -2781,6 +2801,15 @@ export default function GlassViewer() {
                   easy to find. Move a control down into its normal section once its value is settled. */}
               <div style={{border:'1px solid #6a5a9a', borderRadius:4, padding:'6px 8px 8px', marginBottom:10, background:'rgba(106,90,154,0.12)'}}>
                 <div style={{fontSize:11, color:'#c8b8ff', marginBottom:6, letterSpacing:'0.06em'}}>── Tune these ──</div>
+                <label style={{display:'flex', alignItems:'center', gap:6, fontSize:12, color:'#ccc', cursor:'pointer'}}>
+                  <input type="checkbox" checked={coolStrainScaled} onChange={e => { setCoolStrainScaledState(e.target.checked); setCoolStrainScaled(e.target.checked) }} style={{accentColor:'#88ddaa'}} />
+                  Cooling: strain vs longer-bond length
+                </label>
+                <label style={{display:'flex', alignItems:'center', gap:6, fontSize:12, color:'#ccc', cursor:'pointer'}}>
+                  <input type="checkbox" checked={coolHoldBonds} onChange={e => { setCoolHoldBondsState(e.target.checked); setCoolHoldBonds(e.target.checked) }} style={{accentColor:'#88ddaa'}} />
+                  Cooling: hold bonds above cryst lock
+                </label>
+                <div style={{fontSize:10, color:'#777', marginBottom:8}}>Keep the bond count flat on cooling until bonds start forming (~1050 °C). Off = the old behaviour: the +10% "longer cooled bonds" length read as strain and snapped bonds, and hot flicker broke bonds that couldn't reform → the count dipped ~17% first. Particles tab only; the background catch-up states always use ON.</div>
                 <div style={{fontSize:11, color:'#888', marginBottom:2}}>Bulk melt lead / lag vs particles: <span style={{color:'#a090d0'}}>{bulkLead === 0 ? 'matched' : bulkLead > 0 ? `${bulkLead} °C ahead` : `${-bulkLead} °C behind`}</span></div>
                 <input type="range" style={{width:'100%', accentColor:'#8070c0', cursor:'pointer'}}
                   min={-200} max={200} step={10} value={bulkLead} onChange={e => { const v = +e.target.value; setBulkLeadState(v); setBulkMeltLead(v) }} />
