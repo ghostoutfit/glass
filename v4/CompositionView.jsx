@@ -55,7 +55,16 @@ const GRAPH_E_MIN = 0
 // Graph geometry (CSS px) — shared by drawing and by pointer hit-testing.
 const GRAPH_PAD = { L: 46, R: 10, T: 10, B: 30 }
 const GRAPH_MAX_MARKERS = 3
-// ui (optional, GlassViewer's graphUiRef.current): { mouse: {x,y}|null, clicks: [{x,y}], markers: [{t}] }.
+// Time axis: fixed 60 s minimum, so every heating run (pure fast ≈ 9 s … Na₂O slow ≈ 53 s) shares
+// one scale and fast vs slow slopes compare directly; steps up only when a trip runs longer.
+const GRAPH_T_STEPS = [60, 90, 120, 180, 240, 300, 450, 600, 900, 1200, 1800, 2400, 3600]
+const graphTimeMax = s => GRAPH_T_STEPS.find(v => v >= s) ?? Math.ceil(s / 600) * 600
+// ui (optional, GlassViewer's graphUiRef.current): { mouse: {x,y}|null, clicks: [{x,y}], markers: [{t}],
+//   xMode: 'time' (default) | 'energy' }. Clicking the x-axis label toggles xMode.
+// hist points: { e: graph energy, t: °C, s: trip time (s) }.
+// x = time: the trip unfolds left → right (heat up, then cool down); at constant heating power
+//   the slope is the heating rate ÷ heat capacity, so latent heat shows as a slower climb / shelf.
+// x = energy: the hysteresis loop (cooling runs back along the energy axis).
 // Markers ANNOTATE the curve — they can only be placed on it, never on bare axis:
 //  · hover within 14 px of the curve → coordinate readout (kJ · °C) at the nearest point
 //  · click the curve → fixed dotted horizontal line at that point's temperature (≤3);
@@ -69,8 +78,21 @@ function drawTEGraph(canvas, hist, darkMode = true, eMax = 4e-3, targetTempLine 
   const pw = w - pL - pR, ph = h - pT - pB
 
   const tMax = 1800
+  const n = hist.length
+  // x-axis mode: clicks on the x-axis label band (below the axis) toggle it before anything is drawn
+  if (ui) {
+    ui.xMode ??= 'time'
+    for (let k = ui.clicks.length - 1; k >= 0; k--) {
+      const c = ui.clicks[k]
+      if (c.y > pT + ph + 4 && c.x >= pL) { ui.xMode = ui.xMode === 'time' ? 'energy' : 'time'; ui.clicks.splice(k, 1) }
+    }
+  }
+  const timeMode = !ui || ui.xMode !== 'energy'
+  const sMax = graphTimeMax(n ? hist[n - 1].s ?? 0 : 0)
   const kJ  = e => Math.round(e / ENERGY_UNIT * ENERGY_KJ_MULT)   // same scale as the toolbar kJ LCD
-  const toX = e => pL + Math.max(0, Math.min(1, (e - GRAPH_E_MIN) / (eMax - GRAPH_E_MIN))) * pw
+  const xOf = p => timeMode ? (p.s ?? 0) : p.e                     // a point's x value in this mode
+  const toX = v => timeMode ? pL + Math.max(0, Math.min(1, v / sMax)) * pw
+                            : pL + Math.max(0, Math.min(1, (v - GRAPH_E_MIN) / (eMax - GRAPH_E_MIN))) * pw
   const toY = t => pT + ph - (Math.max(0, t) / tMax) * ph
 
   ctx.clearRect(0, 0, w, h)
@@ -89,13 +111,15 @@ function drawTEGraph(canvas, hist, darkMode = true, eMax = 4e-3, targetTempLine 
   ctx.fillStyle = tCol; ctx.font = "bold 14px Lexend, system-ui, sans-serif"; ctx.textAlign = 'right'; ctx.textBaseline = 'middle'
   ctx.fillText(String(tMax), pL - 4, pT + 2)
   ctx.fillText('0', pL - 4, pT + ph)
-  ctx.fillStyle = eCol; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'
-  ctx.fillText('energy added (kJ)', pL + pw / 2, h - 4)
+  // x label = the axis toggle (⇄): time ↔ energy
+  const xCol = timeMode ? (darkMode ? '#d8d8d8' : '#333') : eCol
+  ctx.fillStyle = xCol; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'
+  ctx.fillText(timeMode ? 'time (s)  ⇄' : 'energy added (kJ)  ⇄', pL + pw / 2, h - 4)
   ctx.font = "bold 11px Lexend, system-ui, sans-serif"; ctx.textAlign = 'right'
-  ctx.fillText(String(kJ(eMax)), pL + pw, h - 4)
+  ctx.fillText(String(timeMode ? sMax : kJ(eMax)), pL + pw, h - 4)
   ctx.fillStyle = tCol; ctx.font = "bold 14px Lexend, system-ui, sans-serif"
   ctx.save(); ctx.translate(14, pT + ph / 2); ctx.rotate(-Math.PI / 2)
-  ctx.textBaseline = 'alphabetic'
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic'   // centred on the y axis (was inheriting 'right' from the kJ label → sat below centre)
   ctx.fillText('Temp °C', 0, 0)
   ctx.restore()
 
@@ -110,24 +134,23 @@ function drawTEGraph(canvas, hist, darkMode = true, eMax = 4e-3, targetTempLine 
     ctx.fillText(`${Math.round(targetTempLine)}°`, pL + pw, ly - 2)
   }
 
-  const n = hist.length
   const markers = ui ? ui.markers : []
   // nearest curve point within 14 px of a pointer position (−1 if none)
   const nearestOnCurve = m => {
     let best = -1, bd = 14 * 14
     if (m) for (let i = 0; i < n; i++) {
-      const dx = toX(hist[i].e) - m.x, dy = toY(hist[i].t) - m.y, d2 = dx * dx + dy * dy
+      const dx = toX(xOf(hist[i])) - m.x, dy = toY(hist[i].t) - m.y, d2 = dx * dx + dy * dy
       if (d2 < bd) { bd = d2; best = i }
     }
     return best
   }
-  // where the curve crosses temperature t: [kJ-energy …], de-duplicated by screen distance
+  // where the curve crosses temperature t: [x values …], de-duplicated by screen distance
   const crossingsAt = t => {
     const out = []
     for (let i = 1; i < n; i++) {
       const a = hist[i - 1], b = hist[i]
       if ((a.t - t) * (b.t - t) > 0 || a.t === b.t) continue
-      const e = a.e + (b.e - a.e) * (t - a.t) / (b.t - a.t)
+      const xa = xOf(a), e = xa + (xOf(b) - xa) * (t - a.t) / (b.t - a.t)
       if (!out.some(q => Math.abs(toX(q) - toX(e)) < 14)) out.push(e)
     }
     return out.sort((p, q) => p - q)
@@ -149,14 +172,14 @@ function drawTEGraph(canvas, hist, darkMode = true, eMax = 4e-3, targetTempLine 
     ctx.strokeStyle = darkMode ? '#ff9050' : '#c04000'; ctx.lineWidth = 2.5; ctx.lineJoin = 'round'
     ctx.beginPath()
     for (let i = 0; i < n; i++) {
-      const x = toX(hist[i].e), y = toY(hist[i].t)
+      const x = toX(xOf(hist[i])), y = toY(hist[i].t)
       i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)
     }
     ctx.stroke()
     // Current (live) point dot — hidden while scrubbing / replaying, where the replay ring marks "now"
     if (!replayPt) {
       const last = hist[n - 1]
-      ctx.fillStyle = darkMode ? '#ffcc80' : '#e05500'; ctx.beginPath(); ctx.arc(toX(last.e), toY(last.t), 4, 0, Math.PI * 2); ctx.fill()
+      ctx.fillStyle = darkMode ? '#ffcc80' : '#e05500'; ctx.beginPath(); ctx.arc(toX(xOf(last)), toY(last.t), 4, 0, Math.PI * 2); ctx.fill()
     }
   }
 
@@ -192,7 +215,7 @@ function drawTEGraph(canvas, hist, darkMode = true, eMax = 4e-3, targetTempLine 
 
   // ── Replay position: where the scrubbed / playing history frame sits on the curve ──
   if (replayPt) {
-    const x = toX(replayPt.e), y = toY(replayPt.t)
+    const x = toX(xOf(replayPt)), y = toY(replayPt.t)
     ctx.fillStyle = darkMode ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.12)'
     ctx.beginPath(); ctx.arc(x, y, 9, 0, Math.PI * 2); ctx.fill()
     ctx.strokeStyle = darkMode ? '#fff' : '#222'; ctx.lineWidth = 2
@@ -204,13 +227,15 @@ function drawTEGraph(canvas, hist, darkMode = true, eMax = 4e-3, targetTempLine 
   const overMarker = markerAt(mo) >= 0
   const best = nearestOnCurve(mo)
   if (best >= 0) {
-    const p = hist[best], x = toX(p.e), y = toY(p.t)
+    const p = hist[best], x = toX(xOf(p)), y = toY(p.t)
     ctx.strokeStyle = darkMode ? '#fff' : '#222'; ctx.lineWidth = 1.5
     ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.stroke()
-    labelBox([[`${kJ(p.e)} kJ`, eCol], ['  ·  ', textCol], [`${Math.round(p.t)} °C`, tCol]], x + 8, y - 24)
+    labelBox([timeMode ? [`${(p.s ?? 0).toFixed(1)} s`, xCol] : [`${kJ(p.e)} kJ`, eCol], ['  ·  ', textCol], [`${Math.round(p.t)} °C`, tCol]], x + 8, y - 24)
   }
-  // pointer = clickable (a line to remove, or the curve to annotate); empty space does nothing
-  canvas.style.cursor = (overMarker || best >= 0) ? 'pointer' : 'default'
+  // pointer = clickable (a line to remove, the curve to annotate, or the x label to switch axes)
+  const overXLabel = !!mo && mo.y > pT + ph + 4 && mo.x >= pL
+  canvas.style.cursor = (overMarker || best >= 0 || overXLabel) ? 'pointer' : 'default'
+  canvas.title = overXLabel ? (timeMode ? 'Click to graph against energy added' : 'Click to graph against time') : ''
 }
 
 function drawBarGraph(canvas, ke, pe, n) {
@@ -378,7 +403,10 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
   const onBondCountsRef     = useRef(onBondCounts)
   const lastBondCountTsRef  = useRef(0)
   // Graph history — grows forever, never wraps
-  const histRef             = useRef([])   // {e, t}[]
+  const histRef             = useRef([])   // {e, t, s}[]
+  // Trip clock for the graph's time axis (s). Runs from the trip's first Heat / Cool press at the
+  // ramps' own pace; reset with the graph. See the RAF's graph section.
+  const graphClockRef       = useRef(0)
   const histFrameRef        = useRef(0)    // throttle: record every 3 frames
 
   useEffect(() => { onTempUpdateRef.current = onTempUpdate }, [onTempUpdate])
@@ -416,7 +444,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
   // Reset the energy graph when the material (composition) changes — clear the history and
   // redraw the empty graph immediately, so stale curves don't linger even if the tab is hidden.
   useEffect(() => {
-    histRef.current = []
+    histRef.current = []; graphClockRef.current = 0
     if (graphUiRefRef.current?.current) graphUiRefRef.current.current.markers.length = 0   // markers belong to this graph
     replayRef.current = { frames: [], every: 2, acc: 0, lastNotify: 0 }   // history belongs to this run
     if (replayInfoRefRef.current) replayInfoRefRef.current.current = replayRef.current.frames
@@ -569,7 +597,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
     lastActiveRef.current = { kind: 'heat', T: 0 }
     wasActiveRef.current = false
     catchingUpRef.current = false; catchReqRef.current++   // drop any in-flight catch-up (its reply is ignored)
-    histRef.current = []
+    histRef.current = []; graphClockRef.current = 0
     if (graphUiRefRef.current?.current) graphUiRefRef.current.current.markers.length = 0   // markers belong to this graph
     replayRef.current = { frames: [], every: 2, acc: 0, lastNotify: 0 }   // history belongs to this run
     if (replayInfoRefRef.current) replayInfoRefRef.current.current = replayRef.current.frames
@@ -601,6 +629,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
     }
     window.setMeltTemp    = (tempC) => { energyValRef.current = tempC }
     window.replayLength   = () => replayRef.current.frames.length   // history frames recorded this run
+    window.graphHistory   = () => histRef.current                   // graph points {e, t, s}
     window.setSioExclMult = (v)    => setSioExclMult(v)
     window.setBreakStrain  = (v)   => setBreakStrain(v)
     window.setReformStrain = (v)   => setReformStrain(v)
@@ -1056,6 +1085,16 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
       // energy ramp above (ePerParticle / coolGraphERef) — not from stepPhysics. Running it here,
       // outside the gate, means the Bulk Material tab drives the SAME graph identically (the
       // temperature is shared), and switching tabs or scrubbing benchmarks stays continuous.
+      // Trip clock: heating advances at the integrator's pace (its 0.05 s frame clamp), cooling by the
+      // cool ramp's own sim-step progress — so the time-axis slopes are the real heating / cooling
+      // rates on any machine. Runs only inside a trip (from the first Heat / Cool press), stands
+      // still while time is stopped, and stops END_HOLD_S after the ramp reaches 0 / 1800 °C so a
+      // long wait at the end doesn't squash the curve (same rule as the replay history).
+      if (historyArmedRef.current && endHoldRef.current <= END_HOLD_S) {
+        graphClockRef.current += (cm === 'fast' || cm === 'slow')
+          ? rampAdvance / (BASE_STEPS_PER_SEC * speed)
+          : Math.min(elapsed, 0.05)
+      }
       if (!paused) histFrameRef.current++
       if (histFrameRef.current >= 3) {
         histFrameRef.current = 0
@@ -1063,7 +1102,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
         // During cooling, plot the cooling-energy path (constant-rate x, latent-heat slope);
         // otherwise the normal energy axis. This draws the heat-up/cool-down hysteresis loop.
         const xVal = coolGraphERef.current ?? energyContent(targetTempC, na2oPctRef.current, hcPlateauRef.current)
-        histRef.current.push({ e: xVal, t: targetTempC })
+        histRef.current.push({ e: xVal, t: targetTempC, s: graphClockRef.current })
       }
       {
         const extCanvas = graphCanvasRefRef.current?.current
@@ -1184,7 +1223,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
             // grains only ever go intact → dissolved, so a 20-byte copy per frame lets playback pop
             // each outline back in exactly up to the frame it dissolved on
             const dissolved = phys.chunkDissolved ? phys.chunkDissolved.slice() : null
-            R.frames.push({ pos, bonds, strain, t, e, dissolved, c: !!coolRunRef.current })
+            R.frames.push({ pos, bonds, strain, t, e, s: graphClockRef.current, dissolved, c: !!coolRunRef.current })
             if (R.frames.length > REPLAY_MAX) { R.frames = R.frames.filter((_, k) => k % 2 === 0); R.every *= 2 }
             if (replayInfoRefRef.current) replayInfoRefRef.current.current = R.frames
             if (nowMs - R.lastNotify > 400) { R.lastNotify = nowMs; R.notified = R.frames.length; onReplayReadyRef.current?.(R.frames.length) }

@@ -905,8 +905,25 @@ a plateau of `1 + (plateau − 1) × min(1, na2oPct/30)` across `HC_LO` 500 °C 
 `plateau` comes from the `hcPlateau` React state, default 4 (dev slider 1–8) — it is **not** a
 module mutable. Pure SiO₂ stays flat at 1, so it has no latent-heat plateau at all.
 
-`energyContent(T) = ∫₀ᵀ heatCap·dT` is the **graph x-axis** and the kJ readout
-(× `ENERGY_KJ_MULT` 0.2) — not temperature. `tempForContent` is its numerical inverse.
+`energyContent(T) = ∫₀ᵀ heatCap·dT` is the kJ readout (× `ENERGY_KJ_MULT` 0.2) and the graph's
+**energy** x-axis — not temperature. `tempForContent` is its numerical inverse.
+
+**Graph x-axis: time by default, energy on click.** Clicking the x-axis label ("time (s) ⇄")
+toggles `graphUiRef.current.xMode` ('time' | 'energy'; kept across resets). Each graph point is
+`{e, t, s}`; `s` is the trip clock `graphClockRef`, which starts at the trip's first Heat / Cool
+press (`historyArmedRef`), stands still while time is stopped, and stops `END_HOLD_S` (3 s) after
+reaching 0 / 1800 °C (a long wait doesn't squash the curve). It advances at the RAMPS' pace, not
+raw frame time: heating by `min(elapsed, 0.05)` (the GlassViewer integrator's clamp), cooling by
+`rampAdvance / (BASE_STEPS_PER_SEC · speed)` — so slopes are the true rates on any machine
+(measured: graph 26.7 s vs wall 26.6 s for a mix Fast Heat). Axis = `GRAPH_T_STEPS`, min 60 s so
+every heating run shares one scale (pure fast 9 s / slow 18 s; mix fast 27 s / slow 53 s); it
+steps up only for longer trips (mix slow heat + slow cool ≈ 139 s → 180). Heating is constant
+power, so its time curve is the energy curve stretched: pure SiO₂ = straight lines (fast vs slow
+differ only in slope); the mix bends at 500–750 °C (heat capacity ×4 above). Cooling removes energy
+linearly over a FIXED duration (270 / 1440 steps → 15 / 80 s at speed 0.3) whatever the
+composition, so its time curve shows the latent-heat shelf (1100 → 500 °C) but a pure and a mix
+cool take the same time. Replay frames carry `s` too (the replay ring sits on the time curve).
+`window.graphHistory()` returns the points.
 
 **All ramps interpolate linearly in energy content**, not temperature
 (`rampEnergyLinearInContent`), so kJ moves at a constant rate straight through the latent-heat
@@ -1194,7 +1211,7 @@ Rules this layout depends on:
 |---|---|
 | Charge | `showCharge` — radial charge halos (blue cations, orange O). Allocates a gradient per atom per frame. |
 | Field | `showField` — the blurred bond strain field. Forced off and the button disabled on `simple` quality; the UI reads `effectiveShowField`, never raw `showField`. |
-| Count / Graph | right panel: bond-count table vs energy graph |
+| Count / Graph | right panel: bond-count table vs temperature graph (x = time, or energy — click the x label) |
 | Turtle / Rabbit | `simSpeed` (default **0.5**) |
 | Slow / Fast Heat, Slow / Fast Cool | cooling modes; cool gated at 1500 °C |
 | GO + temperature box | ramp to a typed target through the heat-capacity integrator |

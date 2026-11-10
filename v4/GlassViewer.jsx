@@ -721,13 +721,13 @@ export default function GlassViewer() {
   const [visualScale, setVisualScaleState]     = useState(3.3)
   const [coolingMode, setCoolingMode] = useState(null)
   const [meltHeatMode, setMeltHeatMode] = useState(null)  // 'slow' | 'fast' | null
-  // One-way trip: once a cool run starts, heating is locked out until a hard reset (Reset /
-  // composition button). Ref mirrors the state so the stable callbacks can read it.
+  // Runs can't be paused or re-sped: the first Heat press locks both Heat buttons for the rest of
+  // the trip (until Reset Cold / Reset Hot / a composition button), and so does any Cool press.
+  // Ref mirrors the state so the stable callbacks can read it.
   const [heatLocked, setHeatLocked] = useState(false)
   const heatLockedRef = useRef(false)
-  // The committed cool mode ('slow' | 'fast'): the first Cool pressed is the run. It can be
-  // stopped and restarted (resumes — see CompositionView coolRunRef) but not switched to the
-  // other speed. Cleared only by a hard reset.
+  // The committed cool mode ('slow' | 'fast'): the first Cool pressed is the run, and both Cool
+  // buttons lock (no pause, no speed switch). Cleared only by a hard reset.
   const [coolLocked, setCoolLocked] = useState(null)
   const coolLockedRef = useRef(null)
   const [bondNums, setBondNums]       = useState(false)
@@ -1149,31 +1149,26 @@ export default function GlassViewer() {
   useEffect(() => { if (tab !== 'melt') { setReplayPlaying(false); setReplayFrame(null) } }, [tab])
 
   const startCooling = useCallback(mode => {
-    if (coolLockedRef.current && coolLockedRef.current !== mode) return   // no switching speed mid-run
+    if (coolLockedRef.current) return   // one press per run: no pause, no switching speed
     markBondRun('cool')
     coolLockedRef.current = mode; setCoolLocked(mode)
     heatLockedRef.current = true; setHeatLocked(true)   // cooling is one-way: heat stays off until reset
     setReplayFrame(null); setReplayPlaying(false)   // back to LIVE (history keeps recording)
     setMeltHeatMode(null)
-    setCoolingMode(m => {
-      const next = m === mode ? null : mode
-      if (next !== null) window.resetLifetimes?.()
-      // CompositionView's energy ramp is the sole temperature driver; onTempUpdate syncs the LCD.
-      meltSimRef.current.energyInput = 0
-      return next
-    })
+    window.resetLifetimes?.()
+    // CompositionView's energy ramp is the sole temperature driver; onTempUpdate syncs the LCD.
+    meltSimRef.current.energyInput = 0
+    setCoolingMode(mode)
   }, [markBondRun])
 
   const toggleMeltHeat = useCallback(mode => {
-    if (heatLockedRef.current) return
+    if (heatLockedRef.current) return   // one press per trip: no pause, no switching speed
+    heatLockedRef.current = true; setHeatLocked(true)
     markBondRun('heat')
-    setCoolingMode(prev => { if (prev) meltSimRef.current.energyInput = 0; return null })
-    setMeltHeatMode(prev => {
-      const next = prev === mode ? null : mode
-      if (next !== null) window.resetLifetimes?.()
-      meltSimRef.current.energyInput = next === 'fast' ? 100 : next === 'slow' ? 50 : 0
-      return next
-    })
+    setCoolingMode(null)
+    window.resetLifetimes?.()
+    meltSimRef.current.energyInput = mode === 'fast' ? 100 : 50
+    setMeltHeatMode(mode)
   }, [markBondRun])
 
   const handleBondCounts = useCallback(counts => {
@@ -2405,7 +2400,7 @@ export default function GlassViewer() {
           )}
 
           {/* Action row */}
-          <div ref={toolbarRef} style={{ display:'flex', alignItems:'flex-start', gap:4, paddingLeft:6, paddingRight:6 }}>
+          <div ref={toolbarRef} style={{ display:'flex', alignItems:'flex-start', gap:4, paddingLeft:6, paddingRight:6, marginBottom:-8 }}>   {/* −8 cancels the heat row's extra 10px drop in the toolbar's vertical centring, so the top row stays put */}
             {/* Left/center: two-row layout */}
             <div style={{ flex:1, display:'flex', flexDirection:'column', gap:3, minWidth:0 }}>
 
@@ -2418,7 +2413,7 @@ export default function GlassViewer() {
                       dropped to the second toolbar line. Absolute, so it never resizes either row. */}
                   <span style={{ position:'relative', display:'inline-flex' }}>
                     <button className={`tab-btn ${tab==='melt'?'active':''}`}  onClick={() => setTab('melt')}>Particles and Fields</button>
-                    <div style={{ position:'absolute', left:'calc(100% + 1px)', top:'calc(100% + 20px)', transform:'translateX(-50%)', display:'flex', gap:4, zIndex:1 }}>
+                    <div style={{ position:'absolute', left:'calc(100% + 1px)', top:'calc(100% + 30px)', transform:'translateX(-50%)', display:'flex', gap:4, zIndex:1 }}>
                   {/* Pause — just left of the turtle (absolute, so turtle/rabbit stay centred on the
                       split). Shown on BOTH tabs: it stops time everywhere. */}
                   <button className={`time-btn ${timePaused ? 'paused' : 'running'}`}
@@ -2445,7 +2440,7 @@ export default function GlassViewer() {
                     display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
                     fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
                     color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 101
+                  }}>Field Test Version 103
                     {/* Quality: set by the startup speed test (bonds' benchmark), auto-adjusted at
                         runtime; a manual pick becomes the ceiling. */}
                     <select value={quality} onChange={e => pickQuality(e.target.value)}
@@ -2487,20 +2482,21 @@ export default function GlassViewer() {
                     </div>
                   </div>
                   {/* Second line: heat/cool buttons + readouts (flexBasis 100% forces a wrap) */}
-                  <div style={{ flexBasis:'100%', height:10 }} />
+                  <div style={{ flexBasis:'100%', height:20 }} />
                   {/* Heat/cool buttons, then the readouts right next to them */}
                   <button className={`action-btn test-btn${meltHeatMode==='slow'?' active':''}`}
-                    disabled={heatLocked} title={heatLocked ? 'Cooling is one-way — press Reset Cold to heat again' : undefined}
+                    disabled={heatLocked || meltLocalTemp >= 1800} title={heatLocked ? (coolLocked ? 'Cooling is one-way — press Reset Cold to heat again' : 'Heating can’t be paused or changed once started — press Reset Cold to start over') : meltLocalTemp >= 1800 ? 'Already at 1800°C' : undefined}
                     style={{padding:'3px 9px', fontSize:11}} onClick={() => toggleMeltHeat('slow')}>Slow Heat</button>
                   <button className={`action-btn test-btn${meltHeatMode==='fast'?' active':''}`}
-                    disabled={heatLocked} title={heatLocked ? 'Cooling is one-way — press Reset Cold to heat again' : undefined}
+                    disabled={heatLocked || meltLocalTemp >= 1800} title={heatLocked ? (coolLocked ? 'Cooling is one-way — press Reset Cold to heat again' : 'Heating can’t be paused or changed once started — press Reset Cold to start over') : meltLocalTemp >= 1800 ? 'Already at 1800°C' : undefined}
                     style={{padding:'3px 9px', fontSize:11}} onClick={() => toggleMeltHeat('fast')}>Fast Heat</button>
-                  {/* Cool: the first speed pressed is the committed run — it stays clickable to
-                      stop/resume (even below the start gate once paused), the other is locked. */}
+                  {/* Cool: one press starts the run and greys both out (no pause, no speed switch);
+                      available once heating has finished and the melt is hot enough. */}
                   {['slow', 'fast'].map(m => {
-                    const off = coolLocked ? coolLocked !== m : meltLocalTemp < COOL_MIN_TEMP
-                    const why = coolLocked ? 'One cooling run at a time — press Reset Hot to change speed'
-                                           : `Heat to ${COOL_MIN_TEMP}°C first`
+                    const off = !!coolLocked || meltHeatMode !== null || meltLocalTemp < COOL_MIN_TEMP
+                    const why = coolLocked ? 'Cooling can’t be paused or changed once started — press Reset Hot to cool again'
+                              : meltHeatMode !== null ? 'Heating in progress — Cool is available once it reaches 1800°C'
+                                                      : `Heat to ${COOL_MIN_TEMP}°C first`
                     return (
                       <button key={m} className={`action-btn reset-btn${coolingMode===m?' active':''}`}
                         disabled={off} title={off ? why : undefined}
@@ -2516,7 +2512,7 @@ export default function GlassViewer() {
                       placeholder="°C"
                       style={{ width:68, padding:'3px 5px', fontSize:12, textAlign:'right', border:'1px solid rgba(100,90,70,0.5)', borderRadius:3, background:'#e8e3da', color:'#2a2620' }} />
                     <button className="action-btn test-btn" style={{padding:'3px 10px', fontSize:11}} onClick={onGoTemp}
-                      disabled={!!coolLocked} title={coolLocked ? 'Cooling run in progress — press Reset Cold or Reset Hot' : undefined}>GO</button>
+                      disabled={!!coolLocked || meltHeatMode !== null} title={coolLocked ? 'Cooling run in progress — press Reset Cold or Reset Hot' : meltHeatMode !== null ? 'Heating in progress' : undefined}>GO</button>
                   </>}
                   <div className="toolbar-divider" />
                   {/* Readout labels sit ABOVE the LCDs (absolute — the toolbar height doesn't change) */}
