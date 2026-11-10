@@ -1,0 +1,8 @@
+<!-- Glass favicon: three sand grains + one soda (Na₂O) grain, Bulk Material look. Fills from
+     SAND_COLORS / the Na grain colour in v4/sandPhysics.js; outlines darkened to read at 16 px. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <polygon points="33.50,17.50 25.50,31.36 9.50,31.36 1.50,17.50 9.50,3.64 25.50,3.64" fill="#d0b060" stroke="#5e4a18" stroke-width="2.6" stroke-linejoin="round"/>
+  <polygon points="60.36,25.50 46.50,33.50 32.64,25.50 32.64,9.50 46.50,1.50 60.36,9.50" fill="#b89840" stroke="#5e4a18" stroke-width="2.6" stroke-linejoin="round"/>
+  <polygon points="31.36,54.50 17.50,62.50 3.64,54.50 3.64,38.50 17.50,30.50 31.36,38.50" fill="#c4a050" stroke="#5e4a18" stroke-width="2.6" stroke-linejoin="round"/>
+  <circle cx="46.5" cy="46.5" r="12" fill="#dceef8" stroke="#5f8fb3" stroke-width="2.6"/>
+</svg>

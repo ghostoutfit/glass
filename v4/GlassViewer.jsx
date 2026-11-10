@@ -2376,7 +2376,7 @@ export default function GlassViewer() {
               display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
               fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
               color:'rgba(90,90,90,0.85)',
-            }}>Field Test Version 109
+            }}>Field Test Version 110
               {/* Quality: set by the startup speed test (bonds' benchmark), auto-adjusted at
                   runtime; a manual pick becomes the ceiling. */}
               <select value={quality} onChange={e => pickQuality(e.target.value)}
