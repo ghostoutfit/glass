@@ -10,7 +10,7 @@
 // remaining steps with the same driver the live ramps use (meltRamp.js).
 import { initPhysics, buildRigidBondMap, stepPhysics, setCoolBondScale, ENERGY_UNIT } from './meltPhysics.js'
 import { buildGrid, buildAllAtoms } from './meltGrid.js'
-import { heatCap, energyContent, coolEnergyContent, coolTempForContent, FAST_COOL_FRAMES, SLOW_COOL_FRAMES, BASE_STEPS_PER_SEC } from './meltRamp.js'
+import { heatCap, energyContent, coolEnergyContent, coolTempForContent, coolFrames, BASE_STEPS_PER_SEC } from './meltRamp.js'
 
 export const TRACK_EVERY = 40   // steps between stored states → a catch-up runs at most this many
 const HEAT_POWER  = 200          // °C·heat-capacity per wall-second at Fast Heat (GlassViewer baseRate × input 100%)
@@ -89,7 +89,7 @@ export function heatStep(phys, st, P) {      // st = { T }
 // Cooling (cm 'fast' | 'slow') from T_TOP: frame f → temperature through the cooling latent-heat
 // curve (CompositionView's formula), "longer cooled bonds" latch included.
 export function coolTempAt(f, kind, P, Tstart = T_TOP) {
-  const slow = kind === 'slow', dur = slow ? SLOW_COOL_FRAMES : FAST_COOL_FRAMES
+  const slow = kind === 'slow', dur = coolFrames(kind, P.na2o)
   const t = Math.min(1, f / dur)
   const eTop = energyContent(Tstart, P.na2o, P.plateau), cTop = coolEnergyContent(Tstart, slow, P.na2o)
   const scale = cTop > 0 ? eTop / cTop : 1
@@ -105,7 +105,7 @@ export function coolStep(phys, st, kind, P) {   // st = { f }
 // First cooling frame at or below temperature T (the live run may have started below 1800; the
 // state is matched by temperature on the standard run).
 export function coolFrameForTemp(T, kind, P) {
-  const dur = kind === 'slow' ? SLOW_COOL_FRAMES : FAST_COOL_FRAMES
+  const dur = coolFrames(kind, P.na2o)
   for (let f = 0; f <= dur; f++) if (coolTempAt(f, kind, P) <= T) return f
   return dur
 }
@@ -124,7 +124,7 @@ export function stepTrackGen(G, maxSteps = 20) {
       if (G.steps % TRACK_EVERY === 0 || G.st.T >= T_TOP) G.tracks.heat.push({ T: G.st.T, snap: snapshotFull(G.phys, 1) })
       if (G.st.T >= T_TOP) { G.top = G.tracks.heat[G.tracks.heat.length - 1].snap; G.stage = 'fast'; startCool(G) }
     } else {
-      const kind = G.stage, dur = kind === 'slow' ? SLOW_COOL_FRAMES : FAST_COOL_FRAMES
+      const kind = G.stage, dur = coolFrames(kind, G.P.na2o)
       coolStep(G.phys, G.st, kind, G.P)
       const scale = G.P.longerBonds ? 1 + 0.1 * Math.max(0, Math.min(1, (T_TOP - G.st.T) / 300)) : 1
       if (G.st.f % TRACK_EVERY === 0 || G.st.f >= dur) G.tracks[kind].push({ f: G.st.f, T: G.st.T, snap: snapshotFull(G.phys, scale) })

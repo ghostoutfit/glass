@@ -106,13 +106,19 @@ tier: ≤ 8 ms hires · 8–13 detailed · > 13 simple (bonds' > 40 ms "low" map
 Measured: 1× → hires (trail 2.7 ms), 4× → detailed (10.2), 8× → simple (22.1). Runtime adaptation
 (bonds' algorithm and constants: median of 40 frame-WORK samples from both tabs, down at > 0.9×budget,
 up at < 0.4× (0.15× into hires), 2.5 s cooldown, 12 s anti-flap lock, ceiling = startup verdict or the
-user's pick). Dropdown sits after the FIELD TEST VERSION tag. Console: `perfReport()`,
+user's pick). Dropdown sits after the FIELD TEST VERSION tag, both pinned in the toolbar's top-right
+corner with the day/night toggle right-aligned under them (always visible; the tag used to hang off
+the right of the tabs and auto-hide when it didn't fit). Toolbar, left → right: Visuals (2×2 grid,
+`order:-1`, fixed 170 px), then the presets + Reset Cold / Hot (in the flow, so the centred tabs
+account for them) over the Heat / Cool row + LCDs, then the tabs (caps, 16 px) centred in the
+remaining space with pause / turtle / rabbit hanging under their split. Checked clear of overlaps
+at 1280 / 1366 / 1500 px. Console: `perfReport()`,
 `setAutoQuality(false)`, `window._perfLog = true` to log tier changes.
 
 ## Bulk ↔ Particles matching (v4, `bulkMelt.js` + `glassTemps.js` COOL_BAND)
 
 - **Heating — one curve.** `PARTICLE_MELT_CURVE` (bulkMelt.js) is the Particles tab's broken-bond
-  fraction fBroken(T) ÷ its end value (`PARTICLE_FB_END` 0.41), measured in-app (High Na₂O, Fast +
+  fraction fBroken(T) ÷ its end value (`PARTICLE_FB_END` 0.41), measured in-app (Na₂O + SiO₂, Fast +
   Slow Heat × 2 runs, 50 °C bins; Fast and Slow agree to ±0.05). `macroMeltTarget(T)` = that curve
   (shifted by the dev slider "Bulk melt lead / lag", `setBulkMeltLead`); ≥ 99.5 % → 1 so the end of
   heating is fully melted. **Re-measure after retuning particle melt physics** (scratchpad
@@ -910,19 +916,21 @@ module mutable. Pure SiO₂ stays flat at 1, so it has no latent-heat plateau at
 
 **Graph x-axis: time by default, energy on click.** Clicking the x-axis label ("time (s) ⇄")
 toggles `graphUiRef.current.xMode` ('time' | 'energy'; kept across resets). Each graph point is
-`{e, t, s}`; `s` is the trip clock `graphClockRef`, which starts at the trip's first Heat / Cool
-press (`historyArmedRef`), stands still while time is stopped, and stops `END_HOLD_S` (3 s) after
+`{e, t, s}`; `s` is the run clock `graphClockRef`. **Each Heat / Cool press starts a fresh graph**
+(the `historyRun` bump also clears the curve, the clock and the marker lines — a cool is its own
+graph, not the second half of the heat's). The clock runs inside a run (`historyArmedRef`), stands still while time is stopped, and stops `END_HOLD_S` (3 s) after
 reaching 0 / 1800 °C (a long wait doesn't squash the curve). It advances at the RAMPS' pace, not
 raw frame time: heating by `min(elapsed, 0.05)` (the GlassViewer integrator's clamp), cooling by
 `rampAdvance / (BASE_STEPS_PER_SEC · speed)` — so slopes are the true rates on any machine
 (measured: graph 26.7 s vs wall 26.6 s for a mix Fast Heat). Axis = `GRAPH_T_STEPS`, min 60 s so
 every heating run shares one scale (pure fast 9 s / slow 18 s; mix fast 27 s / slow 53 s); it
-steps up only for longer trips (mix slow heat + slow cool ≈ 139 s → 180). Heating is constant
+steps up only for longer runs (mix Slow Cool 80 s → 90). Heating is constant
 power, so its time curve is the energy curve stretched: pure SiO₂ = straight lines (fast vs slow
 differ only in slope); the mix bends at 500–750 °C (heat capacity ×4 above). Cooling removes energy
-linearly over a FIXED duration (270 / 1440 steps → 15 / 80 s at speed 0.3) whatever the
-composition, so its time curve shows the latent-heat shelf (1100 → 500 °C) but a pure and a mix
-cool take the same time. Replay frames carry `s` too (the replay ring sits on the time curve).
+linearly over a fixed duration, `coolFrames(kind, na2o)` in meltRamp.js: 270 / 1440 steps (15 / 80 s
+at speed 0.3) for any Na₂O; pure SiO₂'s Slow Cool is halved (`PURE_SLOW_COOL_SPEEDUP` 2 → 40 s; no latent heat,
+its grains never melt), its Fast Cool stays 15 s. The live ramp and the catch-up worker both use it. The mix's time curve
+shows the latent-heat shelf (1100 → 500 °C). Replay frames carry `s` too (the replay ring sits on the time curve).
 `window.graphHistory()` returns the points.
 
 **All ramps interpolate linearly in energy content**, not temperature
@@ -1139,7 +1147,7 @@ been **deleted**. `renderer.js` is the only renderer.
 
 ## Presets
 
-Only two: **Pure SiO₂** (100/0/0, 1800 sand grains) and **High Na₂O** (70/30/0, 2250 grains).
+Only two: **Pure SiO₂** (100/0/0, 1800 sand grains) and **Na₂O + SiO₂** (button label; was "High Na₂O"; id `soda`, 70/30/0, 2250 grains).
 Soda-lime exists in the physics but not as a preset button.
 
 ## Tab contract — read before touching either RAF loop

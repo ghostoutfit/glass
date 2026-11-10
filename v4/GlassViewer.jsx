@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
-import CompositionView from './CompositionView'
+import CompositionView, { GRAPH_PAD, GRAPH_TIME_COL } from './CompositionView'
 import { initParticles, stepPhysics, stepFloorPhysics, PARTICLE_R, FIXED_DT, T_RIGID, freezeParticles, syncParticlesToRigidBody, stepRigidBody } from './glassPhysics.js'
 import { setSioHotMult, setFreeAttractSiOMult, setSioExclMult, setCrystJiggleMult, setBreakStrain, setReformStrain, setCrystAnchorK, setLiberateFrac, setSioK, setNaOK, setNaAnchorK, setNaLiberateFrac, setNaBreakStrain, setLatticeSpeedMult, setFreedSpeedMult, setReintBondN, setReintFrameM, setBreakStrainSpread, setSevTriggerDist, setGrainFeedback, setCoolStrainScaled, setCoolHoldBonds, setBondLockTemp, setBondHyst, setCrystTemplate, setTemplK, setTemplHi, setTemplReint, setFeedbackGainMult, setSiSiRepR0, setMotifStrength, setMotifAlign, setBondStiffMult, setFreedTau, setNaNaRepR0, setSevCooldown, setSevPullK } from './meltPhysics.js'
 import { setVisualScale, setMaxDpr, effectiveDpr, setMotionCold, setMotionFullT, QTY_COLORS, ENERGY_KJ_MULT } from './renderer.js'
@@ -133,7 +133,7 @@ function GlassAtomIcon({ type, iconR, showCharge = false, darkMode = true }) {
 
 const PRESETS = [
   { id: 'pure', label: 'Pure SiO₂', sio2: 100, na2o: 0,  cao: 0, nGrains: 1800 },
-  { id: 'soda', label: 'High Na₂O', sio2: 70,  na2o: 30, cao: 0, nGrains: 2250 },
+  { id: 'soda', label: 'Na₂O + SiO₂', sio2: 70,  na2o: 30, cao: 0, nGrains: 2250 },
 ]
 
 const BOX_SIZE    = 320
@@ -560,9 +560,7 @@ const qualityCaps = tier => QUALITY[tier] ?? QUALITY[QUALITY_DEFAULT]
 
 export default function GlassViewer() {
   const [darkMode,   setDarkMode]   = useState(true)
-  const [verTagFits, setVerTagFits] = useState(true)   // build marker visible only if it fits
   const tabGroupRef = useRef(null)
-  const verTagRef   = useRef(null)
   const toolbarRef  = useRef(null)
   const [showGraph, setShowGraph] = useState(true)   // energy graph panel (both tabs)
   const [showCount, setShowCount] = useState(true)   // bond-count table (Particles tab only) — shown above the graph
@@ -570,7 +568,18 @@ export default function GlassViewer() {
   const graphCanvasRef  = useRef(null)
   // Graph interaction: raw pointer state written here, resolved + drawn by CompositionView's
   // drawTEGraph (it owns the curve data). mouse = hover point; clicks = queued click points.
-  const graphUiRef      = useRef({ mouse: null, clicks: [], markers: [] })
+  const graphUiRef      = useRef({ mouse: null, clicks: [], markers: [], xMode: 'time' })
+  // Graph x-axis: 'time' (default) | 'energy', picked from the dropdown on the x-axis label.
+  const [graphXMode, setGraphXMode]       = useState('time')
+  const [graphMenuOpen, setGraphMenuOpen] = useState(false)
+  const graphMenuRef = useRef(null)
+  graphUiRef.current.xMode = graphXMode
+  useEffect(() => {   // click anywhere outside the open menu closes it
+    if (!graphMenuOpen) return
+    const close = e => { if (!graphMenuRef.current?.contains(e.target)) setGraphMenuOpen(false) }
+    document.addEventListener('mousedown', close)
+    return () => document.removeEventListener('mousedown', close)
+  }, [graphMenuOpen])
   const graphXMaxRef    = useRef(5000)
   const graphDragRef    = useRef(null)   // { startX, startXMax } while dragging
   const [showCharge, setShowCharge] = useState(false)
@@ -988,23 +997,6 @@ export default function GlassViewer() {
   // Load the bundled candidate states for the active preset (instant catch-up, no generation).
   useEffect(() => { bulkCandidatesRef.current = BULK_CANDIDATES[presetId] ?? [] }, [presetId])
 
-  // Build marker: show it only when it fits to the right of the tab buttons without
-  // running past the toolbar's right edge. The marker is absolutely positioned, so it is
-  // always laid out (visibility toggles, layout doesn't) — its measured right edge is the
-  // same whether shown or hidden, so this can't oscillate.
-  useEffect(() => {
-    const measure = () => {
-      const tag = verTagRef.current, host = toolbarRef.current
-      if (!tag || !host) return
-      const t = tag.getBoundingClientRect(), h = host.getBoundingClientRect()
-      setVerTagFits(t.right <= h.right - 6)
-    }
-    measure()
-    const raf = requestAnimationFrame(measure)   // re-measure once fonts/layout settle
-    const ro = new ResizeObserver(measure)
-    if (toolbarRef.current) ro.observe(toolbarRef.current)
-    return () => { cancelAnimationFrame(raf); ro.disconnect() }
-  }, [tab])
 
   // dev mode: type "dev" to toggle
   useEffect(() => {
@@ -2377,6 +2369,48 @@ export default function GlassViewer() {
           <div className="panel-bolt" style={{ bottom:9, left:9  }} />
           <div className="panel-bolt" style={{ bottom:9, right:9 }} />
 
+          {/* Top-right corner (beside the bolt, above the tab row): build marker + quality menu, and
+              the day/night toggle right-aligned under the menu. Always visible, never in the way. */}
+          <div style={{ position:'absolute', top:5, right:26, zIndex:1, display:'flex', flexDirection:'column', alignItems:'flex-end', gap:5 }}>
+            <span style={{
+              display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
+              fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
+              color:'rgba(90,90,90,0.85)',
+            }}>Field Test Version 109
+              {/* Quality: set by the startup speed test (bonds' benchmark), auto-adjusted at
+                  runtime; a manual pick becomes the ceiling. */}
+              <select value={quality} onChange={e => pickQuality(e.target.value)}
+                title={(() => { const st = detectPerformanceTier(); return `Speed test: gradient ${st.grad?.toFixed(1)} ms, trail ${st.trail?.toFixed(1)} ms → ${st.tier ?? 'n/a'}${st.low ? ' (very slow machine)' : ''}. Adjusts automatically; your pick is the ceiling.` })()}
+                style={{ pointerEvents:'auto', marginLeft:8, fontSize:10, fontWeight:700, letterSpacing:'0.04em',
+                  textTransform:'uppercase', fontFamily:'inherit', cursor:'pointer', padding:'1px 2px', borderRadius:3,
+                  background:'rgba(255,255,255,0.18)', color: detectPerformanceTier().low && quality === 'simple' ? 'rgba(170,40,30,0.9)' : 'rgba(70,70,70,0.9)',
+                  border: detectPerformanceTier().low && quality === 'simple' ? '1px solid rgba(190,60,50,0.55)' : '1px solid rgba(90,90,90,0.35)' }}>
+                {detectPerformanceTier().tier !== 'simple' && <option value="hires">Hi-res</option>}
+                <option value="detailed">Detailed</option>
+                <option value="simple">Simple</option>
+              </select>
+            </span>
+            <div style={{ display:'flex', alignItems:'center', gap:6 }}>
+              <span style={{fontSize:15, lineHeight:1, userSelect:'none', color:'#ffc020', display:'inline-block', width:18, textAlign:'center'}}>
+                {darkMode ? '☽' : '☀'}
+              </span>
+              <div onClick={() => setDarkMode(f => !f)} style={{
+                width:36, height:20, borderRadius:10, cursor:'pointer',
+                background: darkMode ? 'rgba(140,180,255,0.25)' : 'rgba(255,200,40,0.35)',
+                border:     darkMode ? '1px solid rgba(140,180,255,0.4)' : '1px solid rgba(200,150,20,0.45)',
+                position:'relative', transition:'background 0.2s, border-color 0.2s', flexShrink:0,
+              }}>
+                <div style={{
+                  width:14, height:14, borderRadius:7,
+                  background: darkMode ? '#a0c0ff' : '#ffc020',
+                  position:'absolute', top:2, left: darkMode ? 2 : 18,
+                  transition:'left 0.2s, background 0.2s',
+                  boxShadow: darkMode ? '0 0 6px rgba(160,200,255,0.9)' : '0 0 6px rgba(255,180,0,0.9)',
+                }} />
+              </div>
+            </div>
+          </div>
+
           {/* Scrub slider — pinned at bottom of toolbar, melt tab only */}
           {tab === 'melt' && (
             <div style={{ position:'absolute', bottom:7, left:50, right:50, display:'flex', alignItems:'center', gap:6 }}>
@@ -2400,7 +2434,7 @@ export default function GlassViewer() {
           )}
 
           {/* Action row */}
-          <div ref={toolbarRef} style={{ display:'flex', alignItems:'flex-start', gap:4, paddingLeft:6, paddingRight:6, marginBottom:-8 }}>   {/* −8 cancels the heat row's extra 10px drop in the toolbar's vertical centring, so the top row stays put */}
+          <div ref={toolbarRef} style={{ display:'flex', alignItems:'flex-start', gap:4, paddingLeft:6, paddingRight:6, marginBottom:-18 }}>   {/* −18: tuned so the toolbar's vertical centring puts the presets/tabs row at y 52 and the heat row at ~104 (each px here shifts the content ½ px) */}
             {/* Left/center: two-row layout */}
             <div style={{ flex:1, display:'flex', flexDirection:'column', gap:3, minWidth:0 }}>
 
@@ -2408,16 +2442,20 @@ export default function GlassViewer() {
               <div style={{ display:'flex', alignItems:'center', gap:4, minWidth:0, flexWrap:'wrap' }}>
                 {/* Tab buttons — centered in the row (presets sit at the left via order:-1) */}
                 <div ref={tabGroupRef} style={{ display:'flex', gap:2, marginLeft:'auto', marginRight:'auto', position:'relative' }}>
-                  {/* Replay (turtle / rabbit) hangs centred under the split between the two tab
-                      buttons: anchored to the first tab's right edge (+1px = half the 2px gap) and
-                      dropped to the second toolbar line. Absolute, so it never resizes either row. */}
+                  {/* Replay (turtle / rabbit) + pause hang under the split between the two tab buttons:
+                      anchored to the first tab's right edge (+1px = half the 2px gap) and dropped to the
+                      second toolbar line, then shifted left one button-step (60px = rabbit 54 + pause's
+                      6px margin) so PAUSE sits where the rabbit used to be. Absolute, so it never resizes
+                      either row, and the tab split never moves → nothing here moves between tabs. */}
                   <span style={{ position:'relative', display:'inline-flex' }}>
                     <button className={`tab-btn ${tab==='melt'?'active':''}`}  onClick={() => setTab('melt')}>Particles and Fields</button>
-                    <div style={{ position:'absolute', left:'calc(100% + 1px)', top:'calc(100% + 30px)', transform:'translateX(-50%)', display:'flex', gap:4, zIndex:1 }}>
-                  {/* Pause — just left of the turtle (absolute, so turtle/rabbit stay centred on the
-                      split). Shown on BOTH tabs: it stops time everywhere. */}
+                    <div style={{ position:'absolute', left:'calc(100% + 1px)', top:'calc(100% + 30px)', transform:'translateX(calc(-50% - 60px))', display:'flex', gap:4, zIndex:1 }}>
+                  {/* Pause — just RIGHT of the rabbit (turtle, rabbit, pause). Absolute, so turtle/rabbit stay
+                      centred on the tab split; and since that split never moves, neither does pause when
+                      switching tabs (turtle/rabbit are only hidden on Bulk, never removed). Shown on BOTH
+                      tabs: it stops time everywhere. */}
                   <button className={`time-btn ${timePaused ? 'paused' : 'running'}`}
-                    style={{position:'absolute', right:'100%', marginRight:6, top:0, bottom:0, width:58, padding:0, fontSize:13}}
+                    style={{position:'absolute', left:'100%', marginLeft:6, top:0, bottom:0, width:58, padding:0, fontSize:13}}
                     disabled={historyGap && !timePaused && tab === 'melt'}
                     title={timePaused ? 'GO — resume time' : 'Pause — stop time'}
                     onClick={() => setTimePaused(p => !p)}>{timePaused ? '▶ GO' : '❙ ❙'}</button>
@@ -2432,28 +2470,6 @@ export default function GlassViewer() {
                     </div>
                   </span>
                   <button className={`tab-btn ${tab==='glass'?'active':''}`} onClick={() => setTab('glass')}>Bulk Material</button>
-                  {/* Build marker, pinned to the right of "Bulk Material". Absolutely positioned so
-                      it never shifts the centered tab pair; hidden by the effect when the toolbar
-                      is too narrow to fit it (see verTagFits ResizeObserver). */}
-                  <span ref={verTagRef} style={{
-                    position:'absolute', left:'100%', top:0, bottom:0, marginLeft:8,
-                    display:'flex', alignItems:'center', whiteSpace:'nowrap', pointerEvents:'none',
-                    fontSize:9, fontWeight:700, letterSpacing:'0.04em', textTransform:'uppercase',
-                    color:'rgba(90,90,90,0.85)', visibility: verTagFits ? 'visible' : 'hidden',
-                  }}>Field Test Version 103
-                    {/* Quality: set by the startup speed test (bonds' benchmark), auto-adjusted at
-                        runtime; a manual pick becomes the ceiling. */}
-                    <select value={quality} onChange={e => pickQuality(e.target.value)}
-                      title={(() => { const st = detectPerformanceTier(); return `Speed test: gradient ${st.grad?.toFixed(1)} ms, trail ${st.trail?.toFixed(1)} ms → ${st.tier ?? 'n/a'}${st.low ? ' (very slow machine)' : ''}. Adjusts automatically; your pick is the ceiling.` })()}
-                      style={{ pointerEvents:'auto', marginLeft:8, fontSize:10, fontWeight:700, letterSpacing:'0.04em',
-                        textTransform:'uppercase', fontFamily:'inherit', cursor:'pointer', padding:'1px 2px', borderRadius:3,
-                        background:'rgba(255,255,255,0.18)', color: detectPerformanceTier().low && quality === 'simple' ? 'rgba(170,40,30,0.9)' : 'rgba(70,70,70,0.9)',
-                        border: detectPerformanceTier().low && quality === 'simple' ? '1px solid rgba(190,60,50,0.55)' : '1px solid rgba(90,90,90,0.35)' }}>
-                      {detectPerformanceTier().tier !== 'simple' && <option value="hires">Hi-res</option>}
-                      <option value="detailed">Detailed</option>
-                      <option value="simple">Simple</option>
-                    </select>
-                  </span>
                 </div>
 
                 {/* Shared controls — identical position on both tabs: presets, tabs (above),
@@ -2467,10 +2483,11 @@ export default function GlassViewer() {
                         onClick={() => switchPreset(preset.id)}
                       >{preset.label}</button>
                     ))}
-                    {/* Reset — the same hard reset as picking a composition, for the current one.
-                        Absolutely positioned (like the version tag) so adding it doesn't change the
-                        preset group's width and nudge the centered tab buttons. */}
-                    <div style={{ position:'absolute', left:'100%', marginLeft:8, display:'flex', gap:3 }}>
+                    {/* Reset Cold / Hot — the same hard reset as picking a composition, for the current
+                        one. In the flow (not absolute) so the centred tab buttons account for them —
+                        absolute, the tabs could slide over them on narrower screens. Same on both
+                        tabs, so the tab positions still never shift when switching. */}
+                    <div style={{ marginLeft:5, display:'flex', gap:3 }}>
                       <button className="preset-btn" style={{ whiteSpace:'nowrap' }}
                         title="Reset to 0 °C: cold solid; particles, rotation and graph start over"
                         onClick={() => switchPreset(presetIdRef.current, MELT_START_TEMP)}
@@ -2559,36 +2576,17 @@ export default function GlassViewer() {
 
             </div>
 
-            {/* Right: day/night + visuals buttons. Fixed width = widest state (Graph/Charge/Field)
-                so the column never reflows between tabs — this keeps the night toggle, the
-                "Visuals" label, and (because the left flex:1 column then stays put) the tab
-                buttons all in exactly the same place when switching tabs. */}
-            <div style={{flexShrink:0, width:196, display:'flex', flexDirection:'column', alignItems:'center', gap:3}}>
+            {/* Far LEFT (order −1): visuals buttons. Fixed width (the 2×2 grid is the same size on
+                both tabs) so the column never reflows between tabs — the "Visuals" label and
+                (because the flex:1 column then stays put) the tab buttons stay in exactly the same
+                place when switching tabs. (Day/night lives top-right, under the quality menu.) */}
+            <div style={{flexShrink:0, width:170, order:-1, marginRight:12, display:'flex', flexDirection:'column', alignItems:'center', gap:3}}>
               <span style={{fontSize:11, fontWeight:700, letterSpacing:'0.09em', textTransform:'uppercase', color:'rgba(30,45,60,0.65)'}}>Visuals</span>
-              {/* Light toggle sits to the LEFT of the 2×2 grid. The grid ALWAYS renders two rows —
-                  on Bulk the empty cells are hidden placeholder buttons — so the header height is
-                  identical on both tabs (it no longer grows on Particles). Positions stay stable:
+              {/* The grid ALWAYS renders two rows — on Bulk the empty cells are hidden placeholder
+                  buttons — so the header height is identical on both tabs. Positions stay stable:
                      [ Count ] [ Charge ]   →Bulk  [ Graph ] [ Rotate ]   ← one row, centred vertically
-                     [ Graph ] [ Field  ]                                    on the 2-row block (level
-                                                                             with the light toggle)  */}
-              <div style={{display:'flex', alignItems:'center', gap:10, transform:'translateX(-50px)'}}>
-                <span style={{fontSize:15, lineHeight:1, userSelect:'none', color:'#ffc020', display:'inline-block', width:18, textAlign:'center'}}>
-                  {darkMode ? '☽' : '☀'}
-                </span>
-                <div onClick={() => setDarkMode(f => !f)} style={{
-                  width:36, height:20, borderRadius:10, cursor:'pointer', marginRight:4,
-                  background: darkMode ? 'rgba(140,180,255,0.25)' : 'rgba(255,200,40,0.35)',
-                  border:     darkMode ? '1px solid rgba(140,180,255,0.4)' : '1px solid rgba(200,150,20,0.45)',
-                  position:'relative', transition:'background 0.2s, border-color 0.2s', flexShrink:0,
-                }}>
-                  <div style={{
-                    width:14, height:14, borderRadius:7,
-                    background: darkMode ? '#a0c0ff' : '#ffc020',
-                    position:'absolute', top:2, left: darkMode ? 2 : 18,
-                    transition:'left 0.2s, background 0.2s',
-                    boxShadow: darkMode ? '0 0 6px rgba(160,200,255,0.9)' : '0 0 6px rgba(255,180,0,0.9)',
-                  }} />
-                </div>
+                     [ Graph ] [ Field  ]                                    on the 2-row block  */}
+              <div style={{display:'flex', alignItems:'center', gap:10}}>
                 <div style={{display:'grid', gridTemplateColumns:'repeat(2, 78px)', gap:3}}>
                   {tab === 'glass' ? (<>
                     {/* hidden placeholders hold the two-row height; Graph + Rotate span both rows, centred */}
@@ -2782,14 +2780,52 @@ export default function GlassViewer() {
             })()}
 
             {/* Graph in sidebar */}
-            {showGraph && (
-              <canvas ref={graphCanvasRef}
-                style={{ display:'block', width:'100%', height:200, marginBottom:4 }}
-                onMouseMove={e => { const r = e.currentTarget.getBoundingClientRect(); graphUiRef.current.mouse = { x: e.clientX - r.left, y: e.clientY - r.top } }}
-                onMouseLeave={() => { graphUiRef.current.mouse = null }}
-                onClick={e => { const r = e.currentTarget.getBoundingClientRect(); graphUiRef.current.clicks.push({ x: e.clientX - r.left, y: e.clientY - r.top }) }}
-              />
-            )}
+            {showGraph && (() => {
+              // x-axis label = a dropdown (time ↔ energy), sitting exactly where drawTEGraph would put
+              // the label: centred under the plot, same bold 14px Lexend, in the axis colour.
+              const axisCol = m => m === 'time' ? GRAPH_TIME_COL[darkMode ? 'dark' : 'light'] : QTY_COLORS.energy[darkMode ? 'dark' : 'light']
+              const AXES = [['time', 'time (s)'], ['energy', 'energy added (kJ)']]
+              const font = 'bold 14px Lexend, system-ui, sans-serif'
+              const col = axisCol(graphXMode)
+              return (
+                <div style={{ position:'relative', marginBottom:4 }}>
+                  <canvas ref={graphCanvasRef}
+                    style={{ display:'block', width:'100%', height:200 }}
+                    onMouseMove={e => { const r = e.currentTarget.getBoundingClientRect(); graphUiRef.current.mouse = { x: e.clientX - r.left, y: e.clientY - r.top } }}
+                    onMouseLeave={() => { graphUiRef.current.mouse = null }}
+                    onClick={e => { const r = e.currentTarget.getBoundingClientRect(); graphUiRef.current.clicks.push({ x: e.clientX - r.left, y: e.clientY - r.top }) }}
+                  />
+                  <div ref={graphMenuRef} style={{ position:'absolute', bottom:3, left:`calc(${GRAPH_PAD.L}px + (100% - ${GRAPH_PAD.L + GRAPH_PAD.R}px) / 2)`, transform:'translateX(-50%)' }}>
+                    <button onClick={() => setGraphMenuOpen(o => !o)} title="Graph temperature against time or energy added"
+                      style={{ display:'flex', alignItems:'center', gap:6, padding:'0 4px', lineHeight:'18px', font, color:col,
+                               background:'none', border:'none', cursor:'pointer', whiteSpace:'nowrap' }}>
+                      {AXES.find(([v]) => v === graphXMode)[1]}
+                      {/* dropdown triangle, as big as the text */}
+                      <svg width="14" height="12" viewBox="0 0 14 12" aria-hidden="true" style={{ flexShrink:0 }}>
+                        <polygon points="0,1 14,1 7,12" fill={col} />
+                      </svg>
+                    </button>
+                    {graphMenuOpen && (
+                      <div role="menu" style={{ position:'absolute', bottom:'100%', left:'50%', transform:'translateX(-50%)', marginBottom:4, zIndex:5,
+                        padding:'3px 0', borderRadius:4, whiteSpace:'nowrap',
+                        background: darkMode ? 'rgba(24,22,20,0.97)' : 'rgba(248,246,241,0.98)',
+                        border: darkMode ? '1px solid rgba(255,255,255,0.22)' : '1px solid rgba(0,0,0,0.22)',
+                        boxShadow:'0 3px 12px rgba(0,0,0,0.45)' }}>
+                        {AXES.map(([v, label]) => (
+                          <button key={v} role="menuitemradio" aria-checked={v === graphXMode}
+                            onClick={() => { setGraphXMode(v); setGraphMenuOpen(false) }}
+                            style={{ display:'flex', alignItems:'center', gap:6, width:'100%', padding:'4px 12px 4px 8px', font, color:axisCol(v),
+                                     textAlign:'left', border:'none', cursor:'pointer',
+                                     background: v === graphXMode ? (darkMode ? 'rgba(255,255,255,0.10)' : 'rgba(0,0,0,0.07)') : 'none' }}>
+                            <span style={{ width:14, textAlign:'center' }}>{v === graphXMode ? '✓' : ''}</span>{label}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )
+            })()}
 
             {showDev && <>
               <div className="viz-section-title">Dev (type "dev" to hide)</div>

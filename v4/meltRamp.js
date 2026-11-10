@@ -7,6 +7,12 @@ const _win = () => (typeof window !== 'undefined' ? window : {})
 
 export const FAST_COOL_FRAMES = 270   // ~4.5 s at simSpeed 1
 export const SLOW_COOL_FRAMES = 1440  // ~24 s at simSpeed 1
+// Cool-ramp length in sim steps for this composition. Pure SiO₂'s SLOW cool runs PURE_SLOW_COOL_SPEEDUP×
+// faster (no Na₂O → no latent heat to give up, and its grains never melt); its Fast Cool is the
+// standard length. Shared by the live ramp and the catch-up worker so their cooling paths match.
+export const PURE_SLOW_COOL_SPEEDUP = 2
+export const coolFrames = (kind, na2oPct) =>
+  kind === 'slow' ? Math.round(SLOW_COOL_FRAMES / (na2oPct > 0 ? 1 : PURE_SLOW_COOL_SPEEDUP)) : FAST_COOL_FRAMES
 export const BASE_STEPS_PER_SEC = 60  // sim steps per second at simSpeed 1 (simSpeed scales this)
 
 const HC_LO = 500, HC_HI = 750

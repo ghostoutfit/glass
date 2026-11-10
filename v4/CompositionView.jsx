@@ -8,7 +8,7 @@ import { initPhysics, stepPhysics, setSiOr0,
 import { drawScene, QTY_COLORS, ENERGY_KJ_MULT, setVisualScale, findAtomNear, getVisualScale, getLastHudLines, effectiveDpr } from './renderer.js'
 import { buildGrid, buildAllAtoms } from './meltGrid.js'
 import { T as GT } from './glassTemps.js'
-import { heatCap, energyContent, coolEnergyContent, coolTempForContent, rampEnergyLinearInContent, FAST_COOL_FRAMES, SLOW_COOL_FRAMES, BASE_STEPS_PER_SEC } from './meltRamp.js'
+import { heatCap, energyContent, coolEnergyContent, coolTempForContent, rampEnergyLinearInContent, FAST_COOL_FRAMES, SLOW_COOL_FRAMES, coolFrames, BASE_STEPS_PER_SEC } from './meltRamp.js'
 import { snapshotFull, restoreFull } from './meltTrack.js'   // Particles catch-up (states computed by meltTrackWorker)
 
 
@@ -53,14 +53,16 @@ function fmtE(v) {
 // Mirrors meltHeatCapacity in GlassViewer (ramp 500→750 to a Na₂O-scaled plateau).
 const GRAPH_E_MIN = 0
 // Graph geometry (CSS px) — shared by drawing and by pointer hit-testing.
-const GRAPH_PAD = { L: 46, R: 10, T: 10, B: 30 }
+export const GRAPH_PAD = { L: 46, R: 10, T: 10, B: 30 }   // also positions GlassViewer's axis dropdown
 const GRAPH_MAX_MARKERS = 3
+export const GRAPH_TIME_COL = { dark: '#d8d8d8', light: '#333' }   // time-axis label colour
 // Time axis: fixed 60 s minimum, so every heating run (pure fast ≈ 9 s … Na₂O slow ≈ 53 s) shares
 // one scale and fast vs slow slopes compare directly; steps up only when a trip runs longer.
 const GRAPH_T_STEPS = [60, 90, 120, 180, 240, 300, 450, 600, 900, 1200, 1800, 2400, 3600]
 const graphTimeMax = s => GRAPH_T_STEPS.find(v => v >= s) ?? Math.ceil(s / 600) * 600
 // ui (optional, GlassViewer's graphUiRef.current): { mouse: {x,y}|null, clicks: [{x,y}], markers: [{t}],
-//   xMode: 'time' (default) | 'energy' }. Clicking the x-axis label toggles xMode.
+//   xMode: 'time' (default) | 'energy' }. xMode is set by GlassViewer's axis dropdown (an HTML overlay
+//   on the x-label spot — this draws everything but that label).
 // hist points: { e: graph energy, t: °C, s: trip time (s) }.
 // x = time: the trip unfolds left → right (heat up, then cool down); at constant heating power
 //   the slope is the heating rate ÷ heat capacity, so latent heat shows as a slower climb / shelf.
@@ -79,14 +81,6 @@ function drawTEGraph(canvas, hist, darkMode = true, eMax = 4e-3, targetTempLine 
 
   const tMax = 1800
   const n = hist.length
-  // x-axis mode: clicks on the x-axis label band (below the axis) toggle it before anything is drawn
-  if (ui) {
-    ui.xMode ??= 'time'
-    for (let k = ui.clicks.length - 1; k >= 0; k--) {
-      const c = ui.clicks[k]
-      if (c.y > pT + ph + 4 && c.x >= pL) { ui.xMode = ui.xMode === 'time' ? 'energy' : 'time'; ui.clicks.splice(k, 1) }
-    }
-  }
   const timeMode = !ui || ui.xMode !== 'energy'
   const sMax = graphTimeMax(n ? hist[n - 1].s ?? 0 : 0)
   const kJ  = e => Math.round(e / ENERGY_UNIT * ENERGY_KJ_MULT)   // same scale as the toolbar kJ LCD
@@ -111,10 +105,9 @@ function drawTEGraph(canvas, hist, darkMode = true, eMax = 4e-3, targetTempLine 
   ctx.fillStyle = tCol; ctx.font = "bold 14px Lexend, system-ui, sans-serif"; ctx.textAlign = 'right'; ctx.textBaseline = 'middle'
   ctx.fillText(String(tMax), pL - 4, pT + 2)
   ctx.fillText('0', pL - 4, pT + ph)
-  // x label = the axis toggle (⇄): time ↔ energy
-  const xCol = timeMode ? (darkMode ? '#d8d8d8' : '#333') : eCol
-  ctx.fillStyle = xCol; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'
-  ctx.fillText(timeMode ? 'time (s)  ⇄' : 'energy added (kJ)  ⇄', pL + pw / 2, h - 4)
+  // x label itself = GlassViewer's axis dropdown (HTML, over this spot); only the axis max is drawn
+  const xCol = timeMode ? GRAPH_TIME_COL[darkMode ? 'dark' : 'light'] : eCol
+  ctx.fillStyle = xCol; ctx.textBaseline = 'bottom'
   ctx.font = "bold 11px Lexend, system-ui, sans-serif"; ctx.textAlign = 'right'
   ctx.fillText(String(timeMode ? sMax : kJ(eMax)), pL + pw, h - 4)
   ctx.fillStyle = tCol; ctx.font = "bold 14px Lexend, system-ui, sans-serif"
@@ -232,10 +225,8 @@ function drawTEGraph(canvas, hist, darkMode = true, eMax = 4e-3, targetTempLine 
     ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.stroke()
     labelBox([timeMode ? [`${(p.s ?? 0).toFixed(1)} s`, xCol] : [`${kJ(p.e)} kJ`, eCol], ['  ·  ', textCol], [`${Math.round(p.t)} °C`, tCol]], x + 8, y - 24)
   }
-  // pointer = clickable (a line to remove, the curve to annotate, or the x label to switch axes)
-  const overXLabel = !!mo && mo.y > pT + ph + 4 && mo.x >= pL
-  canvas.style.cursor = (overMarker || best >= 0 || overXLabel) ? 'pointer' : 'default'
-  canvas.title = overXLabel ? (timeMode ? 'Click to graph against energy added' : 'Click to graph against time') : ''
+  // pointer = clickable (a line to remove, or the curve to annotate); empty space does nothing
+  canvas.style.cursor = (overMarker || best >= 0) ? 'pointer' : 'default'
 }
 
 function drawBarGraph(canvas, ke, pe, n) {
@@ -432,9 +423,15 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
   useEffect(() => { onBondCountsRef.current = onBondCounts }, [onBondCounts])
   // A new run (Heat / Go-to, then Cool) starts a fresh replay history at the button press;
   // historyRun 0 (page load / Reset) = no run yet → nothing recorded.
+  // The graph starts fresh at each press too: a new curve (and trip clock, and marker lines) from
+  // the press, so a cool is its own graph rather than the second half of the heat's.
   useEffect(() => {
     historyArmedRef.current = historyRun > 0
     endHoldRef.current = 0
+    if (historyRun > 0) {
+      histRef.current = []; graphClockRef.current = 0
+      if (graphUiRefRef.current?.current) graphUiRefRef.current.current.markers.length = 0
+    }
     replayRef.current = { frames: [], every: 2, acc: 0, lastNotify: 0 }
     if (replayInfoRefRef.current) replayInfoRefRef.current.current = replayRef.current.frames
     onReplayReadyRef.current?.(0)
@@ -1006,7 +1003,7 @@ export default function CompositionView({ sio2Pct, na2oPct, caoPct, sioR0 = 9, a
       const isRamping = cm === 'fast' || cm === 'slow' || cm === 'fastHeat' || cm === 'slowHeat'
       if (cm === 'fast' || cm === 'slow') {
         coolingFrameRef.current += rampAdvance
-        const dur = cm === 'fast' ? FAST_COOL_FRAMES : SLOW_COOL_FRAMES
+        const dur = coolFrames(cm, na2oPctRef.current)   // pure SiO₂'s Slow Cool runs 2× faster
         const t   = Math.min(1, coolingFrameRef.current / dur)   // progress; advances at a constant rate
         const slow  = cm === 'slow'
         const Tstart = coolingStartERef.current / ENERGY_UNIT - 273
